@@ -63,17 +63,28 @@ fn hash2(x: i32, y: i32) -> f32 {
 
 // ================================================================ static
 
-/// Everything that never moves. Built once at startup.
-pub fn build_static(g: &Game, decor: &Decor) -> DrawList {
-    let mut d = DrawList::default();
-    terrain(g, &mut d);
-    road(g, &mut d);
-    gates_static(g, &mut d);
-    d.append_solids(&decor.statics);
-    d
+/// Everything that never moves, split by whether it casts a shadow.
+///
+/// The ground, the road and the build pads are flat and sit *on* the ground, so
+/// their shadows land exactly where they already are - drawing sixteen hundred
+/// of them into the shadow map every frame changes nothing on screen. Only
+/// things that stand up cast: walls, gates, trees, fences, lamps.
+pub struct Statics {
+    pub casters: DrawList,
+    pub flat: DrawList,
 }
 
-fn terrain(g: &Game, d: &mut DrawList) {
+pub fn build_static(g: &Game, decor: &Decor) -> Statics {
+    let mut casters = DrawList::default();
+    let mut flat = DrawList::default();
+    terrain(g, &mut flat, &mut casters);
+    road(g, &mut flat);
+    gates_static(g, &mut casters);
+    casters.append_solids(&decor.statics);
+    Statics { casters, flat }
+}
+
+fn terrain(g: &Game, d: &mut DrawList, tall: &mut DrawList) {
     // Which tiles are build plots - they get a flat, obviously regular surface.
     let mut plot = vec![false; (BW * BH) as usize];
     for s in &g.board.slots {
@@ -133,7 +144,7 @@ fn terrain(g: &Game, d: &mut DrawList) {
                 d.slab_mat(p, [1.0, 1.0], top, top + 0.45, rgba(base, 1.0), Material::EARTH);
                 if h > 0.80 {
                     let j = hash2(tx * 7 + 3, ty * 11 + 5);
-                    d.shape(
+                    tall.shape(
                         Shape::Cone,
                         [p[0] + (j - 0.5) * 0.5, p[1] + (h - 0.5) * 0.5, top + 0.09],
                         [0.30, 0.30, 0.22],
@@ -159,8 +170,8 @@ fn terrain(g: &Game, d: &mut DrawList) {
         (-0.4, h * 0.5, 0.8, h + 1.6),
         (w + 0.4, h * 0.5, 0.8, h + 1.6),
     ] {
-        d.cube_mat([cx, cy, 0.20], [sx, sy, 0.56], 0.0, wall, Material::STONE);
-        d.cube_mat([cx, cy, 0.50], [sx * 0.99, sy * 0.99, 0.10], 0.0, cap, Material::STONE);
+        tall.cube_mat([cx, cy, 0.20], [sx, sy, 0.56], 0.0, wall, Material::STONE);
+        tall.cube_mat([cx, cy, 0.50], [sx * 0.99, sy * 0.99, 0.10], 0.0, cap, Material::STONE);
         // Coping: a capsule laid along the wall gives it a rounded top edge.
         let along = sx > sy;
         let (ax, ay, bx, by) = if along {
@@ -168,7 +179,7 @@ fn terrain(g: &Game, d: &mut DrawList) {
         } else {
             (cx, cy - sy * 0.5, cx, cy + sy * 0.5)
         };
-        d.link(
+        tall.link(
             Shape::Capsule,
             [ax, ay, 0.57],
             [bx, by, 0.57],
@@ -181,10 +192,10 @@ fn terrain(g: &Game, d: &mut DrawList) {
     // Corner towers: a stone drum with a conical roof, so the board has corners
     // you can actually see rather than four more cubes.
     for (cx, cy) in [(-0.4, -0.4), (w + 0.4, -0.4), (-0.4, h + 0.4), (w + 0.4, h + 0.4)] {
-        d.cylinder([cx, cy, 0.45], 1.10, 1.10, 0.0, rgba(theme::STONE_DARK, 1.0), Material::STONE);
-        d.cylinder([cx, cy, 1.03], 1.24, 0.14, 0.0, cap, Material::STONE);
-        d.cone([cx, cy, 1.38], 1.30, 0.62, 0.0, rgba(theme::STONE_DARK, 1.0), Material::STONE);
-        d.sphere([cx, cy, 1.74], 0.24, cap, Material::METAL);
+        tall.cylinder([cx, cy, 0.45], 1.10, 1.10, 0.0, rgba(theme::STONE_DARK, 1.0), Material::STONE);
+        tall.cylinder([cx, cy, 1.03], 1.24, 0.14, 0.0, cap, Material::STONE);
+        tall.cone([cx, cy, 1.38], 1.30, 0.62, 0.0, rgba(theme::STONE_DARK, 1.0), Material::STONE);
+        tall.sphere([cx, cy, 1.74], 0.24, cap, Material::METAL);
     }
     let _ = theme::GRASS_EDGE;
 }
@@ -648,7 +659,7 @@ mod tests {
     fn the_static_scene_fits_in_its_buffer() {
         let (g, decor) = fresh();
         let list = build_static(&g, &decor);
-        let n = list.solid_count();
+        let n = list.casters.solid_count() + list.flat.solid_count();
         assert!(n > 500, "board is suspiciously empty: {n} solids");
         assert!(n <= STATIC_CAP, "static scene overflows: {n} > {STATIC_CAP}");
     }
@@ -708,6 +719,8 @@ mod tests {
             poison: Timed::default(),
             shred: Timed::default(),
             stun: 0.0,
+            stun_dr: 0.0,
+            kb_cd: 0.0,
             regen: 0.0,
             splits: 0,
             shield: 40.0,
@@ -781,9 +794,13 @@ mod budget {
 
         let mut g = Game::new();
         let decor = Decor::build(&g.board);
-        let stat = build_static(&g, &decor);
+        let statics = build_static(&g, &decor);
+        let mut stat = DrawList::default();
+        stat.append_solids(&statics.casters);
+        stat.append_solids(&statics.flat);
+        let (cn, ct) = cost(&statics.casters);
         let (sn, st) = cost(&stat);
-        println!("STATIC   {sn:>6} inst  {st:>8} tris");
+        println!("STATIC   {sn:>6} inst  {st:>8} tris  (shadow casters: {cn} inst, {ct} tris)");
 
         // A late-game board: every pad filled and maxed, a full wave on the road.
         g.gold = 50_000_000;

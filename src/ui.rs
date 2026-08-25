@@ -134,6 +134,9 @@ pub struct UiState {
     /// The perf readout, rebuilt a few times a second rather than every frame.
     pub perf: String,
     pub perf_ticks: u32,
+    /// Frames per second to aim for. Drawing faster than the display refreshes
+    /// is pure waste - heat, fan noise and battery for pixels nobody sees.
+    pub fps_cap: u32,
     /// The strip the top bar drew into last frame, for the layout test.
     pub top_content: Rect,
     /// Where the wave / lives / gold readouts landed, and where the leftmost
@@ -161,6 +164,7 @@ impl Default for UiState {
             want_menu: false,
             perf: String::new(),
             perf_ticks: 0,
+            fps_cap: 60,
             top_content: Rect::NOTHING,
             stat_rects: Vec::new(),
             controls_left: f32::MAX,

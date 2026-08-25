@@ -815,6 +815,8 @@ dependencies = [
  "epaint",
  "ewebsock",
  "log",
+ "serde",
+ "serde_json",
  "td-proto",
  "wasm-bindgen",
  "wasm-bindgen-futures",

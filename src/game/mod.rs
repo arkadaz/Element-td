@@ -18,8 +18,27 @@ pub const START_GOLD: i64 = 260;
 pub const BUILD_TIME_FIRST: f32 = 25.0;
 pub const BUILD_TIME: f32 = 16.0;
 pub const SELL_REFUND: f32 = 0.75;
+/// How much stun resistance one stun adds, and the ceiling it climbs to.
+/// At the ceiling a stun still lands, but briefly - hard control should be
+/// strong, never absolute.
+pub const STUN_DR_STEP: f32 = 0.34;
+pub const STUN_DR_MAX: f32 = 0.85;
+/// How fast stun resistance bleeds off, per second.
+pub const STUN_DR_DECAY: f32 = 0.30;
+/// The shortest gap between two knockbacks on the same monster.
+pub const KNOCKBACK_CD: f32 = 0.75;
+
 /// Interest paid on gold in hand at the end of every wave.
 pub const INTEREST_RATE: f32 = 0.05;
+/// The most interest can ever reach, however many Treasuries are built.
+///
+/// Compound interest with no ceiling is not an economy, it is a runaway. Each
+/// Treasury used to add `0.04 * utility_scale(tier)`, which at level 10 is
+/// +23.8% *each* - four of them put the rate over 100% and gold doubled every
+/// wave. A real game reached 813 billion gold at wave 89 and, with every tower
+/// maxed forever, ran to wave 136 without difficulty. Infinite money is the
+/// same thing as no game.
+pub const INTEREST_MAX: f32 = 0.20;
 
 // ---------------------------------------------------------------- small types
 
@@ -114,6 +133,11 @@ pub struct Creep {
     pub poison: Timed,
     pub shred: Timed,
     pub stun: f32,
+    /// Resistance to further stuns, 0..[`STUN_DR_MAX`]. Grows with each stun
+    /// and decays when the target is left alone.
+    pub stun_dr: f32,
+    /// Counts down to when this monster can be shoved back again.
+    pub kb_cd: f32,
     pub regen: f32,
     pub splits: u8,
     /// Absorbs damage before health is touched (Bulwark).
@@ -432,6 +456,9 @@ pub struct Game {
     pub texts: Vec<FloatText>,
     pub fx: Fx,
     pub rng: Rng,
+    /// The seed this run was started from. Saved, so a resumed run faces the
+    /// same waves - they are generated, never stored.
+    pub seed: u64,
     pub spatial: SpatialHash,
 
     /// True once the campaign has been cleared and the run has continued.
@@ -443,6 +470,9 @@ pub struct Game {
 
     pub build_timer: f32,
     pub spawn_left: u32,
+    /// How much of the wave's escort is still to arrive.
+    pub escort_left: u32,
+    escort_timer: f32,
     pub spawn_timer: f32,
     pub time: f32,
     pub next_uid: u32,
@@ -459,6 +489,8 @@ pub struct Game {
     pub last_interest: i64,
     pub toast: Option<(String, f32)>,
     pub sound_cues: Vec<Cue>,
+    /// Raised at a wave boundary; the app writes the save and clears it.
+    pub wants_save: bool,
     /// Reused scratch buffer for spatial queries; avoids per-tower allocation.
     pub scratch: Vec<usize>,
 }
@@ -481,6 +513,7 @@ impl Game {
             texts: Vec::with_capacity(64),
             fx: Fx::default(),
             rng: Rng::new(0x5eed_1234_abcd_9876),
+            seed: 0x5eed_1234_abcd_9876,
             spatial: SpatialHash::new(),
             endless: false,
             wave: 0,
@@ -489,6 +522,8 @@ impl Game {
             lives: START_LIVES,
             build_timer: BUILD_TIME_FIRST,
             spawn_left: 0,
+            escort_left: 0,
+            escort_timer: 0.0,
             spawn_timer: 0.0,
             time: 0.0,
             next_uid: 1,
@@ -502,6 +537,7 @@ impl Game {
             last_interest: 0,
             toast: None,
             sound_cues: Vec::new(),
+            wants_save: false,
             scratch: Vec::with_capacity(256),
         }
     }
@@ -531,6 +567,7 @@ impl Game {
     pub fn start_run(&mut self, seed: u64) {
         *self = Game::new();
         self.rng = Rng::new(seed);
+        self.seed = seed;
     }
 
     /// The scoreboard line shared with the rest of the room.
@@ -572,7 +609,8 @@ impl Game {
 
     /// What interest will pay if the wave ended right now.
     pub fn projected_interest(&self) -> i64 {
-        (self.gold.max(0) as f32 * self.interest_rate()).floor() as i64
+        let earning = self.gold.clamp(0, self.interest_ceiling());
+        (earning as f64 * self.interest_rate() as f64).floor() as i64
     }
 
     /// What the Mints will pay at the end of this wave.
@@ -772,23 +810,38 @@ impl Game {
             .sum()
     }
 
-    /// Base interest plus anything a Treasury adds.
+    /// Base interest plus anything a Treasury adds, capped at [`INTEREST_MAX`].
+    ///
+    /// Deliberately *not* scaled by tier. Interest compounds, so anything that
+    /// multiplies the rate multiplies an exponential - a Treasury pays for
+    /// itself through its flat income and a modest rate bump, not by bending
+    /// the curve.
     pub fn interest_rate(&self) -> f32 {
-        INTEREST_RATE
-            + self
-                .towers
-                .iter()
-                .map(|t| {
-                    let u = t.utility();
-                    t.specials()
-                        .iter()
-                        .filter_map(|s| match *s {
-                            Special::Interest { extra } => Some(extra * u),
-                            _ => None,
-                        })
-                        .sum::<f32>()
-                })
-                .sum::<f32>()
+        let extra: f32 = self
+            .towers
+            .iter()
+            .map(|t| {
+                t.specials()
+                    .iter()
+                    .filter_map(|s| match *s {
+                        Special::Interest { extra } => Some(extra),
+                        _ => None,
+                    })
+                    .sum::<f32>()
+            })
+            .sum();
+        (INTEREST_RATE + extra).min(INTEREST_MAX)
+    }
+
+    /// The most gold that earns interest.
+    ///
+    /// Banking a wave or two of income is a real strategy and should pay. An
+    /// unbounded pile earning compound interest is an exponential with nothing
+    /// on the other side of it, so above this ceiling gold simply sits there.
+    /// The ceiling rises with the wave, so it never stops being relevant.
+    pub fn interest_ceiling(&self) -> i64 {
+        let purse = wave_clear_bonus(self.wave.max(1)) as i64;
+        (purse * 12).max(2_000)
     }
 
     /// Call the next wave now; pays a bonus for the time skipped.
@@ -816,16 +869,25 @@ impl Game {
         self.phase = Phase::Combat;
         let w = self.wave_def(self.wave);
         self.spawn_left = w.count;
+        self.escort_left = w.escort.map_or(0, |e| e.count);
         self.spawn_timer = 0.0;
+        self.escort_timer = 0.0;
         self.build_timer = 0.0;
         self.sound_cues
-            .push(if w.kind == Kind::Boss { Cue::Boss } else { Cue::WaveStart });
+            .push(if w.kind.is_boss() { Cue::Boss } else { Cue::WaveStart });
+    }
+
+    /// Runs one wave boundary's payout. Tests only.
+    #[cfg(test)]
+    pub fn end_wave_for_test(&mut self) {
+        self.end_wave();
     }
 
     fn end_wave(&mut self) {
         let bonus = wave_clear_bonus(self.wave) as i64;
         // Interest rewards holding gold, exactly like the original.
-        let interest = (self.gold.max(0) as f32 * self.interest_rate()).floor() as i64;
+        let earning = self.gold.clamp(0, self.interest_ceiling());
+        let interest = (earning as f64 * self.interest_rate() as f64).floor() as i64;
         let income = self.tower_income();
         for i in 0..self.towers.len() {
             let u = self.towers[i].utility();
@@ -851,6 +913,9 @@ impl Game {
         }
         self.phase = Phase::Build;
         self.build_timer = BUILD_TIME;
+        // A wave boundary is the only moment worth checkpointing: nothing is in
+        // flight, so a resumed run never starts mid-projectile.
+        self.wants_save = true;
     }
 
     // ------------------------------------------------ update
@@ -913,7 +978,11 @@ impl Game {
         combat::step_projectiles(self, dt);
         self.step_zones(dt);
 
-        if self.phase == Phase::Combat && self.spawn_left == 0 && self.creeps.is_empty() {
+        if self.phase == Phase::Combat
+            && self.spawn_left == 0
+            && self.escort_left == 0
+            && self.creeps.is_empty()
+        {
             self.end_wave();
         }
     }
@@ -965,18 +1034,39 @@ impl Game {
     }
 
     fn spawn_step(&mut self, dt: f32) {
-        if self.spawn_left == 0 {
+        if self.spawn_left == 0 && self.escort_left == 0 {
             return;
         }
+        let w = self.wave_def(self.wave);
+
         self.spawn_timer -= dt;
         while self.spawn_left > 0 && self.spawn_timer <= 0.0 {
-            let w = self.wave_def(self.wave);
             self.spawn_creep(&w, w.hp, 1.0, 0.0);
             self.spawn_left -= 1;
             self.spawn_timer += w.gap.max(0.05);
             if w.gap <= 0.0 {
                 break;
             }
+        }
+
+        // The escort arrives on its own clock, spread across the same window,
+        // so the two types are genuinely mixed rather than queued one after the
+        // other - which would just be two easier waves.
+        let Some(e) = w.escort else { return };
+        self.escort_timer -= dt;
+        while self.escort_left > 0 && self.escort_timer <= 0.0 {
+            let mut sub = w;
+            sub.kind = e.kind;
+            sub.speed = kind_speed(e.kind);
+            sub.shield = 0.0;
+            sub.heal = if e.kind == Kind::Mender { w.heal } else { 0.0 };
+            sub.phasing = e.kind == Kind::Phaser;
+            sub.split = false;
+            sub.escort = None;
+            self.spawn_creep(&sub, e.hp, 1.0, 0.0);
+            self.escort_left -= 1;
+            let span = (w.gap.max(0.05) * w.count as f32).max(2.0);
+            self.escort_timer += (span / e.count as f32).max(0.12);
         }
     }
 
@@ -1007,6 +1097,8 @@ impl Game {
             poison: Timed::default(),
             shred: Timed::default(),
             stun: 0.0,
+            stun_dr: 0.0,
+            kb_cd: 0.0,
             regen: if w.regen { hp * 0.02 } else { 0.0 },
             splits: if w.split { 1 } else { 0 },
             shield,
@@ -1056,7 +1148,12 @@ impl Game {
                 c.bob += dt * 6.0;
                 if c.stun > 0.0 {
                     c.stun -= dt;
+                } else {
+                    // Resistance only bleeds off while the target is actually
+                    // free to move, so chain-stunning never resets it.
+                    c.stun_dr = (c.stun_dr - STUN_DR_DECAY * dt).max(0.0);
                 }
+                c.kb_cd = (c.kb_cd - dt).max(0.0);
                 c.slow.tick(dt);
                 c.shred.tick(dt);
                 if c.burn.active() {
@@ -1180,6 +1277,7 @@ impl Game {
                 phasing: c.phasing,
                 regen: false,
                 split: false,
+                escort: None,
             };
             for k in 0..2 {
                 if self.creeps.len() >= MAX_CREEPS {

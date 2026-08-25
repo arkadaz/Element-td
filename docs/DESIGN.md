@@ -139,7 +139,7 @@ Costs round to human numbers (5s, 10s, 50s, 250s). Nobody prices a decision off
 
 ## 7. The economy
 
-Monster health grows **1.135×** per wave. Wave gold grows **1.0655×** per wave.
+Monster health grows **1.155×** per wave. Wave gold grows **1.0655×** per wave.
 
 That gap looks enormous, and it has to be. The player's board does not grow at
 the rate of their income — it grows by tower *count* and by *level* on top of
@@ -147,11 +147,19 @@ it, and damage-per-gold improves at every level. Those compound. A gap that
 "looks fair" on paper produces a game you win with 18 of 20 lives.
 
 These two numbers were not reasoned into place, they were played into place.
-`a_sensible_build_clears_the_campaign` runs a full eighty-wave campaign with a
-deliberately unsophisticated strategy — spread out, spend everything, never sell
-a mistake, never read the wave preview. At 1.135 that bot finishes with **8 of
-20 lives**. At 1.1375 it dies on wave 76. That margin is the game: a player who
-thinks has room, a player who does not runs out of lives.
+`a_sensible_build_clears_the_campaign` runs a full eighty-wave campaign and
+checks the result.
+
+The bot models **competent** play, and getting that right mattered more than the
+curve did. It first placed towers to spread evenly along the road — which is
+wrong, and losing: a monster then meets one tower at a time and survives each of
+them in turn. Concentrated fire kills, and overlapping ranges stack Beacon
+auras, so the bot now builds a **killbox**. The moment it did, it cleared the
+old curve **without losing a single life** — proof the game was too easy for
+anyone playing well, whatever the naive version had suggested.
+
+Against a killbox, 1.155 finishes with **5 of 20 lives and 15 leaks**. That is
+the number to hold.
 
 ### Gold does not all ride on kills
 
@@ -166,6 +174,19 @@ nothing in between.
 Splitting the purse fixes the shape. Falling behind still costs lives, which is
 the currency that actually matters, but it no longer quietly destroys the
 economy you need to recover with.
+
+### Escorts
+
+From wave 25 some waves bring a **second monster type**, and from wave 45 that
+escort is always on the *other layer* — a ground wave brings flyers, a flying
+wave brings walkers. Bosses gain a guard from wave 50.
+
+One type per wave means one counter always answers it and the roster stops
+mattering by the midgame. Escorts are how a wave asks two questions at once.
+
+A wave's purse is fixed, so an escort **splits** the same gold across more
+monsters rather than paying extra for them. Getting that backwards made escorted
+waves *easier* — more targets, more income, a bigger board.
 
 ### Debut waves are softened
 
@@ -192,13 +213,62 @@ consolation prize.
 - **Waves 56–80.** Nothing new is built; everything is being awakened. The
   squeeze is real and the last five waves should genuinely hurt.
 
-## 9. Endless
+## 9. Hard control is strong, never absolute
+
+Two effects could stop the game outright, and both did:
+
+- **Stuns** now diminish on repeat (each lands ~34% shorter, to a floor) and the
+  resistance only bleeds off while the target is free to move.
+- **Knockback** has a per-target cooldown of 0.75 s.
+
+Without those, a board of Frost and Grapeshot pinned a wave in place forever:
+every monster permanently frozen or shoved backwards, so nothing died, nothing
+leaked, and the wave never ended. A full campaign hung on wave 76. A control
+board should slow a wave down, not stop time.
+
+## 10. The economy cannot run away
+
+Interest is capped at **20%**, and it is paid only on gold up to a **ceiling**
+that rises with the wave.
+
+This is a bug that shipped, and it is worth stating plainly: each Treasury used
+to add `0.04 × utility_scale(tier)` to the interest rate, which at level 10 is
+**+23.8% each**, with no ceiling. Four of them put compound interest over 100%
+a wave. A real game reached **813 billion gold on wave 89**, kept everything
+maxed permanently, and coasted to wave 136. Infinite money is the same thing as
+no game.
+
+Anything that multiplies a compounding rate multiplies an exponential, so the
+Treasury bonus is no longer scaled by tier at all — a Treasury pays for itself
+through flat income and a modest rate bump.
+
+Banking a wave or two of income is a real strategy and should pay. Hoarding
+forever should not, which is what the ceiling is for.
+
+## 11. Saving
+
+The run is simulated entirely on the player's machine, so the save lives there:
+`localStorage` in the browser, a file in the OS config directory natively. The
+server stores nothing — it is sized so a gigabyte of RAM holds a thousand
+players, and per-player run state would undo that at a stroke.
+
+It is deliberately **not** keyed by IP address. An IP is not an identity: a
+phone changes it several times an hour, and everyone behind one router or one
+carrier-grade NAT shares it, so players would resume into each other's games.
+It is also personal data this needs none of.
+
+Only a seed, a wave number, a purse and one line per tower are stored — about a
+kilobyte. Waves are generated from their number, so replaying the seed
+reproduces the run exactly without storing any of it. A save is a file anyone
+can edit, so it is validated on load and refused whole rather than half-applied.
+
+## 12. Endless
 
 Clearing wave 80 is a win. The run may continue: health then climbs 7.5% a wave
 against 6.2% gold growth, a much steeper squeeze, so endless always eventually
 wins. The only question is how far.
 
-## 10. How this is kept honest
+## 13. How this is kept honest
 
 Balance arguments on paper are worth very little — the curve before this one
 looked reasonable written down and was arithmetically impossible past wave 40.
@@ -214,3 +284,9 @@ The tests play the game instead:
 | `a_full_run_is_about_an_hour` | The session length drifting |
 | `ground_towers_cannot_touch_the_air` | A mortar quietly learning to shoot upward |
 | `pyre_burns_the_road_and_only_the_road` | Area denial losing either its zone or its restriction |
+| `a_wall_of_control_towers_cannot_freeze_a_wave_forever` | Stun or knockback stopping the game outright |
+| `a_board_built_entirely_of_treasuries_cannot_run_away` | The economy compounding into infinity |
+| `interest_pays_on_a_bounded_pile` | Hoarding becoming better than spending |
+| `deep_endless_payouts_stay_finite` | Gold saturating `u32` and paying nonsense |
+| `a_run_survives_a_round_trip` | A resumed board not being the board that was saved |
+| `a_corrupt_save_is_refused_rather_than_half_applied` | An edited save producing a board the game would refuse to build |

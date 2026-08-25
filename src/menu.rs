@@ -43,6 +43,8 @@ pub struct MenuState {
     pub password: String,
     pub server: String,
     pub ready: bool,
+    /// A run waiting to be resumed, read from local storage at startup.
+    pub saved: Option<crate::save::Save>,
     /// Set after a copy button is pressed, so the button can say so.
     pub copied: f32,
 }
@@ -57,6 +59,7 @@ impl Default for MenuState {
             password: String::new(),
             server: Net::default_url(),
             ready: false,
+            saved: None,
             copied: 0.0,
         }
     }
@@ -67,6 +70,8 @@ pub enum Action {
     None,
     /// Start a local run.
     SinglePlayer,
+    /// Pick up the saved run where it left off.
+    Resume,
     /// The player left the lobby; drop back to the title screen.
     Cancelled,
 }
@@ -138,7 +143,14 @@ fn title(ui: &mut egui::Ui, m: &mut MenuState) -> Action {
     heading(ui);
 
     let mut action = Action::None;
-    if big_button(ui, "Single player", "Eighty waves. About an hour if you earn it.", pal::ACC) {
+    if let Some(save) = &m.saved {
+        let label = save.label();
+        if big_button(ui, "Continue", &label, pal::GOOD) {
+            action = Action::Resume;
+        }
+    }
+    let solo = if m.saved.is_some() { "New game" } else { "Single player" };
+    if big_button(ui, solo, "Eighty waves. About an hour if you earn it.", pal::ACC) {
         action = Action::SinglePlayer;
     }
     if big_button(

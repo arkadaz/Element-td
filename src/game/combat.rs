@@ -1,7 +1,9 @@
 //! Targeting, firing, projectile flight and damage resolution.
 
 use super::defs::*;
-use super::{Beam, FloatText, Game, Proj, ProjKind, TargetMode, TextKind, Zone};
+use super::{
+    Beam, FloatText, Game, Proj, ProjKind, KNOCKBACK_CD, STUN_DR_MAX, STUN_DR_STEP, TargetMode, TextKind, Zone,
+};
 
 // ---------------------------------------------------------------- towers
 
@@ -573,16 +575,32 @@ pub fn on_hit_specials(g: &mut Game, ti: usize, ci: usize, _crit: bool) {
             Special::Stun { chance, dur } => {
                 // Bosses are immune to hard control by design.
                 if g.creeps[ci].armor != Armor::Boss && g.rng.chance(chance) {
-                    g.creeps[ci].stun = g.creeps[ci].stun.max(dur);
+                    let c = &mut g.creeps[ci];
+                    // Diminishing returns. Without them, enough Frost towers
+                    // freeze a wave permanently: nothing dies, nothing leaks,
+                    // and the wave simply never ends. A full campaign got stuck
+                    // on wave 76 that way. Each stun in quick succession lands
+                    // shorter, and the resistance bleeds off once the target is
+                    // left alone.
+                    let effective = dur * (1.0 - c.stun_dr);
+                    if effective > 0.05 {
+                        c.stun = c.stun.max(effective);
+                    }
+                    c.stun_dr = (c.stun_dr + STUN_DR_STEP).min(STUN_DR_MAX);
                 }
             }
             Special::Shred { amt, dur } => {
                 g.creeps[ci].shred.apply(amt, dur);
             }
             Special::Knockback { dist } => {
-                if g.creeps[ci].armor != Armor::Boss {
-                    let c = &mut g.creeps[ci];
+                let c = &mut g.creeps[ci];
+                // One shove per target per cooldown. A wall of Grapeshot fires
+                // faster than a monster walks, so uncapped knockback pins a
+                // wave in place forever - nothing dies, nothing leaks, and the
+                // wave never ends. Hard control has to be strong and finite.
+                if c.armor != Armor::Boss && c.kb_cd <= 0.0 {
                     c.dist = (c.dist - dist).max(0.0);
+                    c.kb_cd = KNOCKBACK_CD;
                 }
             }
             _ => {}

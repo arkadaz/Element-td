@@ -645,11 +645,11 @@ pub static TOWERS: &[TowerDef] = &[
         forks: [
             Fork {
                 name: "Treasury",
-                desc: "Raises the interest on every gold piece you are holding.",
+                desc: "Pays far more each wave, and nudges up the interest on what you are holding.",
                 dmg_mul: 1.0, rate_mul: 1.0, range_add: 0.0, splash_add: 0.0,
                 specials: &[
                     Special::Income { per_wave: 60 },
-                    Special::Interest { extra: 0.04 },
+                    Special::Interest { extra: 0.02 },
                 ],
                 keep_base: false, delivery: None,
             },
@@ -796,9 +796,37 @@ pub struct WaveDef {
     pub phasing: bool,
     pub regen: bool,
     pub split: bool,
+    /// A second monster type arriving alongside the first.
+    ///
+    /// One type per wave means one counter always answers it, and the roster
+    /// stops mattering by the midgame. Escorts are how a wave asks two
+    /// questions at once - and from wave 45 the escort is always on the *other*
+    /// layer, so a board that only answers the road cannot coast on a lucky
+    /// run of ground waves.
+    pub escort: Option<Escort>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Escort {
+    pub kind: Kind,
+    pub count: u32,
+    pub hp: f32,
 }
 
 impl WaveDef {
+    /// Everything that will arrive, main body first.
+    pub fn parts(&self) -> impl Iterator<Item = (Kind, u32, f32)> + '_ {
+        std::iter::once((self.kind, self.count, self.hp))
+            .chain(self.escort.map(|e| (e.kind, e.count, e.hp)))
+    }
+    /// Whether anything in this wave flies.
+    pub fn has_air(&self) -> bool {
+        self.parts().any(|(k, _, _)| k.flying())
+    }
+    /// Whether anything in this wave walks.
+    pub fn has_ground(&self) -> bool {
+        self.parts().any(|(k, _, _)| !k.flying())
+    }
     pub fn armor(&self) -> Armor {
         self.kind.armor()
     }
@@ -847,7 +875,7 @@ pub const ENDLESS_GOLD_STEP: f32 = 1.062;
 const HP_BASE: f32 = 70.0;
 /// Gold a wave-1 wave pays out in total.
 const GOLD_BASE: f32 = 58.0;
-const HP_STEP: f32 = 1.1350;
+const HP_STEP: f32 = 1.1550;
 const GOLD_STEP: f32 = 1.0655;
 
 /// The road is roughly 60 tiles long; this sets how briskly monsters cover it.
@@ -904,6 +932,29 @@ fn kind_for(wave: u32) -> Kind {
     pool[(wave as usize * 7 + wave as usize / 3) % pool.len()]
 }
 
+/// How many of a type arrive, how tough each is, and how fast they move.
+fn shape_of(kind: Kind) -> (u32, f32, f32) {
+    match kind {
+        Kind::Boss => (1, 12.0, 0.95),
+        Kind::Skylord => (1, 9.0, 1.10),
+        Kind::Swarm => (28, 0.42, 1.30),
+        Kind::Wisp => (22, 0.38, 1.55),
+        Kind::Runner => (12, 0.70, 1.90),
+        Kind::Brute => (9, 2.20, 0.85),
+        Kind::Bulwark => (8, 1.60, 0.85),
+        Kind::Drake => (9, 1.45, 1.05),
+        Kind::Mender => (10, 1.10, 1.00),
+        Kind::Warden => (12, 1.15, 1.05),
+        Kind::Phaser => (12, 1.25, 1.15),
+        Kind::Grunt => (14, 1.0, 1.15),
+    }
+}
+
+/// Walking speed for a type, in the same units as [`WaveDef::speed`].
+pub fn kind_speed(kind: Kind) -> f32 {
+    shape_of(kind).2 * WALK_SPEED
+}
+
 /// Whether this is the first wave a given monster type ever appears on.
 ///
 /// A new type's debut is deliberately softened. The game should *teach* a
@@ -920,20 +971,7 @@ pub fn wave_at(i: u32) -> WaveDef {
     let i = i.max(1);
     let kind = kind_for(i);
     let debut = is_debut(i, kind);
-    let (count, hp_mul, speed) = match kind {
-        Kind::Boss => (1, 12.0, 0.95),
-        Kind::Skylord => (1, 9.0, 1.10),
-        Kind::Swarm => (28, 0.42, 1.30),
-        Kind::Wisp => (22, 0.38, 1.55),
-        Kind::Runner => (12, 0.70, 1.90),
-        Kind::Brute => (9, 2.20, 0.85),
-        Kind::Bulwark => (8, 1.60, 0.85),
-        Kind::Drake => (9, 1.45, 1.05),
-        Kind::Mender => (10, 1.10, 1.00),
-        Kind::Warden => (12, 1.15, 1.05),
-        Kind::Phaser => (12, 1.25, 1.15),
-        Kind::Grunt => (14, 1.0, 1.15),
-    };
+    let (count, hp_mul, speed) = shape_of(kind);
 
     // Campaign curve, then an unbounded endless curve on top.
     //
@@ -953,7 +991,17 @@ pub fn wave_at(i: u32) -> WaveDef {
     let purse =
         GOLD_BASE * GOLD_STEP.powi(campaign as i32 - 1) * ENDLESS_GOLD_STEP.powi(over as i32);
     // Only part of the purse rides on kills. See KILL_SHARE.
-    let bounty = (purse * KILL_SHARE / count as f32).max(1.0).round() as u32;
+    // Clamped: an f32 above u32::MAX saturates rather than wrapping, and the
+    // result is a wave that pays exactly 4,294,967,295 gold. Deep endless is
+    // meant to end because the monsters win, not because the arithmetic gives
+    // up.
+    // The escort is decided before the bounty, because a wave's purse is fixed:
+    // adding an escort splits the same money across more monsters rather than
+    // paying extra for them. Getting this wrong made escorted waves *easier* -
+    // more targets, more gold, a bigger board.
+    let escort = escort_for(i, kind, base);
+    let paying = count + escort.map_or(0, |e| e.count);
+    let bounty = (purse * KILL_SHARE / paying as f32).clamp(1.0, MAX_PAYOUT) as u32;
 
     WaveDef {
         kind,
@@ -976,7 +1024,48 @@ pub fn wave_at(i: u32) -> WaveDef {
         phasing: kind == Kind::Phaser,
         regen: i >= 20 && i % 8 == 7,
         split: i >= 22 && i % 9 == 2 && kind != Kind::Boss,
+        escort,
     }
+}
+
+/// What arrives alongside the main body of a wave.
+///
+/// Escorts start at wave 25 as an occasional second type, and from wave 45
+/// every escorted wave crosses the layers: a ground wave brings flyers, a
+/// flying wave brings walkers. That is what stops a board from being a pile of
+/// cannons that happens to survive.
+fn escort_for(wave: u32, main: Kind, base: f32) -> Option<Escort> {
+    if wave < 25 {
+        return None;
+    }
+    // Bosses arrive with a guard from wave 50 - a boss alone is a single
+    // target, which the whole board is already pointed at.
+    let boss = main.is_boss();
+    if boss && wave < 50 {
+        return None;
+    }
+    // Not every wave, or an escort stops being an event.
+    if !boss && wave % 3 != 1 {
+        return None;
+    }
+
+    let cross = wave >= 45 || boss;
+    let candidates: &[Kind] = if cross && !main.flying() {
+        &[Kind::Wisp, Kind::Drake]
+    } else if cross {
+        &[Kind::Swarm, Kind::Brute, Kind::Runner]
+    } else {
+        &[Kind::Runner, Kind::Swarm, Kind::Warden, Kind::Brute]
+    };
+    let kind = candidates[(wave as usize / 3) % candidates.len()];
+    if kind == main {
+        return None;
+    }
+
+    let (base_count, hp_mul, _) = shape_of(kind);
+    // An escort is a real threat, not a garnish - about half a wave of it.
+    let count = ((base_count as f32) * if boss { 0.45 } else { 0.55 }).ceil() as u32;
+    Some(Escort { kind, count: count.max(2), hp: base * hp_mul * 0.85 })
 }
 
 pub fn build_waves() -> Vec<WaveDef> {
@@ -1007,8 +1096,12 @@ pub fn wave_clear_bonus(wave: u32) -> u32 {
     // always been here. Total wave income is unchanged by the split - only who
     // has to earn it is.
     let flat = (25 + campaign * 5) as f32;
-    ((purse * (1.0 - KILL_SHARE) + flat) * ENDLESS_GOLD_STEP.powi(over as i32)) as u32
+    ((purse * (1.0 - KILL_SHARE) + flat) * ENDLESS_GOLD_STEP.powi(over as i32)).min(MAX_PAYOUT)
+        as u32
 }
+
+/// Ceiling on any single gold payout. See the note in [`wave_at`].
+const MAX_PAYOUT: f32 = 100_000_000.0;
 
 /// Gold per second remaining when a wave is called early.
 pub const EARLY_BONUS_PER_SEC: f32 = 2.0;

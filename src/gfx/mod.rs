@@ -269,6 +269,8 @@ pub struct Renderer {
     pub quality: Quality,
     /// Whether the effects buffer still holds anything from a previous frame.
     fx_dirty: bool,
+    /// The prefix of each static shape range that casts a shadow.
+    static_shadow: [(u32, u32); SHAPE_COUNT],
     pub bloom_strength: f32,
     pub bloom_threshold: f32,
     pub particle_drag: f32,
@@ -649,6 +651,7 @@ impl Renderer {
 
         Self {
             fx_dirty: false,
+            static_shadow: [(0, 0); SHAPE_COUNT],
             solid_src,
             bb_src,
             scene_layout,
@@ -873,7 +876,40 @@ impl Renderer {
 
     /// Uploads the geometry that never changes: terrain, road, scenery, pads.
     /// Called once at startup, not per frame.
-    pub fn set_static_scene(&mut self, queue: &wgpu::Queue, list: &DrawList) {
+    ///
+    /// `casters` is the subset that should appear in the shadow map. It is
+    /// packed to the front of every shape's range, so the shadow pass draws a
+    /// prefix and the scene pass draws the whole thing - one buffer, two draw
+    /// lists. Most of the static scene is flat ground whose shadow lands
+    /// exactly where the ground already is, and re-rasterising sixteen hundred
+    /// of those every frame for no visible result is the single most wasteful
+    /// thing the renderer was doing.
+    pub fn set_static_scene(&mut self, queue: &wgpu::Queue, casters: &DrawList, rest: &DrawList) {
+        let mut scratch = Vec::new();
+        let mut batches = [(0u32, 0u32); SHAPE_COUNT];
+        let mut shadow = [(0u32, 0u32); SHAPE_COUNT];
+        for i in 0..SHAPE_COUNT {
+            let first = scratch.len() as u32;
+            for (n, bucket) in [(0, &casters.solid[i]), (1, &rest.solid[i])] {
+                let room = STATIC_CAP.saturating_sub(scratch.len());
+                let take = bucket.len().min(room);
+                scratch.extend_from_slice(&bucket[..take]);
+                if n == 0 {
+                    shadow[i] = (first, take as u32);
+                }
+            }
+            batches[i] = (first, scratch.len() as u32 - first);
+        }
+        if !scratch.is_empty() {
+            queue.write_buffer(&self.statics, 0, bytemuck::cast_slice(&scratch));
+        }
+        self.static_shadow = shadow;
+        self.static_batches = batches;
+        self.static_count = scratch.len() as u32;
+    }
+
+    #[allow(dead_code)]
+    fn set_static_scene_flat(&mut self, queue: &wgpu::Queue, list: &DrawList) {
         let mut scratch = Vec::new();
         let (batches, n) = Self::pack(queue, &self.statics, list, STATIC_CAP, &mut scratch);
         self.static_batches = batches;
@@ -1116,7 +1152,8 @@ impl Renderer {
             pass.set_vertex_buffer(0, self.mesh.slice(..));
             if self.static_count > 0 {
                 pass.set_vertex_buffer(1, self.statics.slice(..));
-                Self::draw_shapes(&mut pass, &self.spans, &self.static_batches);
+                // Casters only. The ground does not shadow itself.
+                Self::draw_shapes(&mut pass, &self.spans, &self.static_shadow);
             }
             if self.solid_count > 0 {
                 pass.set_vertex_buffer(1, self.instances.slice(..));

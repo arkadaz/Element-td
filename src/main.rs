@@ -14,6 +14,7 @@ mod math;
 mod menu;
 mod net;
 mod rng;
+mod save;
 mod ui;
 #[cfg(test)]
 mod ui_layout_tests;
@@ -232,6 +233,9 @@ struct App {
     /// frame goes is how you end up optimising a shader on a card that was
     /// never the bottleneck, so the HUD reports it.
     prof: Profile,
+    /// When the next frame is due, for the native frame limiter.
+    #[cfg(not(target_arch = "wasm32"))]
+    next_frame: Option<std::time::Instant>,
     /// Whether the one-time viewport-dependent setup has run.
     sized_once: bool,
 }
@@ -251,7 +255,8 @@ impl App {
         renderer.upload_static(&rs.queue);
         // Terrain, road, scenery and the build grid never change, so they are
         // uploaded once instead of being rebuilt every frame.
-        renderer.set_static_scene(&rs.queue, &view::build_static(&game, &decor));
+        let statics = view::build_static(&game, &decor);
+        renderer.set_static_scene(&rs.queue, &statics.casters, &statics.flat);
         rs.renderer
             .write()
             .callback_resources
@@ -263,7 +268,7 @@ impl App {
             game,
             decor,
             ust: ui::UiState::default(),
-            menu: MenuState::default(),
+            menu: MenuState { saved: save::load(), ..MenuState::default() },
             net: Net::default(),
             draw: DrawList::default(),
             spawns: Vec::with_capacity(4096),
@@ -271,6 +276,8 @@ impl App {
             fps: 60.0,
             anim: 0.0,
             prof: Profile::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            next_frame: None,
             sized_once: false,
         };
         app.apply_demo_env();
@@ -417,6 +424,44 @@ impl App {
         }
     }
 
+    /// How long to wait before drawing the next frame.
+    fn frame_budget(&self, dt: f32) -> std::time::Duration {
+        let target = 1.0 / self.ust.fps_cap.max(15) as f32;
+        let wait = (target - dt.min(target)).clamp(0.0, target);
+        std::time::Duration::from_secs_f32(wait)
+    }
+
+    /// Holds the frame rate to [`UiState::fps_cap`].
+    ///
+    /// `request_repaint_after` alone does not do it: it sets a deadline, and
+    /// anything else that asks for a repaint sooner wins, so on a 180 Hz
+    /// display the game happily ran at 180 fps and threw two thirds of that
+    /// work away - heat, fan noise and battery for pixels nobody sees.
+    ///
+    /// Only native needs this. In a browser the frame loop is already driven by
+    /// `requestAnimationFrame`, which is capped to the display refresh.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn throttle(&mut self) {
+        let target = std::time::Duration::from_secs_f32(1.0 / self.ust.fps_cap.max(15) as f32);
+        let now = std::time::Instant::now();
+        if let Some(next) = self.next_frame {
+            if let Some(wait) = next.checked_duration_since(now) {
+                // A frame is 16 ms; oversleeping by a millisecond is not worth
+                // burning a core to avoid, so this is a plain sleep.
+                std::thread::sleep(wait);
+            }
+        }
+        // Schedule from the deadline, not from now, so a slow frame does not
+        // permanently shift the cadence.
+        self.next_frame = Some(match self.next_frame {
+            Some(prev) if now.duration_since(prev) < target => prev + target,
+            _ => now + target,
+        });
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn throttle(&mut self) {}
+
     /// Steps the quality preset down on its own if the frame rate stays poor,
     /// so a weak GPU gets a playable game without the player hunting for a menu.
     fn auto_quality(&mut self) {
@@ -475,14 +520,31 @@ impl App {
             menu::Action::SinglePlayer => {
                 self.net.leave();
                 self.game.start_run(seed_now());
+                save::clear();
                 self.menu.screen = Screen::Playing;
+            }
+            menu::Action::Resume => {
+                self.net.leave();
+                match save::load().map(|s| s.restore(&mut self.game)) {
+                    Some(true) => self.menu.screen = Screen::Playing,
+                    _ => {
+                        // The save was unreadable. Say so rather than silently
+                        // dropping the player into a fresh run they did not ask
+                        // for.
+                        save::clear();
+                        self.menu.saved = None;
+                        self.game.toast("That saved run could not be read");
+                    }
+                }
             }
             menu::Action::Cancelled => {
                 self.game.restart();
             }
             menu::Action::None => {}
         }
-        ctx.request_repaint();
+        // The title screen is a slow orbit over a still board; half rate is
+        // indistinguishable and costs half as much.
+        ctx.request_repaint_after(std::time::Duration::from_millis(33));
     }
 
     /// Hands this frame's geometry to the render callback without copying.
@@ -535,7 +597,11 @@ impl eframe::App for App {
         }
         if self.ust.want_menu {
             self.ust.want_menu = false;
+            if !self.net.is_online() {
+                save::store(&self.game);
+            }
             self.net.leave();
+            self.menu.saved = save::load();
             self.menu.screen = Screen::Title;
             self.game.restart();
             return;
@@ -550,6 +616,13 @@ impl eframe::App for App {
         self.game.update(dt);
         self.game.sound_cues.clear();
         self.net.push(self.game.snapshot(), dt);
+        if std::mem::take(&mut self.game.wants_save) {
+            // Solo runs only: a room's run belongs to the room, and resuming
+            // into one nobody else is playing any more would be a lie.
+            if !self.net.is_online() {
+                save::store(&self.game);
+            }
+        }
         Profile::feed(&mut self.prof.sim, now_ms() - t_frame);
 
         // --- HUD
@@ -640,8 +713,13 @@ impl eframe::App for App {
         Profile::feed(&mut self.prof.hud, now_ms() - t_hud - self.prof.build as f64);
         Profile::feed(&mut self.prof.total, now_ms() - t_frame);
 
-        // Games animate constantly; never idle the frame loop.
-        ctx.request_repaint();
+        // Games animate constantly, but there is no point drawing frames the
+        // display will never show. Uncapped, this ran at 180 fps on a 60 Hz
+        // screen - two thirds of the GPU work, the fan noise and the battery
+        // went straight in the bin. Asking for the next frame at a deadline
+        // instead of "immediately" is the single biggest saving available.
+        self.throttle();
+        ctx.request_repaint_after(self.frame_budget(dt));
     }
 }
 

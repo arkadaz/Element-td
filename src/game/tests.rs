@@ -4,7 +4,7 @@
 //! `swap_remove` while projectiles, splash lists and pads hold indices into the
 //! same vectors. These tests hammer those paths.
 
-use super::board::{BUILD_FAR, ROAD_HALF};
+use super::board::{BUILD_FAR, Board, ROAD_HALF};
 use super::defs::*;
 use super::*;
 
@@ -163,6 +163,7 @@ fn splash_into_a_dense_pack_is_safe() {
         phasing: false,
         regen: false,
         split: true,
+        escort: None,
     };
     g.phase = Phase::Combat;
     let at = g.towers[0].pos;
@@ -297,6 +298,7 @@ fn shields_stop_everything_except_poison() {
         phasing: false,
         regen: false,
         split: false,
+        escort: None,
     };
     g.spawn_creep(&w, w.hp, 1.0, 5.0);
 
@@ -479,6 +481,7 @@ fn a_full_run_is_about_an_hour() {
         seconds += BUILD_TIME + walk + spawn;
     }
     let minutes = seconds / 60.0;
+    println!("CAMPAIGN LENGTH: {minutes:.0} minutes");
     assert!(
         (45.0..90.0).contains(&minutes),
         "a full campaign takes {minutes:.0} minutes; the target is about 60"
@@ -809,25 +812,56 @@ fn burning_ground_expires() {
 /// The bot is deliberately unsophisticated: spend everything, prefer upgrading
 /// what it already owns, keep a mix of layers. If a *simple* strategy clears it
 /// with something in hand, a thinking player has room to be clever.
-/// The free pad furthest from anything already built, so a board spreads out to
-/// cover the road the way a player's does.
+/// Where along the road a pad sits, in path distance.
+///
+/// Coverage of *the road* is what a board is short of, not coverage of the map.
+/// Picking the pad furthest from other towers in plain 2D spreads them into the
+/// corners, where they watch empty grass.
+fn road_position(b: &Board, p: [f32; 2]) -> f32 {
+    let mut best = (f32::MAX, 0.0);
+    let steps = (b.total * 2.0) as i32;
+    for i in 0..=steps {
+        let d = i as f32 * 0.5;
+        let q = b.sample(d);
+        let dd = (q[0] - p[0]).powi(2) + (q[1] - p[1]).powi(2);
+        if dd < best.0 {
+            best = (dd, d);
+        }
+    }
+    best.1
+}
+
+/// The free pad a competent player would take next.
+///
+/// Not the one furthest from the others: spreading evenly along the road means
+/// a monster meets one tower at a time and survives each of them in turn.
+/// Concentrated fire kills, and overlapping ranges stack Beacon auras - so the
+/// model is a killbox. Hug the road first, and among equally good pads pick the
+/// one nearest what is already built. Tried the even-spread version; it loses
+/// the campaign on wave 76, which is the whole reason this comment exists.
 fn spread_pad(g: &Game) -> Option<usize> {
+    let centre = if g.towers.is_empty() {
+        None
+    } else {
+        let n = g.towers.len() as f32;
+        Some([
+            g.towers.iter().map(|t| t.pos[0]).sum::<f32>() / n,
+            g.towers.iter().map(|t| t.pos[1]).sum::<f32>() / n,
+        ])
+    };
     let mut best: Option<(usize, f32)> = None;
     for (i, s) in g.board.slots.iter().enumerate() {
         if s.tower.is_some() {
             continue;
         }
-        let nearest = g
-            .towers
-            .iter()
-            .map(|t| {
-                let dx = t.pos[0] - s.pos[0];
-                let dy = t.pos[1] - s.pos[1];
-                dx * dx + dy * dy
-            })
-            .fold(f32::MAX, f32::min);
-        if best.is_none_or(|(_, d)| nearest > d) {
-            best = Some((i, nearest));
+        // Closeness to the road dominates; closeness to the cluster breaks ties.
+        let road = g.board.dist_to_road(s.pos);
+        let huddle = centre.map_or(0.0, |c| {
+            ((c[0] - s.pos[0]).powi(2) + (c[1] - s.pos[1]).powi(2)).sqrt()
+        });
+        let score = road * 3.0 + huddle * 0.35;
+        if best.is_none_or(|(_, v)| score < v) {
+            best = Some((i, score));
         }
     }
     best.map(|(i, _)| i)
@@ -881,10 +915,21 @@ fn autoplay(mixed_layers: bool) -> Game {
         // Now run exactly one wave, until the game hands control back.
         let dt = 1.0 / 60.0;
         let mut elapsed = 0.0;
-        while g.phase == Phase::Combat && elapsed < 240.0 {
+        while g.phase == Phase::Combat && elapsed < 200.0 {
             g.update(dt);
             elapsed += dt;
         }
+        // A wave that outlasts this is not a hard wave, it is a stuck one -
+        // permanently stun-locked monsters neither die nor leak, and the run
+        // hangs forever. Silently moving on would mismeasure the whole test.
+        assert!(
+            g.phase != Phase::Combat,
+            "wave {} never ended: {} monsters still alive after 200s, {} lives, {} leaked",
+            g.wave,
+            g.creeps.len(),
+            g.lives,
+            g.stats.leaked
+        );
     }
     g
 }
@@ -983,4 +1028,192 @@ fn ignoring_the_air_loses_the_run() {
         "the ground-only board died on wave {} - before air even arrives, so this proves nothing",
         g.wave
     );
+}
+
+// ---------------------------------------------------------------- economy
+
+/// The economy must not run away.
+///
+/// This is a bug that shipped. Each Treasury added `0.04 * utility_scale(tier)`
+/// to the interest rate, which at level 10 is +23.8% *each*, with no ceiling.
+/// Four of them put compound interest over 100% a wave and gold doubled every
+/// wave forever. A real game reached 813 billion gold on wave 89, maxed
+/// everything permanently, and coasted to wave 136. Infinite money is the same
+/// thing as no game.
+///
+/// So: build the greediest economy the game allows and check it stays finite.
+#[test]
+fn a_board_built_entirely_of_treasuries_cannot_run_away() {
+    let mut g = rich_game();
+    let mint = TOWERS.iter().position(|d| d.id == "mint").unwrap();
+    let mut n = 0;
+    for slot in 0..g.board.slots.len() {
+        g.build_choice = Some((mint, 1));
+        if g.try_build(slot) {
+            let ti = g.towers.len() - 1;
+            // Fork 0 is Treasury - the interest one.
+            while g.towers[ti].tier < MAX_TIER {
+                g.upgrade(ti, Some(0));
+            }
+            n += 1;
+        }
+    }
+    g.build_choice = None;
+    g.selected = None;
+    assert!(n > 10, "only managed {n} Treasuries; this test needs a full board");
+
+    assert!(
+        g.interest_rate() <= INTEREST_MAX + 1e-6,
+        "{n} Treasuries push interest to {:.0}%, over the {:.0}% cap",
+        g.interest_rate() * 100.0,
+        INTEREST_MAX * 100.0
+    );
+
+    // Hand it a fortune and run the economy for fifty waves with nothing being
+    // spent. Interest is capped *and* only paid up to a ceiling, so the pile
+    // must grow roughly linearly, not exponentially.
+    g.gold = 1_000_000;
+    let start = g.gold;
+    for _ in 0..50 {
+        g.wave += 1;
+        g.end_wave_for_test();
+    }
+    let growth = g.gold as f64 / start as f64;
+    assert!(
+        growth < 20.0,
+        "fifty idle waves multiplied the purse by {growth:.0}x - the economy compounds away"
+    );
+    assert!(g.gold > start, "an idle purse should still earn something");
+}
+
+/// Interest should reward banking a wave or two, and stop rewarding hoarding.
+#[test]
+fn interest_pays_on_a_bounded_pile() {
+    let mut g = Game::new();
+    g.wave = 30;
+
+    let ceiling = g.interest_ceiling();
+    assert!(ceiling > 0, "nothing earns interest at all");
+
+    g.gold = ceiling / 2;
+    let half = g.projected_interest();
+    g.gold = ceiling;
+    let full = g.projected_interest();
+    g.gold = ceiling * 1_000;
+    let absurd = g.projected_interest();
+
+    assert!(half > 0 && full > half, "interest does not scale with a sensible balance");
+    assert_eq!(full, absurd, "an enormous pile earns more than the ceiling allows");
+
+    // And the ceiling has to keep up with the run, or banking stops mattering.
+    let early = {
+        let mut e = Game::new();
+        e.wave = 5;
+        e.interest_ceiling()
+    };
+    let late = {
+        let mut l = Game::new();
+        l.wave = CAMPAIGN_WAVES;
+        l.interest_ceiling()
+    };
+    assert!(late > early * 20, "the interest ceiling does not grow with the waves");
+}
+
+/// Deep endless has to stay arithmetic. Payouts used to saturate `u32` around
+/// wave 300 and every wave from then on paid exactly 4,294,967,295 gold.
+#[test]
+fn deep_endless_payouts_stay_finite() {
+    for w in [100u32, 200, 300, 500, 900] {
+        let d = wave_at(w);
+        let clear = wave_clear_bonus(w);
+        assert!(d.hp.is_finite() && d.hp > 0.0, "wave {w} health is {}", d.hp);
+        assert!(d.bounty < u32::MAX, "wave {w} bounty saturated");
+        assert!(clear < u32::MAX, "wave {w} clear bonus saturated");
+        // And the wave still has to be getting harder faster than it pays.
+        let pay = d.bounty as f64 * d.count as f64 + clear as f64;
+        let hp = d.hp as f64 * d.count as f64;
+        assert!(hp > pay, "wave {w} pays {pay:.0} for only {hp:.0} health - endless never ends");
+    }
+}
+
+/// Hard control must be strong and finite.
+///
+/// A board of nothing but Frost and Grapeshot used to pin a wave in place
+/// forever: every monster permanently stunned or shoved backwards, so nothing
+/// died, nothing leaked, and the wave never ended. A full campaign hung on wave
+/// 76. Stuns now diminish on repeat and knockback has a per-target cooldown, so
+/// a control board slows a wave down instead of stopping time.
+#[test]
+fn a_wall_of_control_towers_cannot_freeze_a_wave_forever() {
+    let mut g = rich_game();
+    let frost = TOWERS.iter().position(|d| d.id == "frost").unwrap();
+    let cannon = TOWERS.iter().position(|d| d.id == "cannon").unwrap();
+
+    let mut n = 0;
+    for slot in 0..g.board.slots.len() {
+        // Glacier is the stun fork; Grapeshot is the knockback fork.
+        let (def, fork) = if n % 2 == 0 { (frost, 0) } else { (cannon, 1) };
+        g.build_choice = Some((def, 1));
+        if g.try_build(slot) {
+            let ti = g.towers.len() - 1;
+            while g.towers[ti].tier < MAX_TIER {
+                g.upgrade(ti, Some(fork));
+            }
+            n += 1;
+        }
+    }
+    g.build_choice = None;
+    g.selected = None;
+    assert!(n > 20, "only built {n} control towers; this test needs a full board");
+
+    // Monsters far too tough for this board to actually kill.
+    let w = WaveDef { kind: Kind::Grunt, ..wave_at(40) };
+    g.phase = Phase::Combat;
+    let start_hp = 1.0e12;
+    for _ in 0..10 {
+        g.spawn_creep(&w, start_hp, 1.0, 0.0);
+    }
+    let before: Vec<f32> = g.creeps.iter().map(|c| c.dist).collect();
+    run_for(&mut g, 90.0);
+
+    // They cannot be killed, so they have to have made progress down the road.
+    let moved = g
+        .creeps
+        .iter()
+        .zip(before.iter())
+        .filter(|(c, b)| c.dist > **b + 1.0)
+        .count();
+    assert!(
+        moved > 0 || g.stats.leaked > 0 || g.creeps.is_empty(),
+        "after 90 seconds nothing had advanced: the board has frozen time"
+    );
+    let furthest = g.creeps.iter().map(|c| c.dist).fold(0.0f32, f32::max);
+    assert!(
+        furthest > 8.0 || g.stats.leaked > 0,
+        "the furthest monster is only {furthest:.1} tiles along after 90 seconds"
+    );
+}
+
+/// Stuns on one target must get shorter, and recover when it is left alone.
+#[test]
+fn repeated_stuns_diminish_and_then_recover() {
+    // Four stuns in a row, each landing on a more resistant target.
+    let mut dr = 0.0f32;
+    let mut lengths = Vec::new();
+    for _ in 0..4 {
+        lengths.push(1.0 * (1.0 - dr));
+        dr = (dr + STUN_DR_STEP).min(STUN_DR_MAX);
+    }
+    for w in lengths.windows(2) {
+        assert!(w[1] < w[0], "stuns are not diminishing: {lengths:?}");
+    }
+    assert!(*lengths.last().unwrap() > 0.0, "stun became a total immunity");
+    assert!(dr <= STUN_DR_MAX + 1e-6);
+
+    // Left alone, it recovers.
+    let before = dr;
+    for _ in 0..120 {
+        dr = (dr - STUN_DR_DECAY / 60.0).max(0.0);
+    }
+    assert!(dr < before, "stun resistance never wears off");
 }
