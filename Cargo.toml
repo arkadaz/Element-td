@@ -11,6 +11,9 @@ description = "Elemental TD - a GPU-accelerated element tower defense, in pure R
 bytemuck = { version = "1.25.2", features = ["derive"] }
 eframe = { version = "0.36.1", default-features = false, features = ["wgpu", "default_fonts"] }
 egui = "0.36"
+# Only used by the glyph-coverage test, which has to ask the font atlas
+# directly whether a character exists.
+epaint = "0.36"
 log = "0.4.34"
 td-proto = { path = "proto" }
 ewebsock = "0.8"

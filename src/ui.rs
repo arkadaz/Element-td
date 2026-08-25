@@ -219,7 +219,11 @@ pub fn top_bar(g: &mut Game, ui: &mut Ui, ust: &mut UiState, perf: &str) {
     };
     let speed_label = format!("{:.0}x", g.speed);
     let quality_label = if compact { ust.quality.short() } else { ust.quality.label() };
-    let pause_label = if g.paused { "\u{25b6}" } else { "\u{2759}\u{2759}" };
+    // The pause icon is painted, not typed. egui bundles a Latin font and an
+    // emoji font; U+25B6 and U+2759 are in neither, so this button rendered as
+    // two empty tofu boxes. Two spaces reserve the width and the glyph is drawn
+    // below - which also means it always matches the button's ink colour.
+    let pause_label = "  ";
 
     let mut cmds: Vec<(Cmd, &str)> = Vec::with_capacity(6);
     if g.phase == Phase::Build {
@@ -332,6 +336,9 @@ pub fn top_bar(g: &mut Game, ui: &mut Ui, ust: &mut UiState, perf: &str) {
             label = label.strong();
         }
         let resp = ui.put(r, egui::Button::new(label).fill(fill).corner_radius(6.0));
+        if *cmd == Cmd::Pause {
+            paint_transport(ui, r, g.paused);
+        }
         let resp = match cmd {
             Cmd::Send => resp
                 .on_hover_text("Call the wave early (Enter). The bonus is the time you give up."),
@@ -367,6 +374,35 @@ pub fn top_bar(g: &mut Game, ui: &mut Ui, ust: &mut UiState, perf: &str) {
     }
     ust.controls_left = cx + pad;
     ust.top_content = full;
+}
+
+/// Play and pause, drawn rather than typed. See the note in [`top_bar`].
+fn paint_transport(ui: &Ui, r: Rect, paused: bool) {
+    let p = ui.painter();
+    let c = r.center();
+    let h = (r.height() * 0.40).min(8.0);
+    if paused {
+        // Play: a right-pointing triangle.
+        p.add(egui::Shape::convex_polygon(
+            vec![
+                pos2(c.x - h * 0.55, c.y - h),
+                pos2(c.x - h * 0.55, c.y + h),
+                pos2(c.x + h * 0.85, c.y),
+            ],
+            pal::INK,
+            Stroke::NONE,
+        ));
+    } else {
+        // Pause: two bars.
+        let w = h * 0.44;
+        for s in [-1.0f32, 1.0] {
+            p.rect_filled(
+                Rect::from_center_size(pos2(c.x + s * w * 1.6, c.y), vec2(w, h * 2.0)),
+                CornerRadius::same(1),
+                pal::INK,
+            );
+        }
+    }
 }
 
 /// One resource readout: a small caps label over a large monospace number, on a
@@ -769,9 +805,16 @@ fn selection_panel(g: &mut Game, ui: &mut Ui, compact: bool) {
                     ui.label(RichText::new(f.desc).size(11.5).color(pal::DIM));
                     let st = def.stats(MAX_TIER, Some(i));
                     ui.label(
-                        RichText::new(format!("{} dps · range {:.1}", short((st.dmg * st.rate) as f64), st.range))
-                            .size(11.0)
-                            .monospace(),
+                        // An ASCII separator: this line is monospace, and the middle
+                        // dot used elsewhere in the HUD has no glyph in that
+                        // font - it would draw as a tofu box.
+                        RichText::new(format!(
+                            "{} dps  |  range {:.1}",
+                            short((st.dmg * st.rate) as f64),
+                            st.range
+                        ))
+                        .size(11.0)
+                        .monospace(),
                     );
                     for s in def.specials_for(Some(i)).iter() {
                         ui.label(RichText::new(format!("• {}", s.describe(TowerDef::scale(MAX_TIER)))).size(11.0).color(pal::GOOD));

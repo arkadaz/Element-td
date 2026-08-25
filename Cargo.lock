@@ -812,6 +812,7 @@ dependencies = [
  "eframe",
  "egui",
  "env_logger",
+ "epaint",
  "ewebsock",
  "log",
  "td-proto",

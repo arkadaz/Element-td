@@ -260,3 +260,53 @@ fn every_build_card_is_inside_its_panel() {
         }
     }
 }
+
+/// Every character the HUD prints must exist in the font it is printed with.
+///
+/// The pause button used to be U+25B6 / U+2759. egui bundles a Latin font and
+/// an emoji font, and neither covers those, so the button rendered as a pair of
+/// empty tofu boxes. A missing glyph is invisible to every other test here -
+/// the layout is perfect and the pixels are wrong - so it gets its own check.
+///
+/// Note that measuring the laid-out width does *not* detect this: a missing
+/// glyph is substituted, and the substitute has a perfectly ordinary width. The
+/// font atlas has to be asked directly. The two fonts are also checked
+/// separately, because they do not cover the same characters - the middle dot
+/// the HUD uses everywhere exists in the proportional font and not in the
+/// monospace one.
+#[test]
+fn every_glyph_the_hud_prints_actually_exists() {
+    // Separators and marks used in labels and tooltips.
+    const PROPORTIONAL: &str = "\u{00b7} \u{2022} \u{2014}";
+    // Numbers, costs and the perf readout. Currently pure ASCII, and this is
+    // what keeps it that way.
+    const MONOSPACE: &str = "";
+
+    let mut fonts =
+        epaint::text::Fonts::new(Default::default(), egui::FontDefinitions::default());
+    for (text, font) in [
+        (PROPORTIONAL, egui::FontId::proportional(12.0)),
+        (MONOSPACE, egui::FontId::monospace(12.0)),
+    ] {
+        for ch in text.chars() {
+            if ch.is_ascii() {
+                continue;
+            }
+            assert!(
+                fonts.has_glyph(&font, ch),
+                "U+{:04X} {ch:?} has no glyph in {:?} - it renders as a tofu box",
+                ch as u32,
+                font.family
+            );
+        }
+    }
+
+    // And the check has teeth: the glyphs that were actually broken must fail.
+    for ch in ['\u{25b6}', '\u{2759}'] {
+        assert!(
+            !fonts.has_glyph(&egui::FontId::proportional(12.0), ch),
+            "U+{:04X} is available after all - this test is no longer guarding anything",
+            ch as u32
+        );
+    }
+}
