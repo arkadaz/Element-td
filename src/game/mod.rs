@@ -15,7 +15,6 @@ use crate::rng::Rng;
 
 pub const MAX_CREEPS: usize = 4000;
 pub const START_GOLD: i64 = 260;
-pub const START_LIVES: i32 = 20;
 pub const BUILD_TIME_FIRST: f32 = 25.0;
 pub const BUILD_TIME: f32 = 16.0;
 pub const SELL_REFUND: f32 = 0.75;
@@ -146,7 +145,14 @@ impl Creep {
     /// Height of the body's centre above the ground, for the 3D view.
     #[inline]
     pub fn height(&self) -> f32 {
-        self.radius * 1.4 + (self.bob.sin() * 0.5 + 0.5) * 0.10
+        // Flyers ride at their kind's altitude, drifting gently so a formation
+        // of them does not look like a decal sheet.
+        let alt = self.kind.altitude();
+        let drift = if alt > 0.0 { (self.bob * 0.9).sin() * 0.16 } else { 0.0 };
+        alt + drift + self.radius * 1.4 + (self.bob.sin() * 0.5 + 0.5) * 0.10
+    }
+    pub fn flying(&self) -> bool {
+        self.kind.flying()
     }
 }
 
@@ -380,6 +386,27 @@ pub struct RunStats {
     pub towers_built: u32,
 }
 
+/// A patch of burning road left behind by a Pyre.
+///
+/// Zones are the only thing in the game that damages by *position* rather than
+/// by targeting, which is what makes where a Pyre stands matter more than what
+/// its stats say.
+#[derive(Clone)]
+pub struct Zone {
+    pub pos: [f32; 2],
+    pub radius: f32,
+    pub life: f32,
+    pub max_life: f32,
+    /// Damage per second to everything standing in it.
+    pub dps: f32,
+    /// Extra damage everything inside takes from every other source.
+    pub shred: f32,
+    pub tower: usize,
+    pub def: usize,
+    /// Counts down to the next damage tick.
+    pub tick: f32,
+}
+
 #[derive(Clone, Copy, PartialEq)]
 pub enum Cue {
     Build,
@@ -400,12 +427,13 @@ pub struct Game {
     pub towers: Vec<Tower>,
     pub projs: Vec<Proj>,
     pub beams: Vec<Beam>,
+    /// Burning patches of road. See [`Zone`].
+    pub zones: Vec<Zone>,
     pub texts: Vec<FloatText>,
     pub fx: Fx,
     pub rng: Rng,
     pub spatial: SpatialHash,
 
-    pub difficulty: Difficulty,
     /// True once the campaign has been cleared and the run has continued.
     pub endless: bool,
     pub wave: u32,
@@ -449,11 +477,11 @@ impl Game {
             towers: Vec::with_capacity(128),
             projs: Vec::with_capacity(512),
             beams: Vec::with_capacity(64),
+            zones: Vec::with_capacity(32),
             texts: Vec::with_capacity(64),
             fx: Fx::default(),
             rng: Rng::new(0x5eed_1234_abcd_9876),
             spatial: SpatialHash::new(),
-            difficulty: Difficulty::Normal,
             endless: false,
             wave: 0,
             phase: Phase::Build,
@@ -479,21 +507,20 @@ impl Game {
     }
 
     pub fn reset(&mut self) {
-        let d = self.difficulty;
-        self.restart(d);
+        self.restart();
     }
 
     // ------------------------------------------------ queries
 
     /// Waves are generated on demand, so the run can continue past the campaign.
     pub fn wave_def(&self, wave: u32) -> WaveDef {
-        wave_at(wave, self.difficulty)
+        wave_at(wave)
     }
 
-    /// Restarts the run at a chosen difficulty, on a fresh road.
-    pub fn restart(&mut self, difficulty: Difficulty) {
+    /// Restarts the run on a fresh road.
+    pub fn restart(&mut self) {
         let seed = self.rng.next_u64() ^ 0x51ED_2A17_9C3B_44D1;
-        self.start_run(difficulty, seed);
+        self.start_run(seed);
     }
 
     /// Restarts from an exact seed.
@@ -501,11 +528,9 @@ impl Game {
     /// This is what makes multiplayer work without the server simulating
     /// anything: every client in a room is handed the same seed, so everyone
     /// faces byte-identical waves on their own board.
-    pub fn start_run(&mut self, difficulty: Difficulty, seed: u64) {
+    pub fn start_run(&mut self, seed: u64) {
         *self = Game::new();
         self.rng = Rng::new(seed);
-        self.difficulty = difficulty;
-        self.lives = difficulty.lives();
     }
 
     /// The scoreboard line shared with the rest of the room.
@@ -886,10 +911,57 @@ impl Game {
         self.step_creeps(dt);
         combat::step_towers(self, dt);
         combat::step_projectiles(self, dt);
+        self.step_zones(dt);
 
         if self.phase == Phase::Combat && self.spawn_left == 0 && self.creeps.is_empty() {
             self.end_wave();
         }
+    }
+
+    /// Burning road. Zones tick a few times a second rather than every step -
+    /// a hundred floating combat numbers a second is unreadable, and the total
+    /// damage is identical either way.
+    fn step_zones(&mut self, dt: f32) {
+        const TICK: f32 = 0.25;
+        if self.zones.is_empty() {
+            return;
+        }
+        for z in &mut self.zones {
+            z.life -= dt;
+            z.tick -= dt;
+        }
+        let mut hits: Vec<(usize, usize, f32)> = Vec::new();
+        for zi in 0..self.zones.len() {
+            if self.zones[zi].tick > 0.0 {
+                continue;
+            }
+            self.zones[zi].tick += TICK;
+            let z = self.zones[zi].clone();
+            let r2 = z.radius * z.radius;
+            for (ci, c) in self.creeps.iter_mut().enumerate() {
+                // The fire is on the road. Anything above it is untouched.
+                if c.kind.flying() {
+                    continue;
+                }
+                let dx = c.pos[0] - z.pos[0];
+                let dy = c.pos[1] - z.pos[1];
+                if dx * dx + dy * dy > r2 {
+                    continue;
+                }
+                // Shred is refreshed while they stand in it, and lingers just
+                // long enough after they leave to be worth chasing them out.
+                if z.shred > 0.0 {
+                    c.shred.apply(z.shred, TICK + 0.9);
+                }
+                hits.push((ci, z.tower, z.dps * TICK));
+            }
+        }
+        for (ci, ti, dmg) in hits {
+            if ci < self.creeps.len() && ti < self.towers.len() {
+                combat::damage_creep(self, ci, dmg, ti, false);
+            }
+        }
+        self.zones.retain(|z| z.life > 0.0);
     }
 
     fn spawn_step(&mut self, dt: f32) {
@@ -1128,6 +1200,9 @@ fn place(board: &Board, c: &mut Creep) {
     let p = board.sample(c.dist);
     let h = board.heading(c.dist);
     c.facing = h[1].atan2(h[0]);
-    // Lane offset is perpendicular to the heading.
-    c.pos = [p[0] - h[1] * c.lane, p[1] + h[0] * c.lane];
+    // Lane offset is perpendicular to the heading. Flyers follow the same road
+    // - this is a fixed-path game and a straight line over the walls would make
+    // the whole board meaningless - they simply do it out of reach.
+    let lane = if c.kind.flying() { c.lane * 2.2 } else { c.lane };
+    c.pos = [p[0] - h[1] * lane, p[1] + h[0] * lane];
 }

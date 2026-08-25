@@ -231,46 +231,65 @@ impl Default for Camera {
 
 impl Camera {
     /// Frames a `w` x `h` board, tilted by `pitch` radians, from `yaw`.
+    ///
+    /// The distance is solved exactly rather than searched for. The old version
+    /// projected the corners and stepped the camera in until they fitted, but a
+    /// corner that falls behind the near plane cannot be projected at all - it
+    /// was silently skipped, the remaining corners fitted trivially, and the
+    /// loop happily walked the camera *inwards* until the board filled the
+    /// screen from one corner. At some aspect ratios that made the game look
+    /// half-rendered.
+    ///
+    /// Instead: put each corner in view space, where a point is visible when
+    /// `|x| <= (z + d) * tan(fovx/2)` and `|y| <= (z + d) * tan(fovy/2)`. Since
+    /// x, y and z are measured from the target they do not depend on `d`, so
+    /// each corner gives a lower bound on `d` directly and the answer is the
+    /// largest of them. One pass, no iteration, correct at every aspect.
     pub fn frame_board(w: f32, h: f32, aspect: f32, pitch: f32, yaw: f32, zoom: f32) -> Self {
         let fov_y = 42f32.to_radians();
+        let aspect = aspect.clamp(0.20, 8.0);
         let target = v3(w * 0.5, h * 0.5, 0.0);
 
         let (sp, cp) = pitch.sin_cos();
         let (sy, cy) = yaw.sin_cos();
+        // Unit vector from the target towards where the camera will sit.
         let dir = v3(-sy * cp, -cy * cp, sp);
 
-        // Start from the bounding sphere, then refine: project the board's
-        // corners and pull back until they all sit inside the frame. Two
-        // iterations converge, and it stays framed at any aspect or pitch.
-        let radius = 0.5 * (w * w + h * h).sqrt();
-        let mut dist = radius / (fov_y * 0.5).sin();
+        // Camera basis, which only depends on the direction, not the distance.
+        let fwd = dir.mul(-1.0);
+        let world_up = v3(0.0, 0.0, 1.0);
+        let right = fwd.cross(world_up).norm();
+        let up = right.cross(fwd).norm();
+
+        let ty = (fov_y * 0.5).tan();
+        let tx = ty * aspect;
+
+        // Tall enough to keep a maxed tower and the gate arches in frame.
+        const TOP: f32 = 3.6;
         let corners = [
             v3(0.0, 0.0, 0.0),
             v3(w, 0.0, 0.0),
             v3(0.0, h, 0.0),
             v3(w, h, 0.0),
-            v3(w * 0.5, h * 0.5, 2.0),
+            v3(0.0, 0.0, TOP),
+            v3(w, 0.0, TOP),
+            v3(0.0, h, TOP),
+            v3(w, h, TOP),
         ];
-        let mut view = Mat4::IDENTITY;
-        let mut proj = Mat4::IDENTITY;
-        let mut eye = target;
-        for _ in 0..4 {
-            eye = target.add(dir.mul(dist));
-            view = Mat4::look_at(eye, target, v3(0.0, 0.0, 1.0));
-            proj = Mat4::perspective(fov_y, aspect.max(0.05), 1.0, dist * 4.0 + 200.0);
-            let vp = proj.mul(&view);
-            let mut extent: f32 = 0.0;
-            for c in corners {
-                if let Some(n) = vp.project(c) {
-                    extent = extent.max(n[0].abs()).max(n[1].abs());
-                }
-            }
-            if extent <= 0.0 {
-                break;
-            }
-            // Margin so nothing touches the edge, then the requested zoom.
-            dist *= extent * 1.06 / zoom.max(0.2);
+        let mut dist = 1.0f32;
+        for c in corners {
+            let rel = c.sub(target);
+            let x = rel.dot(right).abs();
+            let y = rel.dot(up).abs();
+            let z = rel.dot(fwd);
+            dist = dist.max(x / tx - z).max(y / ty - z);
         }
+        // Margin so nothing touches the edge, then the requested zoom.
+        dist = (dist * 1.06 / zoom.clamp(0.2, 4.0)).max(2.0);
+
+        let eye = target.add(dir.mul(dist));
+        let view = Mat4::look_at(eye, target, world_up);
+        let proj = Mat4::perspective(fov_y, aspect, (dist * 0.05).max(0.5), dist * 3.0 + 200.0);
         let view_proj = proj.mul(&view);
         // Rows 0 and 1 of the view matrix are the camera's right and up axes.
         let m = &view.0;
@@ -332,4 +351,84 @@ pub fn shadow_view_proj(board_w: f32, board_h: f32, dir: [f32; 3]) -> Mat4 {
     let view = Mat4::look_at(eye, centre, v3(0.0, 0.0, 1.0));
     let proj = Mat4::ortho(half, half, 1.0, dist * 2.2);
     proj.mul(&view)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The whole board must be inside the frustum at every window shape the
+    /// game can be given. The old fitter walked the camera inwards whenever a
+    /// corner fell behind the near plane, which showed up in game as a
+    /// magnified corner of the map and looked like a broken renderer.
+    #[test]
+    fn the_board_is_framed_at_every_aspect() {
+        const W: f32 = 30.0;
+        const H: f32 = 18.0;
+        for &aspect in &[0.35, 0.55, 0.75, 1.0, 1.33, 1.78, 2.4, 3.2, 5.0] {
+            for &pitch_deg in &[35.0f32, 52.0, 70.0] {
+                for &yaw in &[-0.3f32, 0.0, 0.3] {
+                    let cam =
+                        Camera::frame_board(W, H, aspect, pitch_deg.to_radians(), yaw, 1.06);
+                    for &(x, y, z) in &[
+                        (0.0, 0.0, 0.0),
+                        (W, 0.0, 0.0),
+                        (0.0, H, 0.0),
+                        (W, H, 0.0),
+                        (W * 0.5, H * 0.5, 3.5),
+                    ] {
+                        let n = cam
+                            .view_proj
+                            .project(v3(x, y, z))
+                            .unwrap_or_else(|| panic!("corner ({x},{y},{z}) is behind the camera at aspect {aspect}, pitch {pitch_deg}"));
+                        // The default zoom deliberately cancels the fit margin,
+                        // so corners land exactly on the edge; allow for float
+                        // rounding, not for actually being outside.
+                        assert!(
+                            n[0].abs() <= 1.002 && n[1].abs() <= 1.002,
+                            "corner ({x},{y},{z}) falls outside the view at aspect {aspect},                              pitch {pitch_deg}, yaw {yaw}: ndc {n:?}"
+                        );
+                        assert!(
+                            (0.0..=1.0).contains(&n[2]),
+                            "corner ({x},{y},{z}) is outside the depth range: {}",
+                            n[2]
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// And it must not be framed so loosely that the board is a stamp in the
+    /// middle of the screen - a fit that is always "safe" is a useless fit.
+    #[test]
+    fn the_board_actually_fills_the_frame() {
+        for &aspect in &[0.6, 1.0, 1.78, 2.6] {
+            let cam = Camera::frame_board(30.0, 18.0, aspect, 52f32.to_radians(), 0.0, 1.06);
+            let mut extent = 0.0f32;
+            for &(x, y) in &[(0.0, 0.0), (30.0, 0.0), (0.0, 18.0), (30.0, 18.0)] {
+                let n = cam.view_proj.project(v3(x, y, 0.0)).expect("in front");
+                extent = extent.max(n[0].abs()).max(n[1].abs());
+            }
+            assert!(extent > 0.72, "board only fills {extent:.2} of the frame at aspect {aspect}");
+        }
+    }
+
+    /// Picking and rendering share one camera, so a click has to land on the
+    /// tile it looks like it lands on.
+    #[test]
+    fn picking_agrees_with_projection() {
+        let cam = Camera::frame_board(30.0, 18.0, 1.6, 52f32.to_radians(), 0.0, 1.06);
+        for &(x, y) in &[(2.5f32, 3.5f32), (15.0, 9.0), (27.5, 15.5)] {
+            let n = cam.view_proj.project(v3(x, y, 0.0)).expect("on screen");
+            let u = n[0] * 0.5 + 0.5;
+            let v = 0.5 - n[1] * 0.5;
+            let back = cam.ground_pick(u, v).expect("ray hits the ground");
+            assert!(
+                (back[0] - x).abs() < 0.02 && (back[1] - y).abs() < 0.02,
+                "picked {back:?} for {:?}",
+                (x, y)
+            );
+        }
+    }
 }

@@ -65,6 +65,10 @@ pub mod pal {
     pub const GOOD: Color32 = Color32::from_rgb(110, 231, 135);
 }
 
+/// The colour air belongs to, used on the wave badge and on tower cards, so the
+/// two always agree about what "flies" looks like.
+pub const AIR_TINT: [f32; 3] = [0.56, 0.82, 1.00];
+
 pub fn c32(c: [f32; 3], a: f32) -> Color32 {
     Color32::from_rgba_unmultiplied(
         (c[0].clamp(0.0, 1.0) * 255.0) as u8,
@@ -127,6 +131,17 @@ pub struct UiState {
     pub online: bool,
     /// Raised by the Menu button; the app acts on it and clears it.
     pub want_menu: bool,
+    /// The perf readout, rebuilt a few times a second rather than every frame.
+    pub perf: String,
+    pub perf_ticks: u32,
+    /// The strip the top bar drew into last frame, for the layout test.
+    pub top_content: Rect,
+    /// Where the wave / lives / gold readouts landed, and where the leftmost
+    /// control button landed. A layout test asserts they never collide - the
+    /// stats being silently pushed off the edge by the controls is a bug that
+    /// has shipped here once already.
+    pub stat_rects: Vec<Rect>,
+    pub controls_left: f32,
 }
 
 impl Default for UiState {
@@ -144,6 +159,11 @@ impl Default for UiState {
             auto_quality: true,
             online: false,
             want_menu: false,
+            perf: String::new(),
+            perf_ticks: 0,
+            top_content: Rect::NOTHING,
+            stat_rects: Vec::new(),
+            controls_left: f32::MAX,
         }
     }
 }
@@ -166,109 +186,222 @@ pub fn install_style(ctx: &Context) {
 
 // ---------------------------------------------------------------- top strip
 
+/// The resource strip.
+///
+/// Laid out by explicit budget rather than by nested egui layouts. The previous
+/// version put the controls in a right-to-left sub-layout, which claims all the
+/// remaining width - so on a narrow window the wave, lives and gold were pushed
+/// clean off the left edge and the *performance readout* was the only thing you
+/// could still see. Money and lives are the game; they are the last things to
+/// go, not the first. Here the controls are measured first, whatever is left
+/// belongs to the stats, and optional items drop in a fixed priority order.
 pub fn top_bar(g: &mut Game, ui: &mut Ui, ust: &mut UiState, perf: &str) {
-    ui.horizontal(|ui| {
-        ui.add_space(2.0);
-        if g.endless {
-            stat(ui, "WAVE", &format!("{}", g.wave), pal::ACC);
-        } else {
-            stat(ui, "WAVE", &format!("{}/{}", g.wave, N_WAVES), pal::INK);
-        }
-        stat(ui, "LIVES", &g.lives.to_string(), pal::BAD);
-        stat(ui, "GOLD", &gold_str(g.gold), pal::GOLD);
-        ui.add_space(4.0);
-        wave_preview(g, ui);
+    let compact = ust.compact;
+    let full = ui.available_rect_before_wrap();
+    let h = full.height();
+    let pad = 6.0;
 
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui.button("?").on_hover_text("How to play (H)").clicked() {
-                ust.show_help = true;
+    // ---- right-hand controls.
+    #[derive(Clone, Copy, PartialEq)]
+    enum Cmd {
+        Send,
+        Pause,
+        Speed,
+        Quality,
+        Menu,
+        Help,
+    }
+    let send_bonus = (g.build_timer * EARLY_BONUS_PER_SEC) as i32;
+    let send_label = if compact {
+        format!("Send +{send_bonus}")
+    } else {
+        format!("Send  +{send_bonus}g")
+    };
+    let speed_label = format!("{:.0}x", g.speed);
+    let quality_label = if compact { ust.quality.short() } else { ust.quality.label() };
+    let pause_label = if g.paused { "\u{25b6}" } else { "\u{2759}\u{2759}" };
+
+    let mut cmds: Vec<(Cmd, &str)> = Vec::with_capacity(6);
+    if g.phase == Phase::Build {
+        cmds.push((Cmd::Send, send_label.as_str()));
+    }
+    cmds.push((Cmd::Pause, pause_label));
+    cmds.push((Cmd::Speed, speed_label.as_str()));
+    cmds.push((Cmd::Quality, quality_label));
+    cmds.push((Cmd::Menu, "Menu"));
+    cmds.push((Cmd::Help, "?"));
+
+    let text_w = |ui: &Ui, text: &str, font: FontId| -> f32 {
+        ui.painter().layout_no_wrap(text.to_owned(), font, pal::INK).rect.width()
+    };
+    let mut widths: Vec<f32> = cmds
+        .iter()
+        .map(|(_, t)| (text_w(ui, t, FontId::proportional(13.0)) + 20.0).max(30.0))
+        .collect();
+
+    // ---- stats always come first, and always fit.
+    let gold = gold_str(g.gold);
+    let wave = if g.endless {
+        format!("{}", g.wave)
+    } else {
+        format!("{}/{}", g.wave, N_WAVES)
+    };
+    let lives = g.lives.to_string();
+    let value_size = if compact { 15.0 } else { 18.0 };
+    let chips: [(&str, &str, Color32); 3] = [
+        ("WAVE", wave.as_str(), if g.endless { pal::ACC } else { pal::INK }),
+        ("LIVES", lives.as_str(), pal::BAD),
+        ("GOLD", gold.as_str(), pal::GOLD),
+    ];
+    let chip_ws: Vec<f32> = chips
+        .iter()
+        .map(|(l, v, _)| {
+            let a = text_w(ui, l, FontId::monospace(9.0));
+            let b = text_w(ui, v, FontId::monospace(value_size));
+            a.max(b) + 18.0
+        })
+        .collect();
+    let stats_w: f32 = chip_ws.iter().sum::<f32>() + pad * 2.0;
+
+    // On a phone there is not room for everything. Drop controls, least useful
+    // first, until they fit beside the stats - the stats themselves are never
+    // dropped, because losing sight of your gold mid-wave is worse than losing
+    // any button here.
+    let rank = |c: Cmd| match c {
+        Cmd::Quality => 0,
+        Cmd::Help => 1,
+        Cmd::Speed => 2,
+        Cmd::Pause => 3,
+        Cmd::Menu => 4,
+        Cmd::Send => 5,
+    };
+    let width_of = |ws: &[f32]| ws.iter().sum::<f32>() + pad * (ws.len() as f32 - 1.0).max(0.0);
+    while cmds.len() > 1 && stats_w + width_of(&widths) + pad * 2.0 > full.width() {
+        let (worst, _) = cmds
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, (c, _))| rank(*c))
+            .expect("cmds is non-empty");
+        cmds.remove(worst);
+        widths.remove(worst);
+    }
+    let controls_w: f32 = width_of(&widths);
+
+    // ---- fit the optional extras into whatever is left over.
+    let mut spare = full.width() - stats_w - controls_w - pad * 2.0;
+    let preview_w = 268.0;
+    let show_preview = !compact && spare > preview_w + 8.0;
+    if show_preview {
+        spare -= preview_w + pad;
+    }
+    let perf_w = text_w(ui, perf, FontId::monospace(10.0));
+    let show_perf = !compact && spare > perf_w + 12.0;
+
+    // ---- paint. Nothing here can overflow: every rect came out of the budget.
+    ust.stat_rects.clear();
+    let mut x = full.left();
+    for (i, (label, value, col)) in chips.iter().enumerate() {
+        let r = Rect::from_min_size(pos2(x, full.top()), vec2(chip_ws[i], h));
+        stat_chip(ui, r, label, value, *col, value_size);
+        ust.stat_rects.push(r);
+        x += chip_ws[i] + pad;
+    }
+    if show_preview {
+        let r =
+            Rect::from_min_size(pos2(x, full.top() + 2.0), vec2(preview_w, (h - 4.0).min(40.0)));
+        wave_preview(g, ui, r);
+        x += preview_w + pad;
+    }
+    if show_perf {
+        let r = Rect::from_min_size(pos2(x, full.top()), vec2(perf_w + 8.0, h));
+        ui.put(r, egui::Label::new(RichText::new(perf).monospace().size(10.0).color(pal::DIM)));
+    }
+
+    let mut cx = full.right();
+    for (i, (cmd, text)) in cmds.iter().enumerate().rev() {
+        cx -= widths[i];
+        let r =
+            Rect::from_min_size(pos2(cx, full.top() + 6.0), vec2(widths[i], (h - 12.0).max(20.0)));
+        let fill = match cmd {
+            Cmd::Send => Color32::from_rgb(38, 106, 68),
+            Cmd::Menu => pal::CARD_HOVER,
+            _ => pal::CARD,
+        };
+        let mut label = RichText::new(*text).size(13.0).color(pal::INK);
+        if matches!(cmd, Cmd::Send | Cmd::Menu) {
+            label = label.strong();
+        }
+        let resp = ui.put(r, egui::Button::new(label).fill(fill).corner_radius(6.0));
+        let resp = match cmd {
+            Cmd::Send => resp
+                .on_hover_text("Call the wave early (Enter). The bonus is the time you give up."),
+            Cmd::Pause => resp.on_hover_text("Pause (Space)"),
+            Cmd::Speed => resp.on_hover_text("Game speed (F)"),
+            Cmd::Quality => {
+                resp.on_hover_text("Graphics quality (B). Lower it if the frame rate drags.")
             }
-            if ui
-                .button("Menu")
-                .on_hover_text(if ust.online {
-                    "Leave the room and go back to the menu"
-                } else {
-                    "Back to the menu. This ends the run."
-                })
-                .clicked()
-            {
-                ust.want_menu = true;
-            }
-            // Difficulty can only change between runs, so it restarts - which
-            // would desync a room, so an online run cannot touch it.
-            let d = g.difficulty;
-            let hint = if ust.online {
-                format!("{}\n\nThe host chose this for the room.", d.blurb())
-            } else {
-                format!("{}\n\nClick to change - this restarts the run.", d.blurb())
-            };
-            if ui
-                .add_enabled(!ust.online, egui::Button::new(d.label()))
-                .on_hover_text(hint)
-                .clicked()
-            {
-                g.restart(d.next());
-            }
-            if ui
-                .button(format!("{:.0}x", g.speed))
-                .on_hover_text("Game speed (F)")
-                .clicked()
-            {
-                g.speed = match g.speed as i32 {
-                    1 => 2.0,
-                    2 => 3.0,
-                    _ => 1.0,
-                };
-            }
-            if ui
-                .button(if g.paused { "▶" } else { "❚❚" })
-                .on_hover_text("Pause (Space)")
-                .clicked()
-            {
-                g.paused = !g.paused;
-            }
-            if ui
-                .button(ust.quality.label())
-                .on_hover_text("Graphics quality (B). Lower it if the frame rate drags.")
-                .clicked()
-            {
-                ust.quality = ust.quality.lower().unwrap_or(crate::gfx::Quality::Ultra);
-                ust.quality_dirty = true;
-                ust.auto_quality = false;
-            }
-            if g.phase == Phase::Build {
-                let bonus = (g.build_timer * EARLY_BONUS_PER_SEC) as i32;
-                let b = egui::Button::new(RichText::new(format!("Send  +{bonus}g")).strong())
-                    .fill(Color32::from_rgb(38, 106, 68));
-                if ui.add(b).on_hover_text("Call the wave early (Enter)").clicked() {
-                    g.send_wave();
+            Cmd::Menu => resp.on_hover_text("Back to the menu. This ends the run."),
+            Cmd::Help => resp.on_hover_text("How to play (H)"),
+        };
+        if resp.clicked() {
+            match cmd {
+                Cmd::Send => g.send_wave(),
+                Cmd::Pause => g.paused = !g.paused,
+                Cmd::Speed => {
+                    g.speed = match g.speed as i32 {
+                        1 => 2.0,
+                        2 => 3.0,
+                        _ => 1.0,
+                    }
                 }
+                Cmd::Quality => {
+                    ust.quality = ust.quality.lower().unwrap_or(crate::gfx::Quality::Ultra);
+                    ust.quality_dirty = true;
+                    ust.auto_quality = false;
+                }
+                Cmd::Menu => ust.want_menu = true,
+                Cmd::Help => ust.show_help = true,
             }
-            ui.label(RichText::new(perf).monospace().size(10.0).color(pal::DIM));
-        });
-    });
+        }
+        cx -= pad;
+    }
+    ust.controls_left = cx + pad;
+    ust.top_content = full;
 }
 
-fn stat(ui: &mut Ui, label: &str, value: &str, color: Color32) {
-    ui.vertical(|ui| {
-        ui.add_space(1.0);
-        ui.label(RichText::new(label).size(9.0).color(pal::DIM).monospace());
-        ui.label(RichText::new(value).size(18.0).strong().color(color).monospace());
-    });
-    ui.add_space(8.0);
+/// One resource readout: a small caps label over a large monospace number, on a
+/// card. Monospace so a gold figure does not jitter sideways as it ticks.
+fn stat_chip(ui: &mut Ui, r: Rect, label: &str, value: &str, color: Color32, value_size: f32) {
+    let p = ui.painter();
+    p.rect_filled(r.shrink2(vec2(0.0, 3.0)), CornerRadius::same(7), pal::PANEL_DEEP);
+    p.text(
+        pos2(r.center().x, r.top() + 12.0),
+        Align2::CENTER_CENTER,
+        label,
+        FontId::monospace(9.0),
+        pal::DIM,
+    );
+    p.text(
+        pos2(r.center().x, r.bottom() - value_size * 0.85),
+        Align2::CENTER_CENTER,
+        value,
+        FontId::monospace(value_size),
+        color,
+    );
 }
 
 /// What is coming next, and what it punishes.
-fn wave_preview(g: &mut Game, ui: &mut Ui) {
+fn wave_preview(g: &mut Game, ui: &mut Ui, rect: Rect) {
     let w = g.next_wave_def();
     let upcoming = (g.wave + 1).min(N_WAVES);
-    let (rect, resp) = ui.allocate_exact_size(vec2(268.0, 40.0), Sense::hover());
+    let resp = ui.interact(rect, Id::new("wave_preview"), Sense::hover());
     let p = ui.painter();
     p.rect_filled(rect, CornerRadius::same(7), pal::CARD);
+    let air = w.kind.flying();
     p.rect_stroke(
         rect,
         CornerRadius::same(7),
-        Stroke::new(1.0, c32(w.armor().color(), 0.5)),
+        Stroke::new(if air { 2.0 } else { 1.0 }, c32(w.armor().color(), if air { 0.95 } else { 0.5 })),
         StrokeKind::Inside,
     );
 
@@ -287,8 +420,22 @@ fn wave_preview(g: &mut Game, ui: &mut Ui) {
     } else {
         format!("{} x{}  ·  {}", w.kind.name(), w.count, mods.join(", "))
     };
+    let mut tx = rect.left() + 8.0;
+    if air {
+        // A filled badge, not a word in a sentence. Missing this costs lives.
+        let badge = Rect::from_min_size(pos2(tx, rect.top() + 17.0), vec2(34.0, 14.0));
+        p.rect_filled(badge, CornerRadius::same(4), c32(AIR_TINT, 1.0));
+        p.text(
+            badge.center(),
+            Align2::CENTER_CENTER,
+            "AIR",
+            FontId::monospace(9.0),
+            Color32::from_rgb(10, 14, 24),
+        );
+        tx += 40.0;
+    }
     p.text(
-        rect.left_top() + vec2(8.0, 17.0),
+        pos2(tx, rect.top() + 17.0),
         Align2::LEFT_TOP,
         line,
         FontId::proportional(12.0),
@@ -350,7 +497,6 @@ pub fn scoreboard(g: &Game, ctx: &Context) {
         .resizable(false)
         .movable(false)
         .anchor(Align2::RIGHT_TOP, vec2(-10.0, TOP_H + 10.0))
-        .fixed_size(vec2(196.0, 10.0))
         .frame(
             egui::Frame::NONE
                 .fill(pal::PANEL_DEEP)
@@ -359,36 +505,76 @@ pub fn scoreboard(g: &Game, ctx: &Context) {
                 .inner_margin(10.0),
         )
         .show(ctx, |ui| {
-            ui.label(RichText::new("STATUS").size(9.0).monospace().color(pal::DIM));
-            ui.add_space(3.0);
-            row(ui, "Current level", &format!("{}", g.wave), pal::INK);
-            row(ui, "Next level", &format!("{}", (g.wave + 1).min(N_WAVES)), pal::DIM);
-            row(
-                ui,
+            // Rows are laid out against a shared column width so a long number
+            // widens the whole panel instead of running underneath its label.
+            // The panel used to be a fixed 196 points wide, which meant a large
+            // interest figure printed straight through the word "Interest".
+            let mut rows: Vec<(&str, String, Color32)> = Vec::with_capacity(9);
+            rows.push(("Current wave", g.wave.to_string(), pal::INK));
+            if !g.endless {
+                rows.push(("Next wave", (g.wave + 1).min(N_WAVES).to_string(), pal::DIM));
+            }
+            rows.push((
                 "Interest",
-                &format!("+{} ({:.0}%)", gold_str(g.projected_interest()), g.interest_rate() * 100.0),
+                format!(
+                    "+{} ({:.0}%)",
+                    gold_str(g.projected_interest()),
+                    g.interest_rate() * 100.0
+                ),
                 pal::GOLD,
-            );
+            ));
             let income = g.projected_income();
             if income > 0 {
-                row(ui, "Mint income", &format!("+{}", gold_str(income)), pal::GOLD);
+                rows.push(("Mint income", format!("+{}", gold_str(income)), pal::GOLD));
             }
-            ui.separator();
-            row(ui, "Lives", &g.lives.to_string(), pal::BAD);
-            row(ui, "Gold", &gold_str(g.gold), pal::GOLD);
-            row(ui, "Net worth", &gold_str(g.net_worth()), pal::GOOD);
-            row(ui, "Towers", &g.towers.len().to_string(), pal::DIM);
-            row(ui, "Kills", &short(g.stats.kills as f64), pal::DIM);
-        });
-}
+            rows.push(("", String::new(), pal::DIM));
+            rows.push(("Lives", g.lives.to_string(), pal::BAD));
+            rows.push(("Gold", gold_str(g.gold), pal::GOLD));
+            rows.push(("Net worth", gold_str(g.net_worth()), pal::GOOD));
+            rows.push(("Towers", g.towers.len().to_string(), pal::DIM));
+            rows.push(("Kills", short(g.stats.kills as f64), pal::DIM));
 
-fn row(ui: &mut Ui, k: &str, v: &str, color: Color32) {
-    ui.horizontal(|ui| {
-        ui.label(RichText::new(k).size(11.0).color(pal::DIM));
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.label(RichText::new(v).size(11.5).monospace().strong().color(color));
+            let label_font = FontId::proportional(11.0);
+            let value_font = FontId::monospace(11.5);
+            let measure = |ui: &Ui, t: &str, f: FontId| {
+                ui.painter().layout_no_wrap(t.to_owned(), f, pal::INK).rect.width()
+            };
+            let label_w = rows
+                .iter()
+                .map(|(k, _, _)| measure(ui, k, label_font.clone()))
+                .fold(0.0f32, f32::max);
+            let value_w = rows
+                .iter()
+                .map(|(_, v, _)| measure(ui, v, value_font.clone()))
+                .fold(0.0f32, f32::max);
+            let width = (label_w + value_w + 14.0).max(176.0);
+            ui.set_width(width);
+
+            ui.label(RichText::new("STATUS").size(9.0).monospace().color(pal::DIM));
+            ui.add_space(3.0);
+            for (k, v, col) in &rows {
+                if k.is_empty() {
+                    ui.separator();
+                    continue;
+                }
+                let (r, _) = ui.allocate_exact_size(vec2(width, 15.0), Sense::hover());
+                let p = ui.painter();
+                p.text(
+                    pos2(r.left(), r.center().y),
+                    Align2::LEFT_CENTER,
+                    k,
+                    label_font.clone(),
+                    pal::DIM,
+                );
+                p.text(
+                    pos2(r.right(), r.center().y),
+                    Align2::RIGHT_CENTER,
+                    v,
+                    value_font.clone(),
+                    *col,
+                );
+            }
         });
-    });
 }
 
 // ---------------------------------------------------------------- command bar
@@ -743,6 +929,29 @@ fn tower_card(g: &mut Game, ui: &mut Ui, rect: Rect, def_i: usize, tier: u32, ho
         3.5,
         c32(def.dtype.color(), 1.0),
     );
+    // Which layers it answers. A player choosing a tower mid-build phase needs
+    // this at a glance, not buried in a tooltip.
+    match def.targets {
+        Targets::Both => {
+            p.text(
+                pos2(rect.right() - 5.0, rect.top() + 3.0),
+                Align2::RIGHT_TOP,
+                "AIR",
+                FontId::monospace(8.0),
+                c32(AIR_TINT, if affordable { 1.0 } else { 0.45 }),
+            );
+        }
+        Targets::GroundOnly => {
+            p.text(
+                pos2(rect.right() - 5.0, rect.top() + 3.0),
+                Align2::RIGHT_TOP,
+                "GND",
+                FontId::monospace(8.0),
+                c32([0.72, 0.60, 0.42], if affordable { 1.0 } else { 0.45 }),
+            );
+        }
+        Targets::Nothing => {}
+    }
 
     p.text(
         pos2(rect.center().x, rect.top() + h * 0.53),
@@ -789,6 +998,13 @@ fn tower_tooltip(ui: &mut Ui, def_i: usize, tier: u32) {
             .size(10.5)
             .color(c32(def.dtype.color(), 1.0)),
     );
+    ui.label(
+        RichText::new(def.targets.label()).size(10.5).strong().color(match def.targets {
+            Targets::Both => c32(AIR_TINT, 1.0),
+            Targets::GroundOnly => c32([0.86, 0.68, 0.42], 1.0),
+            Targets::Nothing => pal::DIM,
+        }),
+    );
     ui.label(RichText::new(def.desc).size(11.5).color(pal::DIM));
     ui.separator();
     let st = def.stats(tier, None);
@@ -805,6 +1021,9 @@ fn tower_tooltip(ui: &mut Ui, def_i: usize, tier: u32) {
     kv(ui, "Range", &format!("{:.1}", st.range));
     if let Delivery::Chain { bounces, hop, .. } = st.delivery {
         kv(ui, "Chain", &format!("{bounces} leaps, {hop:.1} reach"));
+    }
+    if let Delivery::Zone { radius, dur } = st.delivery {
+        kv(ui, "Fire", &format!("{radius:.1} across, burns {dur:.1}s"));
     }
     if st.splash > 0.0 {
         kv(ui, "Splash", &format!("{:.2}", st.splash));
@@ -854,7 +1073,6 @@ fn game_over(g: &mut Game, ctx: &Context) {
     let won = g.phase == Phase::Victory;
     let mut again = false;
     let mut carry_on = false;
-    let mut switch_to: Option<Difficulty> = None;
     egui::Modal::new(Id::new("game_over"))
         .frame(
             egui::Frame::NONE
@@ -873,16 +1091,11 @@ fn game_over(g: &mut Game, ctx: &Context) {
                 );
                 ui.label(
                     RichText::new(if won {
-                        format!(
-                            "All {} waves cleared on {} with {} lives left.",
-                            N_WAVES,
-                            g.difficulty.label(),
-                            g.lives
-                        )
+                        format!("All {N_WAVES} waves cleared with {} lives left.", g.lives)
                     } else if g.endless {
                         format!("Endless run ended on wave {}.", g.wave)
                     } else {
-                        format!("The road fell on wave {} ({}).", g.wave, g.difficulty.label())
+                        format!("The road fell on wave {}.", g.wave)
                     })
                     .size(13.0)
                     .color(pal::DIM),
@@ -929,28 +1142,11 @@ fn game_over(g: &mut Game, ctx: &Context) {
                     {
                         again = true;
                     }
-                    for d in Difficulty::ALL {
-                        if d == g.difficulty {
-                            continue;
-                        }
-                        if ui
-                            .add(
-                                egui::Button::new(RichText::new(d.label()).size(13.0))
-                                    .min_size(vec2(104.0, 34.0)),
-                            )
-                            .on_hover_text(d.blurb())
-                            .clicked()
-                        {
-                            switch_to = Some(d);
-                        }
-                    }
                 });
             });
         });
     if carry_on {
         g.continue_endless();
-    } else if let Some(d) = switch_to {
-        g.restart(d);
     } else if again {
         g.reset();
     }

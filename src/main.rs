@@ -39,7 +39,11 @@ use math::{Camera, Mat4, shadow_view_proj};
 const CAM_PITCH_DEG: f32 = 52.0;
 const CAM_ZOOM: f32 = 1.06;
 /// Ceiling on how many device pixels the 3D scene is rendered at per point.
-const MAX_SCENE_DPR: f32 = 1.35;
+///
+/// The HUD stays crisp at the display's real scale; the 3D scene does not need
+/// to be supersampled, and on a 2x display the difference between 1.0 and 1.35
+/// here is 1.8x the fill rate for something nobody can see.
+const MAX_SCENE_DPR: f32 = 1.0;
 /// Key light direction, shared by the shader and the shadow camera.
 const LIGHT_DIR: [f32; 3] = [-0.40, -0.52, 0.76];
 
@@ -163,6 +167,54 @@ fn read_keys(ui: &egui::Ui) -> Keys {
     })
 }
 
+// ---------------------------------------------------------------- profiling
+
+/// Exponentially smoothed millisecond costs for the parts of a frame we own.
+/// Anything left over between `total` and the sum is the GPU and the swapchain.
+#[derive(Default, Clone, Copy)]
+pub struct Profile {
+    pub sim: f32,
+    pub build: f32,
+    pub hud: f32,
+    pub total: f32,
+}
+
+impl Profile {
+    fn feed(slot: &mut f32, ms: f64) {
+        *slot += (ms as f32 - *slot) * 0.08;
+    }
+    pub fn line(&self) -> String {
+        format!(
+            "sim {:.1} · scene {:.1} · hud {:.1} · frame {:.1}",
+            self.sim, self.build, self.hud, self.total
+        )
+    }
+}
+
+/// Monotonic milliseconds, in f64.
+///
+/// It has to be f64: milliseconds since the epoch is about 1.8e12, and an f32
+/// carries only seven significant digits, so every timestamp rounded to the
+/// nearest ~131 seconds and the profiler dutifully reported that every part of
+/// the frame took exactly zero. Only the *delta* is narrowed to f32.
+fn now_ms() -> f64 {
+    #[cfg(target_arch = "wasm32")]
+    {
+        web_sys::window()
+            .and_then(|w| w.performance())
+            .map(|p| p.now())
+            .unwrap_or(0.0)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs_f64() * 1000.0)
+            .unwrap_or(0.0)
+    }
+}
+
 // ---------------------------------------------------------------- app
 
 struct App {
@@ -176,6 +228,10 @@ struct App {
     rs: egui_wgpu::RenderState,
     fps: f32,
     anim: f32,
+    /// Rolling per-section frame cost in milliseconds. Guessing at where a
+    /// frame goes is how you end up optimising a shader on a card that was
+    /// never the bottleneck, so the HUD reports it.
+    prof: Profile,
     /// Whether the one-time viewport-dependent setup has run.
     sized_once: bool,
 }
@@ -214,6 +270,7 @@ impl App {
             rs,
             fps: 60.0,
             anim: 0.0,
+            prof: Profile::default(),
             sized_once: false,
         };
         app.apply_demo_env();
@@ -415,13 +472,13 @@ impl App {
             });
 
         match menu::show(&ctx, &mut self.menu, &mut self.net, dt) {
-            menu::Action::SinglePlayer(d) => {
+            menu::Action::SinglePlayer => {
                 self.net.leave();
-                self.game.start_run(d, seed_now());
+                self.game.start_run(seed_now());
                 self.menu.screen = Screen::Playing;
             }
             menu::Action::Cancelled => {
-                self.game.restart(self.menu.difficulty);
+                self.game.restart();
             }
             menu::Action::None => {}
         }
@@ -465,9 +522,8 @@ impl eframe::App for App {
         }
 
         // --- network: drain the socket before anything reads its state
-        if let Some(net::Event::Started { seed, difficulty }) = self.net.poll() {
-            self.game
-                .start_run(game::defs::Difficulty::from_wire(difficulty), seed);
+        if let Some(net::Event::Started { seed, .. }) = self.net.poll() {
+            self.game.start_run(seed);
             self.menu.screen = Screen::Playing;
         }
         self.ust.online = self.net.is_online();
@@ -481,7 +537,7 @@ impl eframe::App for App {
             self.ust.want_menu = false;
             self.net.leave();
             self.menu.screen = Screen::Title;
-            self.game.restart(self.menu.difficulty);
+            self.game.restart();
             return;
         }
 
@@ -490,17 +546,28 @@ impl eframe::App for App {
         self.auto_quality();
 
         // --- simulate
+        let t_frame = now_ms();
         self.game.update(dt);
         self.game.sound_cues.clear();
         self.net.push(self.game.snapshot(), dt);
+        Profile::feed(&mut self.prof.sim, now_ms() - t_frame);
 
         // --- HUD
-        let perf = format!(
-            "{:>3.0} fps  {:>5} inst  {:>4} creeps",
-            self.fps,
-            self.draw.len(),
-            self.game.creeps.len()
-        );
+        self.ust.perf_ticks += 1;
+        if self.ust.perf_ticks % 15 == 0 {
+            self.ust.perf = format!(
+                "{:>3.0} fps  {:>5} inst  {:>4} creeps",
+                self.fps,
+                self.draw.len(),
+                self.game.creeps.len()
+            );
+            #[cfg(not(target_arch = "wasm32"))]
+            if std::env::var("TD_PROFILE").is_ok() {
+                println!("{}  |  {}", self.ust.perf, self.prof.line());
+            }
+        }
+        let perf = self.ust.perf.clone();
+        let t_hud = now_ms();
         egui::Panel::top("hud")
             .exact_size(ui::top_h(self.ust.compact))
             .resizable(false)
@@ -552,10 +619,12 @@ impl eframe::App for App {
 
                 self.board_input(&resp, rect, &camera, keys.shift);
 
+                let t_build = now_ms();
                 self.draw.clear();
                 view::draw_scene(&self.game, &self.decor, &mut self.draw, self.anim);
                 self.spawns.clear();
                 self.spawns.append(&mut self.game.fx.particles);
+                Profile::feed(&mut self.prof.build, now_ms() - t_build);
 
                 self.publish_frame(camera, px, dt);
                 ui.painter()
@@ -568,6 +637,8 @@ impl eframe::App for App {
         ui::scoreboard(&self.game, &ctx);
         menu::room_scoreboard(&ctx, &self.net, self.ust.compact);
         ui::modals(&mut self.game, &ctx, &mut self.ust);
+        Profile::feed(&mut self.prof.hud, now_ms() - t_hud - self.prof.build as f64);
+        Profile::feed(&mut self.prof.total, now_ms() - t_frame);
 
         // Games animate constantly; never idle the frame loop.
         ctx.request_repaint();
@@ -608,10 +679,44 @@ fn main() -> eframe::Result {
                 .with_inner_size([1400.0, 900.0])
                 .with_min_inner_size([900.0, 620.0])
                 .with_title("Elemental TD"),
+            wgpu_options: high_performance_gpu(),
             ..Default::default()
         },
         Box::new(|cc| Ok(Box::new(App::new(cc)))),
     )
+}
+
+/// Insist on the discrete GPU.
+///
+/// On a laptop with both an integrated and a discrete adapter, landing on the
+/// integrated one is the difference between 20 fps and locked 60. The selector
+/// is explicit rather than left to the power-preference hint because on Windows
+/// the hint is advisory and a driver profile can quietly override it.
+#[cfg(not(target_arch = "wasm32"))]
+fn high_performance_gpu() -> egui_wgpu::WgpuConfiguration {
+    use std::sync::Arc;
+    let mut cfg = egui_wgpu::WgpuConfiguration::default();
+    if let egui_wgpu::WgpuSetup::CreateNew(setup) = &mut cfg.wgpu_setup {
+        setup.power_preference = wgpu::PowerPreference::HighPerformance;
+        setup.native_adapter_selector = Some(Arc::new(|adapters, surface| {
+            let usable: Vec<&wgpu::Adapter> = adapters
+                .iter()
+                .filter(|a| surface.is_none_or(|s| !s.get_capabilities(a).formats.is_empty()))
+                .collect();
+            let pick = |kind: wgpu::DeviceType| {
+                usable.iter().find(|a| a.get_info().device_type == kind).copied()
+            };
+            let chosen = pick(wgpu::DeviceType::DiscreteGpu)
+                .or_else(|| pick(wgpu::DeviceType::IntegratedGpu))
+                .or_else(|| usable.first().copied())
+                .ok_or_else(|| "no usable GPU adapter".to_string())?;
+            let info = chosen.get_info();
+            log::info!("GPU: {} ({:?}, {:?})", info.name, info.device_type, info.backend);
+            println!("GPU: {} ({:?}, {:?})", info.name, info.device_type, info.backend);
+            Ok(chosen.clone())
+        }));
+    }
+    cfg
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -625,12 +730,15 @@ fn main() {
             .expect("#gamecanvas missing")
             .dyn_into::<web_sys::HtmlCanvasElement>()
             .unwrap();
+        // Ask the browser for the discrete GPU. Chrome and Firefox honour this
+        // for both WebGPU and WebGL; on Windows the user may additionally need
+        // the browser set to "High performance" in Graphics settings.
+        let mut web = eframe::WebOptions::default();
+        if let egui_wgpu::WgpuSetup::CreateNew(setup) = &mut web.wgpu_options.wgpu_setup {
+            setup.power_preference = wgpu::PowerPreference::HighPerformance;
+        }
         let result = eframe::WebRunner::new()
-            .start(
-                canvas,
-                eframe::WebOptions::default(),
-                Box::new(|cc| Ok(Box::new(App::new(cc)))),
-            )
+            .start(canvas, web, Box::new(|cc| Ok(Box::new(App::new(cc)))))
             .await;
         if let Some(el) = document.get_element_by_id("boot") {
             el.remove();

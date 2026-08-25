@@ -362,13 +362,22 @@ fn every_tower_is_buildable_and_priced_sanely() {
             assert!(d.cost_at(tier) > 0);
             assert!(d.dps_at(tier, None).is_finite());
         }
-        // Six levels must climb steeply enough to matter and stay affordable.
-        assert!(d.cost_at(MAX_TIER) > d.cost_at(1) * 20, "{}", d.id);
+        // Ten levels have to climb steeply enough to be worth taking, and a
+        // maxed tower has to stay inside what a campaign actually pays out.
+        assert!(d.cost_at(MAX_TIER) > d.cost_at(1) * 30, "{} barely gets more expensive", d.id);
+        // Everything a full campaign pays: kill bounties and survival bonuses.
+        let purse: f32 = (1..=CAMPAIGN_WAVES)
+            .map(|w| {
+                let d = wave_at(w);
+                d.bounty as f32 * d.count as f32 + wave_clear_bonus(w) as f32
+            })
+            .sum();
         assert!(
-            d.cost_at(MAX_TIER) < 3_500,
-            "{} maxed costs {} - too expensive to ever reach",
+            (d.cost_at(MAX_TIER) as f32) < purse / 12.0,
+            "{} maxed costs {} against a {:.0} campaign purse - a board of these is unreachable",
             d.id,
-            d.cost_at(MAX_TIER)
+            d.cost_at(MAX_TIER),
+            purse
         );
     }
     // The shop lists every tower exactly once, cheapest first.
@@ -392,42 +401,96 @@ fn wave_table_is_well_formed() {
         assert!(w.hp > 0.0 && w.hp.is_finite());
         assert!(w.speed > 0.0);
         if (i + 1) % 10 == 0 {
-            assert_eq!(w.kind, Kind::Boss, "wave {} should be a boss", i + 1);
+            assert!(w.kind.is_boss(), "wave {} should be a boss, got {:?}", i + 1, w.kind);
         }
     }
-    assert!(waves[49].hp > waves[0].hp * 50.0, "difficulty barely climbs");
+    assert!(
+        waves[N_WAVES as usize - 1].hp > waves[0].hp * 200.0,
+        "the curve barely climbs across the campaign"
+    );
 }
 
-// ---------------------------------------------------------------- difficulty
+// ---------------------------------------------------------------- the curve
 
+/// Health must outrun gold, so the run tightens as it goes.
+///
+/// It has to outrun it by a *lot*, which is not obvious: the player's board
+/// grows by tower count and by level as well as by gold, and gold-per-damage
+/// improves every level too. Those compound on top of the raw income curve.
+///
+/// This test only pins the direction and the monotonicity. Whether the result
+/// is actually *fair* is not something arithmetic can answer, so it is not
+/// asserted here - `a_sensible_build_clears_the_campaign` plays the whole
+/// campaign and answers it properly.
 #[test]
-fn difficulty_actually_changes_the_run() {
-    let normal = wave_at(20, Difficulty::Normal);
-    let hard = wave_at(20, Difficulty::Hard);
-    let nightmare = wave_at(20, Difficulty::Nightmare);
+fn the_run_tightens_from_start_to_finish() {
+    let block = |from: u32, to: u32| -> (f32, f32) {
+        let mut hp = 0.0;
+        let mut gold = 0.0;
+        for w in from..=to {
+            let d = wave_at(w);
+            hp += d.hp * d.count as f32;
+            gold += d.bounty as f32 * d.count as f32 + wave_clear_bonus(w) as f32;
+        }
+        (hp, gold)
+    };
+    let (hp_a, gold_a) = block(1, 20);
+    let (hp_b, gold_b) = block(CAMPAIGN_WAVES - 19, CAMPAIGN_WAVES);
+    assert!(
+        hp_b / hp_a > gold_b / gold_a,
+        "the run never tightens: health x{:.0} against gold x{:.0}",
+        hp_b / hp_a,
+        gold_b / gold_a
+    );
 
-    assert!(hard.hp > normal.hp * 1.3, "Hard barely differs from Normal");
-    assert!(nightmare.hp > hard.hp * 1.3, "Nightmare barely differs from Hard");
-    // Harder runs pay better, or they are a wall rather than a challenge.
-    assert!(hard.bounty >= normal.bounty);
-    assert!(nightmare.bounty >= hard.bounty);
-    // And they give you less room to fail.
-    assert!(Difficulty::Hard.lives() < Difficulty::Normal.lives());
-    assert!(Difficulty::Nightmare.lives() < Difficulty::Hard.lives());
+    // And it must tighten smoothly - no wave may suddenly be far harder than
+    // the one before it, which is how a curve becomes a wall.
+    //
+    // A type's debut wave is deliberately softened, so the step *up* from a
+    // debut to that type's second appearance is expected and is not a wall.
+    let debut_of = |kind: Kind| (1..=CAMPAIGN_WAVES).find(|&w| wave_at(w).kind == kind);
+    for w in 2..=CAMPAIGN_WAVES {
+        let a = wave_at(w - 1);
+        let b = wave_at(w);
+        // Compare like with like: boss waves are one enormous monster by design.
+        if a.kind != b.kind || debut_of(a.kind) == Some(w - 1) {
+            continue;
+        }
+        let jump = (b.hp * b.count as f32) / (a.hp * a.count as f32);
+        assert!(
+            jump < 1.6,
+            "wave {w} is {jump:.1}x the wave before it for the same monster - that is a wall"
+        );
+    }
+}
 
-    let mut g = Game::new();
-    g.restart(Difficulty::Nightmare);
-    assert_eq!(g.difficulty, Difficulty::Nightmare);
-    assert_eq!(g.lives, Difficulty::Nightmare.lives());
-    assert_eq!(g.wave, 0);
+/// A run has to be long enough to be a run. Eighty waves at roughly 45 seconds
+/// each is the hour the design asks for.
+#[test]
+fn a_full_run_is_about_an_hour() {
+    assert_eq!(CAMPAIGN_WAVES, 80);
+    let road = Board::new().total;
+    let mut seconds = BUILD_TIME_FIRST;
+    for w in 1..=CAMPAIGN_WAVES {
+        let d = wave_at(w);
+        // Build phase, then however long the wave takes to walk the road.
+        let walk = road / (WALK_SPEED * d.speed);
+        let spawn = d.gap * (d.count.saturating_sub(1)) as f32;
+        seconds += BUILD_TIME + walk + spawn;
+    }
+    let minutes = seconds / 60.0;
+    assert!(
+        (45.0..90.0).contains(&minutes),
+        "a full campaign takes {minutes:.0} minutes; the target is about 60"
+    );
 }
 
 #[test]
 fn waves_keep_escalating_past_the_campaign() {
-    let last = wave_at(CAMPAIGN_WAVES, Difficulty::Normal);
+    let last = wave_at(CAMPAIGN_WAVES);
     let mut prev_peak = last.hp;
     for w in CAMPAIGN_WAVES + 1..=CAMPAIGN_WAVES + 60 {
-        let d = wave_at(w, Difficulty::Normal);
+        let d = wave_at(w);
         assert!(d.hp.is_finite() && d.hp > 0.0, "wave {w} has broken health");
         assert!(d.count > 0 && d.speed > 0.0, "wave {w} is malformed");
         assert!(d.bounty >= 1, "wave {w} pays nothing");
@@ -437,7 +500,7 @@ fn waves_keep_escalating_past_the_campaign() {
         }
     }
     // Fifty waves of endless should be a genuine escalation, not a plateau.
-    let far = wave_at(CAMPAIGN_WAVES + 50, Difficulty::Normal);
+    let far = wave_at(CAMPAIGN_WAVES + 50);
     assert!(
         far.hp > last.hp * 8.0,
         "endless barely ramps: wave {} is {:.0} vs {:.0} at the campaign end",
@@ -468,4 +531,456 @@ fn clearing_the_campaign_wins_but_can_be_continued() {
     g.spawn_left = 0;
     g.update(1.0 / 60.0);
     assert_eq!(g.phase, Phase::Build, "endless should roll straight into the next wave");
+}
+
+// ---------------------------------------------------------------- the roster
+
+/// No two towers may own the same verb.
+///
+/// This test exists because they did: Pyre and Venom were both poison-type
+/// damage-over-time, which meant one of them was always strictly the worse
+/// choice and the roster was padding. A tower's identity is its delivery plus
+/// what its specials actually *do*, so that pair is what gets compared.
+#[test]
+fn every_tower_owns_a_verb_nothing_else_has() {
+    /// The coarse shape of a tower, ignoring numbers.
+    fn verb(d: &TowerDef) -> String {
+        let delivery = match d.delivery {
+            Delivery::Shot { .. } => "shot",
+            Delivery::Beam { .. } => "beam",
+            Delivery::Lance { .. } => "lance",
+            Delivery::Chain { .. } => "chain",
+            Delivery::Nova => "nova",
+            Delivery::Zone { .. } => "zone",
+            Delivery::Aura => "aura",
+        };
+        let mut tags: Vec<&str> = d
+            .specials
+            .iter()
+            .map(|s| match s {
+                Special::Burn { .. } => "burn",
+                Special::Slow { .. } => "slow",
+                Special::Poison { .. } => "poison",
+                Special::Crit { .. } => "crit",
+                Special::Stun { .. } => "stun",
+                Special::Shred { .. } => "shred",
+                Special::Ramp { .. } => "ramp",
+                Special::Knockback { .. } => "knockback",
+                Special::Buff { .. } => "buff",
+                Special::Income { .. } => "income",
+                Special::Bounty { .. } => "bounty",
+                Special::Interest { .. } => "interest",
+                Special::Contagion { .. } => "contagion",
+            })
+            .collect();
+        tags.sort_unstable();
+        let splash = if d.splash > 0.0 { "+splash" } else { "" };
+        format!("{delivery}{splash}[{}]", tags.join(","))
+    }
+
+    let mut seen: Vec<(String, &str)> = Vec::new();
+    for d in TOWERS {
+        let v = verb(d);
+        if let Some((_, other)) = seen.iter().find(|(s, _)| *s == v) {
+            panic!("{} and {} are the same tower: both are {v}", other, d.id);
+        }
+        seen.push((v, d.id));
+    }
+
+    // And every attacker must have a reason to exist beyond its damage number:
+    // no two share both a damage type and a delivery.
+    for (i, a) in TOWERS.iter().enumerate() {
+        for b in TOWERS.iter().skip(i + 1) {
+            if a.targets == Targets::Nothing || b.targets == Targets::Nothing {
+                continue;
+            }
+            let same_delivery =
+                std::mem::discriminant(&a.delivery) == std::mem::discriminant(&b.delivery);
+            assert!(
+                !(a.dtype == b.dtype && same_delivery && (a.splash > 0.0) == (b.splash > 0.0)),
+                "{} and {} overlap: same damage type and same delivery",
+                a.id,
+                b.id
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------- air
+
+/// The core build tension: the two biggest area dealers cannot shoot up, and
+/// everything else can. If that ever stops being true the game loses its shape -
+/// either air is unanswerable, or it is free.
+#[test]
+fn the_air_layer_splits_the_roster() {
+    let ground_only: Vec<&str> = TOWERS
+        .iter()
+        .filter(|d| d.targets == Targets::GroundOnly)
+        .map(|d| d.id)
+        .collect();
+    assert_eq!(
+        ground_only,
+        vec!["cannon", "pyre"],
+        "the ground-only set is the whole design; changing it needs a design decision"
+    );
+
+    // Every other attacker answers both layers, so the fix for a flying wave is
+    // never "own the one anti-air tower".
+    let both: Vec<&str> = TOWERS
+        .iter()
+        .filter(|d| d.targets == Targets::Both)
+        .map(|d| d.id)
+        .collect();
+    assert!(both.len() >= 4, "too few towers answer air: {both:?}");
+
+    // And the ground-only pair has to be worth the drawback.
+    let best_ground: f32 = TOWERS
+        .iter()
+        .filter(|d| d.targets == Targets::GroundOnly)
+        .map(|d| d.effective_dps_at(MAX_TIER, Some(0)))
+        .fold(0.0, f32::max);
+    let best_both: f32 = TOWERS
+        .iter()
+        .filter(|d| d.targets == Targets::Both && d.dtype != Damage::None)
+        .map(|d| d.effective_dps_at(MAX_TIER, Some(0)))
+        .fold(0.0, f32::max);
+    assert!(
+        best_ground > best_both * 0.85,
+        "ground-only towers give up air and get nothing for it: {best_ground:.0} vs {best_both:.0}"
+    );
+}
+
+#[test]
+fn flying_waves_arrive_early_and_bosses_alternate_layers() {
+    let first_air = (1..=CAMPAIGN_WAVES)
+        .find(|&w| wave_at(w).kind.flying())
+        .expect("no flying wave in the whole campaign");
+    assert!(
+        (5..=9).contains(&first_air),
+        "first flying wave is {first_air}; it should arrive early enough to be a lesson"
+    );
+
+    let mut ground_bosses = 0;
+    let mut air_bosses = 0;
+    for w in (10..=CAMPAIGN_WAVES).step_by(10) {
+        let d = wave_at(w);
+        assert!(d.kind.is_boss(), "wave {w} is not a boss");
+        if d.kind.flying() {
+            air_bosses += 1;
+        } else {
+            ground_bosses += 1;
+        }
+    }
+    assert!(
+        ground_bosses >= 3 && air_bosses >= 3,
+        "bosses do not alternate layers: {ground_bosses} ground, {air_bosses} air"
+    );
+}
+
+/// A mortar must never hit something flying over it - not once, not at any
+/// range, not even the target it was already holding when the thing took off.
+#[test]
+fn ground_towers_cannot_touch_the_air() {
+    let mut g = rich_game();
+    let cannon = TOWERS.iter().position(|d| d.id == "cannon").unwrap();
+    let tesla = TOWERS.iter().position(|d| d.id == "tesla").unwrap();
+
+    // One of each, on the two pads nearest the road.
+    for (def, tier) in [(cannon, MAX_TIER), (tesla, MAX_TIER)] {
+        let slot = g.board.slots.iter().position(|s| s.tower.is_none()).unwrap();
+        g.build_choice = Some((def, tier));
+        assert!(g.try_build(slot));
+    }
+    g.build_choice = None;
+
+    // Send a flying wave and let it walk the whole road.
+    let w = WaveDef { kind: Kind::Wisp, ..wave_at(7) };
+    g.phase = Phase::Combat;
+    for _ in 0..10 {
+        g.spawn_creep(&w, 4_000.0, 1.0, 2.0);
+    }
+    run_for(&mut g, 30.0);
+
+    let cannon_kills: u32 = g.towers.iter().filter(|t| t.def == cannon).map(|t| t.kills).sum();
+    let cannon_dmg: f64 = g.towers.iter().filter(|t| t.def == cannon).map(|t| t.damage).sum();
+    let tesla_dmg: f64 = g.towers.iter().filter(|t| t.def == tesla).map(|t| t.damage).sum();
+
+    assert_eq!(cannon_kills, 0, "a cannon killed something airborne");
+    assert!(cannon_dmg < 0.001, "a cannon dealt {cannon_dmg} damage to the air");
+    assert!(tesla_dmg > 0.0, "the tesla should have been shooting the whole time");
+}
+
+/// And it must still be lethal on the ground, or the drawback has no upside.
+#[test]
+fn ground_towers_are_lethal_on_the_ground() {
+    let mut g = rich_game();
+    let cannon = TOWERS.iter().position(|d| d.id == "cannon").unwrap();
+    let slot = g.board.slots.iter().position(|s| s.tower.is_none()).unwrap();
+    g.build_choice = Some((cannon, MAX_TIER));
+    assert!(g.try_build(slot));
+    g.build_choice = None;
+
+    let w = WaveDef { kind: Kind::Grunt, ..wave_at(7) };
+    g.phase = Phase::Combat;
+    for _ in 0..10 {
+        g.spawn_creep(&w, 400.0, 1.0, 2.0);
+    }
+    run_for(&mut g, 30.0);
+    assert!(g.towers[0].damage > 0.0, "the cannon never fired at a ground wave");
+}
+
+/// Pyre holds ground rather than tracking a target: it must leave fire behind
+/// that hurts whatever walks into it, and must never light up the sky.
+#[test]
+fn pyre_burns_the_road_and_only_the_road() {
+    let mut g = rich_game();
+    let pyre = TOWERS.iter().position(|d| d.id == "pyre").unwrap();
+    let slot = g.board.slots.iter().position(|s| s.tower.is_none()).unwrap();
+    g.build_choice = Some((pyre, MAX_TIER));
+    assert!(g.try_build(slot));
+    g.build_choice = None;
+
+    let ground = WaveDef { kind: Kind::Grunt, ..wave_at(9) };
+    g.phase = Phase::Combat;
+    for _ in 0..8 {
+        g.spawn_creep(&ground, 20_000.0, 1.0, 2.0);
+    }
+    let mut ever_shredded = false;
+    let mut ever_burning = false;
+    for _ in 0..(12.0 * 60.0) as u32 {
+        g.update(1.0 / 60.0);
+        ever_burning |= !g.zones.is_empty();
+        ever_shredded |= g.creeps.iter().any(|c| c.shred.t > 0.0);
+    }
+    assert!(ever_burning, "the pyre never lit the road");
+    assert!(g.towers[0].damage > 0.0, "fire on the road did no damage");
+    // The shred is the real payload - the damage is the smaller half.
+    assert!(ever_shredded, "nothing standing in the fire was ever shredded");
+
+    // Now the same wave, airborne.
+    let mut g2 = rich_game();
+    let slot = g2.board.slots.iter().position(|s| s.tower.is_none()).unwrap();
+    g2.build_choice = Some((pyre, MAX_TIER));
+    assert!(g2.try_build(slot));
+    g2.build_choice = None;
+    let air = WaveDef { kind: Kind::Wisp, ..wave_at(7) };
+    g2.phase = Phase::Combat;
+    for _ in 0..8 {
+        g2.spawn_creep(&air, 20_000.0, 1.0, 2.0);
+    }
+    run_for(&mut g2, 12.0);
+    assert!(g2.towers[0].damage < 0.001, "the pyre burned something airborne");
+}
+
+/// Zones are the only thing in the game that leaks memory if nothing retires
+/// them, and they are created several times a second per Pyre.
+#[test]
+fn burning_ground_expires() {
+    let mut g = rich_game();
+    let pyre = TOWERS.iter().position(|d| d.id == "pyre").unwrap();
+    for _ in 0..6 {
+        let slot = g.board.slots.iter().position(|s| s.tower.is_none()).unwrap();
+        g.build_choice = Some((pyre, MAX_TIER));
+        g.try_build(slot);
+    }
+    g.build_choice = None;
+
+    let w = wave_at(9);
+    g.phase = Phase::Combat;
+    for _ in 0..20 {
+        g.spawn_creep(&w, 500_000.0, 1.0, 2.0);
+    }
+    run_for(&mut g, 60.0);
+    assert!(g.zones.len() < 400, "burning ground is piling up: {} zones", g.zones.len());
+
+    // With nothing left to burn they must all drain away.
+    g.creeps.clear();
+    run_for(&mut g, 12.0);
+    assert!(g.zones.is_empty(), "{} zones outlived the wave", g.zones.len());
+}
+
+// ---------------------------------------------------------------- winnable
+
+/// Plays the campaign the way a competent player would, and checks it can be
+/// won. Balance arguments on paper are worth very little - the previous curve
+/// looked reasonable written down and was arithmetically impossible past wave
+/// forty. This actually runs the simulation.
+///
+/// The bot is deliberately unsophisticated: spend everything, prefer upgrading
+/// what it already owns, keep a mix of layers. If a *simple* strategy clears it
+/// with something in hand, a thinking player has room to be clever.
+/// The free pad furthest from anything already built, so a board spreads out to
+/// cover the road the way a player's does.
+fn spread_pad(g: &Game) -> Option<usize> {
+    let mut best: Option<(usize, f32)> = None;
+    for (i, s) in g.board.slots.iter().enumerate() {
+        if s.tower.is_some() {
+            continue;
+        }
+        let nearest = g
+            .towers
+            .iter()
+            .map(|t| {
+                let dx = t.pos[0] - s.pos[0];
+                let dy = t.pos[1] - s.pos[1];
+                dx * dx + dy * dy
+            })
+            .fold(f32::MAX, f32::min);
+        if best.is_none_or(|(_, d)| nearest > d) {
+            best = Some((i, nearest));
+        }
+    }
+    best.map(|(i, _)| i)
+}
+
+fn autoplay(mixed_layers: bool) -> Game {
+    let mut g = Game::new();
+    // A reasonable spread. Ballista and Tesla answer air, Cannon and Pyre hold
+    // the road, Frost buys time, Venom kills bosses, Beacon and Mint compound.
+    let want: Vec<usize> = if mixed_layers {
+        ["ballista", "cannon", "tesla", "frost", "pyre", "venom", "beacon", "mint"]
+            .iter()
+            .map(|id| TOWERS.iter().position(|d| d.id == *id).unwrap())
+            .collect()
+    } else {
+        // The trap build: everything on the ground.
+        ["cannon", "pyre", "cannon", "pyre", "mint", "beacon"]
+            .iter()
+            .map(|id| TOWERS.iter().position(|d| d.id == *id).unwrap())
+            .collect()
+    };
+
+    let mut built = 0usize;
+    for _ in 0..(CAMPAIGN_WAVES + 8) {
+        if matches!(g.phase, Phase::Defeat | Phase::Victory) {
+            break;
+        }
+        // Spend during the build phase, the way a player does. This has to
+        // happen once per wave: running a fixed number of seconds instead lets
+        // the build timer elapse inside the run, the next wave auto-starts, and
+        // the "player" silently never builds again.
+        if g.phase == Phase::Build {
+            spend(&mut g, &want, &mut built);
+            if std::env::var("TD_TRACE").is_ok() && (g.wave + 1) % 10 == 0 {
+                let w = g.next_wave_def();
+                let dps: f32 = g.towers.iter().map(|t| t.dmg() * t.rate()).sum();
+                println!(
+                    "  w{:>3} | {:>2} towers {:>9.0} dps | next {:?} x{} = {:>10.0} ehp | lives {:>2} gold {}",
+                    g.wave + 1,
+                    g.towers.len(),
+                    dps,
+                    w.kind,
+                    w.count,
+                    w.hp * w.count as f32,
+                    g.lives,
+                    g.gold
+                );
+            }
+            g.send_wave();
+        }
+        // Now run exactly one wave, until the game hands control back.
+        let dt = 1.0 / 60.0;
+        let mut elapsed = 0.0;
+        while g.phase == Phase::Combat && elapsed < 240.0 {
+            g.update(dt);
+            elapsed += dt;
+        }
+    }
+    g
+}
+
+/// Empties the purse: fill the board out to a working size, then pour
+/// everything into levels, then spread again once there is nothing left to
+/// upgrade.
+fn spend(g: &mut Game, want: &[usize], built: &mut usize) {
+    loop {
+        let cheapest = g
+            .towers
+            .iter()
+            .enumerate()
+            .filter_map(|(i, t)| t.upgrade_cost().map(|c| (i, c)))
+            .min_by_key(|(_, c)| *c);
+        let free_pad = spread_pad(g);
+        let all_maxed = cheapest.is_none();
+        let want_new = free_pad.is_some() && (*built < 26 || all_maxed);
+        let def = want[*built % want.len()];
+
+        if want_new && g.can_afford(TOWERS[def].cost_at(1)) {
+            g.build_choice = Some((def, 1));
+            if g.try_build(free_pad.unwrap()) {
+                *built += 1;
+                continue;
+            }
+        }
+        match cheapest {
+            // Alternate forks so both branches get exercised.
+            Some((i, c)) if g.can_afford(c) => g.upgrade(i, Some(i % 2)),
+            _ => break,
+        }
+    }
+    g.build_choice = None;
+    g.selected = None;
+}
+
+#[test]
+fn a_sensible_build_clears_the_campaign() {
+    let g = autoplay(true);
+    println!(
+        "MIXED  -> phase {:?} wave {} lives {} leaked {} towers {} maxed {} gold {} networth {}",
+        g.phase,
+        g.wave,
+        g.lives,
+        g.stats.leaked,
+        g.towers.len(),
+        g.towers.iter().filter(|t| t.tier >= MAX_TIER).count(),
+        g.gold,
+        g.net_worth(),
+    );
+    assert_eq!(
+        g.phase,
+        Phase::Victory,
+        "a mixed board died on wave {} with {} lives and {} towers - the curve is too steep",
+        g.wave,
+        g.lives,
+        g.towers.len()
+    );
+    // Won, but it must not have been a stroll. This bot does not read the wave
+    // preview, does not place towers thoughtfully, and never sells a mistake -
+    // if *it* finishes with most of its lives, a real player is asleep.
+    assert!(
+        g.lives < 15,
+        "a naive board finished with {} of 20 lives - the campaign is not asking enough",
+        g.lives
+    );
+    assert!(g.lives > 0 && g.stats.leaked > 0, "and it should have cost something");
+    // Nearly everything earned should be on the board by the end. A large idle
+    // pile means the last stretch had nothing left to decide.
+    assert!(
+        (g.gold as f32) < g.net_worth() as f32 * 0.15,
+        "{} gold left idle against a {} net worth - the endgame has no sink",
+        g.gold,
+        g.net_worth()
+    );
+}
+
+/// The other half of the same claim: a board that ignores the air must lose.
+/// Without this, the ground/air split is decoration rather than a decision.
+#[test]
+fn ignoring_the_air_loses_the_run() {
+    let g = autoplay(false);
+    println!(
+        "GROUND -> phase {:?} wave {} lives {} leaked {}",
+        g.phase, g.wave, g.lives, g.stats.leaked
+    );
+    assert_ne!(
+        g.phase,
+        Phase::Victory,
+        "a board with no anti-air cleared all {CAMPAIGN_WAVES} waves - the air layer means nothing"
+    );
+    // And it should die to the air specifically, not fall over immediately.
+    assert!(
+        g.wave >= 7,
+        "the ground-only board died on wave {} - before air even arrives, so this proves nothing",
+        g.wave
+    );
 }

@@ -38,6 +38,24 @@ const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 /// Alpha 0 so the composite can paint the sky wherever nothing was drawn.
 const CLEAR: wgpu::Color = wgpu::Color { r: 0.0, g: 0.0, b: 0.0, a: 0.0 };
 
+/// Builds the scene shader for a quality preset.
+///
+/// `SHADOW_TAPS` is patched into the source rather than passed as a uniform so
+/// the branch folds away at compile time; a per-pixel `if` on a value that is
+/// constant for the whole frame is exactly the kind of thing a mobile GPU makes
+/// you pay for.
+fn make_solid_shader(device: &wgpu::Device, quality: Quality) -> wgpu::ShaderModule {
+    const SRC: &str = include_str!("shaders/solid.wgsl");
+    let src = SRC.replace(
+        "const SHADOW_TAPS: i32 = 4;",
+        &format!("const SHADOW_TAPS: i32 = {};", quality.shadow_taps()),
+    );
+    device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("solid.wgsl"),
+        source: wgpu::ShaderSource::Wgsl(src.into()),
+    })
+}
+
 // ---------------------------------------------------------------- quality
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -52,6 +70,14 @@ impl Quality {
         match self {
             Quality::Performance => "Performance",
             Quality::Balanced => "Balanced",
+            Quality::Ultra => "Ultra",
+        }
+    }
+    /// Short form, for a HUD that has run out of room.
+    pub fn short(self) -> &'static str {
+        match self {
+            Quality::Performance => "Perf",
+            Quality::Balanced => "Bal",
             Quality::Ultra => "Ultra",
         }
     }
@@ -89,6 +115,15 @@ impl Quality {
     }
     pub fn bloom(self) -> bool {
         self != Quality::Performance
+    }
+    /// Shadow filter taps. Four is a soft edge; one is a hard edge that costs a
+    /// quarter as much, which on a weak GPU is the difference between playable
+    /// and not.
+    pub fn shadow_taps(self) -> u32 {
+        match self {
+            Quality::Performance => 1,
+            _ => 4,
+        }
     }
     pub fn lower(self) -> Option<Quality> {
         match self {
@@ -232,6 +267,8 @@ pub struct Renderer {
 
     /// Tunables the UI can change at runtime.
     pub quality: Quality,
+    /// Whether the effects buffer still holds anything from a previous frame.
+    fx_dirty: bool,
     pub bloom_strength: f32,
     pub bloom_threshold: f32,
     pub particle_drag: f32,
@@ -361,10 +398,8 @@ impl Renderer {
             }
         };
 
-        let solid_src = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("solid.wgsl"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/solid.wgsl").into()),
-        });
+        let quality = Quality::Balanced;
+        let solid_src = make_solid_shader(device, quality);
         let shadow_src = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("shadow.wgsl"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders/shadow.wgsl").into()),
@@ -507,7 +542,6 @@ impl Renderer {
             cache: None,
         });
 
-        let quality = Quality::Balanced;
         let samples = resolve_samples(quality.msaa(), can_msaa2, can_msaa4);
         let pipes = Self::build_scene_pipes(
             device, &solid_src, &bb_src, &scene_layout, hdr_format, samples,
@@ -614,6 +648,7 @@ impl Renderer {
         });
 
         Self {
+            fx_dirty: false,
             solid_src,
             bb_src,
             scene_layout,
@@ -850,10 +885,14 @@ impl Renderer {
         if q == self.quality {
             return;
         }
+        let taps_changed = q.shadow_taps() != self.quality.shadow_taps();
         self.quality = q;
+        if taps_changed {
+            self.solid_src = make_solid_shader(device, q);
+        }
 
         let samples = resolve_samples(q.msaa(), self.can_msaa2, self.can_msaa4);
-        if samples != self.pipes.samples {
+        if taps_changed || samples != self.pipes.samples {
             self.pipes = Self::build_scene_pipes(
                 device,
                 &self.solid_src,
@@ -1127,8 +1166,12 @@ impl Renderer {
             }
         }
 
-        // --- effects, at a fraction of the resolution
-        {
+        // --- effects, at a fraction of the resolution.
+        // Skipped entirely when there is nothing additive on screen: the clear
+        // alone is a full pass over the buffer, and between waves there is
+        // frequently not a single glow to draw.
+        let any_fx = self.glow_count > 0 || self.live_particles > 0;
+        if any_fx || self.fx_dirty {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("fx"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1146,6 +1189,9 @@ impl Renderer {
                 multiview_mask: None,
             });
             pass.set_bind_group(0, &self.scene_bg, &[]);
+            // One clear-only pass drains the last frame's glows, then the pass
+            // stops running until something additive is on screen again.
+            self.fx_dirty = any_fx;
             if self.glow_count > 0 {
                 pass.set_pipeline(&self.pipes.glow);
                 pass.set_vertex_buffer(0, self.glows.slice(..));

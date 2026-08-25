@@ -14,7 +14,6 @@
 
 use egui::{Align, Color32, Context, Layout, RichText, Vec2};
 
-use crate::game::defs::Difficulty;
 use crate::net::{Net, Status};
 use crate::ui::pal;
 use td_proto::MAX_PLAYERS;
@@ -43,7 +42,6 @@ pub struct MenuState {
     pub room: String,
     pub password: String,
     pub server: String,
-    pub difficulty: Difficulty,
     pub ready: bool,
     /// Set after a copy button is pressed, so the button can say so.
     pub copied: f32,
@@ -58,7 +56,6 @@ impl Default for MenuState {
             room: String::new(),
             password: String::new(),
             server: Net::default_url(),
-            difficulty: Difficulty::Normal,
             ready: false,
             copied: 0.0,
         }
@@ -68,8 +65,8 @@ impl Default for MenuState {
 /// What the menu wants the app to do. The menu never touches the game itself.
 pub enum Action {
     None,
-    /// Start a local run at this difficulty.
-    SinglePlayer(Difficulty),
+    /// Start a local run.
+    SinglePlayer,
     /// The player left the lobby; drop back to the title screen.
     Cancelled,
 }
@@ -140,12 +137,9 @@ fn big_button(ui: &mut egui::Ui, text: &str, sub: &str, accent: Color32) -> bool
 fn title(ui: &mut egui::Ui, m: &mut MenuState) -> Action {
     heading(ui);
 
-    difficulty_row(ui, &mut m.difficulty);
-    ui.add_space(12.0);
-
     let mut action = Action::None;
-    if big_button(ui, "Single player", "Just you and the road.", pal::ACC) {
-        action = Action::SinglePlayer(m.difficulty);
+    if big_button(ui, "Single player", "Eighty waves. About an hour if you earn it.", pal::ACC) {
+        action = Action::SinglePlayer;
     }
     if big_button(
         ui,
@@ -166,26 +160,6 @@ fn title(ui: &mut egui::Ui, m: &mut MenuState) -> Action {
         .color(pal::DIM),
     );
     action
-}
-
-fn difficulty_row(ui: &mut egui::Ui, d: &mut Difficulty) {
-    ui.horizontal(|ui| {
-        ui.label(RichText::new("Difficulty").color(pal::DIM));
-        for opt in Difficulty::ALL {
-            let on = *d == opt;
-            let text = RichText::new(opt.label())
-                .color(if on { pal::INK } else { pal::DIM })
-                .strong();
-            let fill = if on { pal::CARD_HOVER } else { pal::CARD };
-            if ui
-                .add(egui::Button::new(text).fill(fill).corner_radius(6.0))
-                .clicked()
-            {
-                *d = opt;
-            }
-        }
-    });
-    ui.label(RichText::new(d.blurb()).size(12.0).color(pal::DIM));
 }
 
 // ---------------------------------------------------------------- connect
@@ -221,8 +195,6 @@ fn connect(ui: &mut egui::Ui, m: &mut MenuState, net: &mut Net) {
                 .size(12.0)
                 .color(pal::DIM),
         );
-        ui.add_space(6.0);
-        difficulty_row(ui, &mut m.difficulty);
     }
 
     ui.add_space(6.0);
@@ -275,7 +247,7 @@ fn connect(ui: &mut egui::Ui, m: &mut MenuState, net: &mut Net) {
                 m.name = name.clone();
                 match m.mode {
                     Mode::Host => {
-                        net.create(&m.server, &name, &m.password, m.difficulty.wire())
+                        net.create(&m.server, &name, &m.password, 0)
                     }
                     Mode::Join => net.join(&m.server, &m.room, &m.password, &name),
                 }
@@ -493,7 +465,6 @@ mod tests {
     fn the_title_screen_starts_a_local_run_at_the_chosen_difficulty() {
         let ctx = Context::default();
         let mut m = MenuState::default();
-        m.difficulty = Difficulty::Nightmare;
         let mut net = Net::default();
         // No click happens in a headless pass, so this only asserts the menu
         // lays out at every screen and never panics on the way through.

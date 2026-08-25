@@ -320,6 +320,7 @@ pub fn draw_scene(g: &Game, decor: &Decor, d: &mut DrawList, t: f32) {
     for c in &g.creeps {
         monsters::draw(d, c);
     }
+    zones(g, d, t);
     shots(g, d);
     beams(g, d);
     build_ghost(g, d, t);
@@ -492,6 +493,63 @@ fn build_ghost(g: &Game, d: &mut DrawList, t: f32) {
                 0.9,
             );
         }
+    }
+}
+
+/// Burning road left by a Pyre.
+///
+/// It has to read as *ground you do not want to walk on* from across the board,
+/// because its whole value is positional - so it gets a hard-edged scorch ring,
+/// a bed of embers and flames that lean, rather than a soft glow that could be
+/// mistaken for a range indicator.
+fn zones(g: &Game, d: &mut DrawList, t: f32) {
+    for z in &g.zones {
+        let fade = (z.life / z.max_life.max(0.01)).clamp(0.0, 1.0);
+        // Dies down rather than blinking out.
+        let heat = (fade * 1.6).min(1.0);
+        let col = mix([1.0, 0.35, 0.10], [1.0, 0.86, 0.42], heat * 0.5);
+
+        d.ground_ring(z.pos, z.radius, 0.10, rgba(col, 0.45 + 0.35 * heat), 28);
+        // Embers: a scatter of small hot discs on the road itself.
+        let n = (z.radius * 9.0) as i32;
+        for i in 0..n {
+            let a = i as f32 * 2.399 + z.pos[0];
+            let rr = z.radius * (0.15 + 0.75 * ((i * 7 % 11) as f32 / 11.0));
+            let p = [z.pos[0] + a.cos() * rr, z.pos[1] + a.sin() * rr];
+            let flick = ((t * 5.0 + i as f32 * 1.3).sin() * 0.5 + 0.5) * heat;
+            d.shape(
+                Shape::Quad,
+                [p[0], p[1], 0.21],
+                [0.30, 0.30, 1.0],
+                a,
+                0.0,
+                rgba(mix([0.35, 0.10, 0.04], col, flick), 0.55 + 0.4 * flick),
+                Material::EARTH,
+                0.7 * flick,
+            );
+        }
+        // Flames, leaning as they rise.
+        let flames = (z.radius * 5.0) as i32;
+        for i in 0..flames {
+            let a = i as f32 * 1.9 + t * 0.6;
+            let rr = z.radius * 0.62 * ((i % 3) as f32 / 3.0 + 0.35);
+            let wob = (t * 6.0 + i as f32 * 2.1).sin();
+            let h = (0.35 + 0.28 * (wob * 0.5 + 0.5)) * heat;
+            if h < 0.05 {
+                continue;
+            }
+            d.shape(
+                Shape::Cone,
+                [z.pos[0] + a.cos() * rr, z.pos[1] + a.sin() * rr, 0.22 + h * 0.5],
+                [0.26, 0.26, h],
+                a,
+                wob * 0.16,
+                rgba(col, 1.0),
+                Material::GEM,
+                1.0,
+            );
+        }
+        d.glow([z.pos[0], z.pos[1], 0.45], z.radius * 2.2, 1.9, rgba(col, 0.30 * heat));
     }
 }
 
@@ -697,6 +755,75 @@ mod tests {
                     prints[a].0, prints[b].0
                 );
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod budget {
+    use super::*;
+    use crate::gfx::draw::SHAPE_COUNT;
+    use crate::gfx::mesh;
+
+    /// Prints where the per-frame instance and triangle budget actually goes.
+    /// Run with `cargo test -- --nocapture budget`.
+    #[test]
+    fn report() {
+        let lib = mesh::build();
+        let tris: Vec<usize> = (0..SHAPE_COUNT)
+            .map(|i| lib.spans[i].count as usize / 3)
+            .collect();
+        let cost = |d: &DrawList| -> (usize, usize) {
+            let n: usize = d.solid.iter().map(|b| b.len()).sum();
+            let t: usize = (0..SHAPE_COUNT).map(|i| d.solid[i].len() * tris[i]).sum();
+            (n, t)
+        };
+
+        let mut g = Game::new();
+        let decor = Decor::build(&g.board);
+        let stat = build_static(&g, &decor);
+        let (sn, st) = cost(&stat);
+        println!("STATIC   {sn:>6} inst  {st:>8} tris");
+
+        // A late-game board: every pad filled and maxed, a full wave on the road.
+        g.gold = 50_000_000;
+        for slot in 0..g.board.slots.len() {
+            g.build_choice = Some((slot % TOWERS.len(), MAX_TIER));
+            g.try_build(slot);
+        }
+        g.build_choice = None;
+        g.selected = Some(0);
+        g.send_wave();
+        for _ in 0..600 {
+            g.update(1.0 / 60.0);
+        }
+        println!("towers {}  creeps {}", g.towers.len(), g.creeps.len());
+
+        let mut d = DrawList::default();
+        towers_only(&g, &mut d);
+        let (tn, tt) = cost(&d);
+        println!("TOWERS   {tn:>6} inst  {tt:>8} tris");
+
+        d.clear();
+        for c in &g.creeps {
+            monsters::draw(&mut d, c);
+        }
+        let (mn, mt) = cost(&d);
+        println!("MONSTERS {mn:>6} inst  {mt:>8} tris");
+
+        d.clear();
+        draw_scene(&g, &decor, &mut d, 3.0);
+        let (an, at) = cost(&d);
+        println!("FRAME    {an:>6} inst  {at:>8} tris  + {} glows", d.glow.len());
+        println!("TOTAL    {:>6} inst  {:>8} tris", sn + an, st + at);
+        for i in 0..SHAPE_COUNT {
+            println!("  shape {i}: {} tris/mesh, {} static, {} dyn", tris[i], stat.solid[i].len(), d.solid[i].len());
+        }
+    }
+
+    fn towers_only(g: &Game, d: &mut DrawList) {
+        for (i, tw) in g.towers.iter().enumerate() {
+            towers::draw(d, tw, g.selected == Some(i), g.time);
         }
     }
 }

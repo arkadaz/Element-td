@@ -1,7 +1,7 @@
 //! Targeting, firing, projectile flight and damage resolution.
 
 use super::defs::*;
-use super::{Beam, FloatText, Game, Proj, ProjKind, TargetMode, TextKind};
+use super::{Beam, FloatText, Game, Proj, ProjKind, TargetMode, TextKind, Zone};
 
 // ---------------------------------------------------------------- towers
 
@@ -98,6 +98,8 @@ fn aim(g: &mut Game, ti: usize, at: [f32; 2], k: f32) {
     t.angle += d * (k * 14.0).min(1.0);
 }
 
+/// The target a tower held last frame, if it is still alive, in range, and on a
+/// layer this tower can reach.
 fn live_target(g: &Game, ti: usize) -> Option<usize> {
     let uid = g.towers[ti].target_uid;
     if uid == 0 {
@@ -105,9 +107,10 @@ fn live_target(g: &Game, ti: usize) -> Option<usize> {
     }
     let r = g.towers[ti].range();
     let pos = g.towers[ti].pos;
-    g.creeps
-        .iter()
-        .position(|c| c.uid == uid && dist2(c.pos, pos) <= r * r)
+    let targets = g.towers[ti].def().targets;
+    g.creeps.iter().position(|c| {
+        c.uid == uid && targets.can_hit(c.kind.layer()) && dist2(c.pos, pos) <= r * r
+    })
 }
 
 fn acquire(g: &Game, ti: usize, scratch: &mut Vec<usize>) -> Option<usize> {
@@ -120,6 +123,7 @@ fn acquire(g: &Game, ti: usize, scratch: &mut Vec<usize>) -> Option<usize> {
     scratch.dedup();
 
     let mode = g.towers[ti].mode;
+    let targets = g.towers[ti].def().targets;
     let mut best: Option<usize> = None;
     let mut best_score = f32::MAX;
     for &i in scratch.iter() {
@@ -127,6 +131,11 @@ fn acquire(g: &Game, ti: usize, scratch: &mut Vec<usize>) -> Option<usize> {
             continue;
         }
         let c = &g.creeps[i];
+        // A mortar cannot elevate and a fire pool cannot leave the road, so
+        // ground-only towers simply do not see what is flying over them.
+        if !targets.can_hit(c.kind.layer()) {
+            continue;
+        }
         let d2 = dist2(c.pos, pos);
         if d2 > r2 {
             continue;
@@ -188,6 +197,30 @@ fn fire(g: &mut Game, ti: usize, ci: usize) {
     );
 
     match stats.delivery {
+        Delivery::Zone { radius, dur } => {
+            // Aimed at the road under the target, not at the target itself: the
+            // fire stays where it is put, and whatever walks through it burns.
+            g.zones.push(Zone {
+                pos: tgt,
+                radius,
+                life: dur,
+                max_life: dur,
+                dps: dmg,
+                shred: specials.shred_amt(),
+                tower: ti,
+                def: g.towers[ti].def,
+                tick: 0.0,
+            });
+            g.fx.burst(
+                &mut g.rng,
+                tgt,
+                14,
+                2.2,
+                [col[0], col[1], col[2], 1.0],
+                0.6,
+                0.26,
+            );
+        }
         Delivery::Shot { speed } => {
             g.projs.push(Proj {
                 pos: muzzle,

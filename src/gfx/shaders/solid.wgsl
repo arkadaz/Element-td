@@ -20,6 +20,10 @@ struct Uniforms {
 @group(0) @binding(1) var shadow_map: texture_depth_2d;
 @group(0) @binding(2) var shadow_samp: sampler_comparison;
 
+/// Shadow filter width. Overridden per quality preset when the shader is built,
+/// so the cheap preset pays for one comparison per pixel instead of four.
+const SHADOW_TAPS: i32 = 4;
+
 struct VsIn {
     @location(0) v_pos: vec3<f32>,
     @location(1) v_nrm: vec3<f32>,
@@ -39,6 +43,11 @@ struct VsOut {
     @location(3) emissive: f32,
     @location(4) light_pos: vec4<f32>,
     @location(5) material: vec2<f32>,
+    // Per-instance albedo jitter, so flat faces are not all exactly one colour.
+    // Computed once per vertex rather than sampled per pixel - the old value
+    // noise cost four hashes on every fragment on screen for an effect nobody
+    // can see at gameplay distance.
+    @location(6) tint: f32,
 };
 
 // Yaw about Z, then pitch tilting the local +Z axis.
@@ -76,29 +85,13 @@ fn vs(in: VsIn) -> VsOut {
     o.color = in.i_color;
     o.emissive = in.i_params.x;
     o.material = in.i_material;
+    o.tint = 0.94 + fract(sin(dot(in.i_pos.xy, vec2<f32>(12.9898, 78.233))) * 43758.5453) * 0.12;
     // Offset along the normal to keep sloped faces off their own shadow.
     o.light_pos = U.light_view_proj * vec4<f32>(world + nrm * 0.045, 1.0);
     return o;
 }
 
 // ---------------------------------------------------------------- helpers
-
-fn hash21(p: vec2<f32>) -> f32 {
-    var h = fract(p * vec2<f32>(0.1031, 0.1030));
-    h = h + dot(h, h.yx + 33.33);
-    return fract((h.x + h.y) * h.x);
-}
-
-fn noise2(p: vec2<f32>) -> f32 {
-    let i = floor(p);
-    let f = fract(p);
-    let u = f * f * (3.0 - 2.0 * f);
-    let a = hash21(i);
-    let b = hash21(i + vec2<f32>(1.0, 0.0));
-    let c = hash21(i + vec2<f32>(0.0, 1.0));
-    let d = hash21(i + vec2<f32>(1.0, 1.0));
-    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
-}
 
 fn shadow_at(light_pos: vec4<f32>, ndl: f32) -> f32 {
     if (light_pos.w <= 0.0) {
@@ -111,6 +104,9 @@ fn shadow_at(light_pos: vec4<f32>, ndl: f32) -> f32 {
     }
     let bias = mix(0.0016, 0.0004, ndl);
     let t = U.misc.w;
+    if (SHADOW_TAPS == 1) {
+        return textureSampleCompare(shadow_map, shadow_samp, uv, proj.z - bias);
+    }
     var sum = 0.0;
     sum = sum + textureSampleCompare(shadow_map, shadow_samp, uv + vec2<f32>(-0.7, -0.7) * t, proj.z - bias);
     sum = sum + textureSampleCompare(shadow_map, shadow_samp, uv + vec2<f32>(0.7, -0.7) * t, proj.z - bias);
@@ -166,15 +162,7 @@ fn fs(o: VsOut) -> @location(0) vec4<f32> {
     let rough = clamp(o.material.x, 0.045, 1.0);
     let metal = clamp(o.material.y, 0.0, 1.0);
 
-    var albedo = o.color.rgb;
-    // Surface break-up so flat faces are not uniform, projected on whichever
-    // axis the face points along.
-    let uv = select(
-        select(o.world.yz, o.world.xz, abs(n.y) > 0.5),
-        o.world.xy,
-        abs(n.z) > 0.5,
-    );
-    albedo = albedo * (0.94 + noise2(uv * 2.7) * 0.13);
+    let albedo = o.color.rgb * o.tint;
 
     // Dielectrics reflect ~4%; metals reflect their own colour.
     let f0 = mix(vec3<f32>(0.04), albedo, metal);

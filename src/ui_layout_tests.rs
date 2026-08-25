@@ -16,6 +16,8 @@ struct Layout {
     central: Rect,
     palette: Rect,
     cards: Vec<Rect>,
+    stats: Vec<Rect>,
+    controls_left: f32,
 }
 
 /// Runs one full HUD frame at `size` and reports where everything landed.
@@ -74,6 +76,54 @@ fn lay_out(size: [f32; 2]) -> Layout {
         central,
         palette: ust.palette_rect,
         cards: ust.card_rects.clone(),
+        stats: ust.stat_rects.clone(),
+        controls_left: ust.controls_left,
+    }
+}
+
+/// Wave, lives and gold are the game. They must be on screen at every window
+/// size, and the controls must never be allowed to push them off.
+///
+/// This is a real bug that shipped: the controls were drawn in a right-to-left
+/// sub-layout, which claims all the remaining width, so on a narrow window the
+/// resource readouts vanished off the left edge and the only thing visible was
+/// the frame-rate counter.
+#[test]
+fn the_resource_readouts_are_never_pushed_off_screen() {
+    for size in [
+        [360.0, 640.0],
+        [500.0, 400.0],
+        [667.0, 375.0],
+        [900.0, 500.0],
+        [1280.0, 720.0],
+        [1920.0, 1080.0],
+        [2560.0, 1440.0],
+    ] {
+        let l = lay_out(size);
+        assert_eq!(l.stats.len(), 3, "at {size:?} not every readout was drawn");
+        for (i, r) in l.stats.iter().enumerate() {
+            assert!(
+                r.left() >= l.top.left() - 0.5 && r.right() <= l.top.right() + 0.5,
+                "at {size:?} readout {i} at {r:?} is outside the top bar {:?}",
+                l.top
+            );
+            assert!(
+                r.right() <= l.controls_left + 0.5,
+                "at {size:?} readout {i} runs into the controls (ends {}, controls start {})",
+                r.right(),
+                l.controls_left
+            );
+            assert!(r.width() > 20.0, "at {size:?} readout {i} collapsed to {}", r.width());
+        }
+        // And they must not overlap each other.
+        for w in l.stats.windows(2) {
+            assert!(
+                w[0].right() <= w[1].left() + 0.5,
+                "at {size:?} the readouts overlap: {:?} then {:?}",
+                w[0],
+                w[1]
+            );
+        }
     }
 }
 
