@@ -709,6 +709,24 @@ pub enum Difficulty {
 impl Difficulty {
     pub const ALL: [Difficulty; 3] = [Difficulty::Normal, Difficulty::Hard, Difficulty::Nightmare];
 
+    /// Index used on the wire and in save data. Kept explicit so reordering
+    /// the enum can never silently change what a room agreed to play.
+    pub fn wire(self) -> u8 {
+        match self {
+            Difficulty::Normal => 0,
+            Difficulty::Hard => 1,
+            Difficulty::Nightmare => 2,
+        }
+    }
+
+    pub fn from_wire(v: u8) -> Difficulty {
+        match v {
+            1 => Difficulty::Hard,
+            2 => Difficulty::Nightmare,
+            _ => Difficulty::Normal,
+        }
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Difficulty::Normal => "Normal",

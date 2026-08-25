@@ -56,6 +56,17 @@ fn fs_blur(o: VsOut) -> @location(0) vec4<f32> {
     return vec4<f32>(acc, 1.0);
 }
 
+/// ACES filmic curve (Narkowicz fit). Rolls highlights off to white the way a
+/// film response does instead of clipping each channel independently.
+fn aces(x: vec3<f32>) -> vec3<f32> {
+    let a = 2.51;
+    let b = 0.03;
+    let c = 2.43;
+    let d = 0.59;
+    let e = 0.14;
+    return clamp((x * (a * x + b)) / (x * (c * x + d) + e), vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
 fn srgb_encode(c: vec3<f32>) -> vec3<f32> {
     let lo = c * 12.92;
     let hi = 1.055 * pow(max(c, vec3<f32>(0.0)), vec3<f32>(1.0 / 2.4)) - 0.055;
@@ -83,8 +94,11 @@ fn fs_composite(o: VsOut) -> @location(0) vec4<f32> {
     let b = textureSample(tex1, samp, o.uv).rgb;
     c = c + b * P.params.y;
 
-    // Soft shoulder: bright cores roll off instead of clipping to white.
-    c = c / (1.0 + c * 0.30);
+    // Exposure, then a filmic curve.
+    c = aces(c * 0.62);
+    // Gentle grade: lift the shadows towards blue, warm the highlights.
+    let lum = dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
+    c = mix(c * vec3<f32>(0.94, 0.97, 1.08), c * vec3<f32>(1.05, 1.00, 0.95), lum);
 
     let d = distance(o.uv, vec2<f32>(0.5, 0.5));
     c = c * (1.0 - smoothstep(0.58, 1.10, d) * 0.5);

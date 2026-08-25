@@ -122,6 +122,11 @@ pub struct UiState {
     /// Frames spent below the target rate, used to step quality down on its own.
     pub slow_frames: u32,
     pub auto_quality: bool,
+    /// Set from the connection each frame. Online runs share a seed, so the
+    /// controls that would silently restart the game are taken away.
+    pub online: bool,
+    /// Raised by the Menu button; the app acts on it and clears it.
+    pub want_menu: bool,
 }
 
 impl Default for UiState {
@@ -137,6 +142,8 @@ impl Default for UiState {
             quality_dirty: false,
             slow_frames: 0,
             auto_quality: true,
+            online: false,
+            want_menu: false,
         }
     }
 }
@@ -176,11 +183,28 @@ pub fn top_bar(g: &mut Game, ui: &mut Ui, ust: &mut UiState, perf: &str) {
             if ui.button("?").on_hover_text("How to play (H)").clicked() {
                 ust.show_help = true;
             }
-            // Difficulty can only change between runs, so it restarts.
-            let d = g.difficulty;
             if ui
-                .button(d.label())
-                .on_hover_text(format!("{}\n\nClick to change - this restarts the run.", d.blurb()))
+                .button("Menu")
+                .on_hover_text(if ust.online {
+                    "Leave the room and go back to the menu"
+                } else {
+                    "Back to the menu. This ends the run."
+                })
+                .clicked()
+            {
+                ust.want_menu = true;
+            }
+            // Difficulty can only change between runs, so it restarts - which
+            // would desync a room, so an online run cannot touch it.
+            let d = g.difficulty;
+            let hint = if ust.online {
+                format!("{}\n\nThe host chose this for the room.", d.blurb())
+            } else {
+                format!("{}\n\nClick to change - this restarts the run.", d.blurb())
+            };
+            if ui
+                .add_enabled(!ust.online, egui::Button::new(d.label()))
+                .on_hover_text(hint)
                 .clicked()
             {
                 g.restart(d.next());

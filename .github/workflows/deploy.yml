@@ -27,9 +27,14 @@ jobs:
         with:
           version: latest
       - name: Run tests
-        run: cargo test --locked
+        run: cargo test --locked --workspace
       - name: Build web bundle
-        # Pages serves the repo at /<repo-name>/, so the asset URLs need the prefix.
+        # Pages serves the repo at /<repo-name>/, so the asset URLs need the
+        # prefix. TD_SERVER is baked in because a page served from github.io
+        # cannot guess where the lobby lives; without it the Pages copy would be
+        # single-player only.
+        env:
+          TD_SERVER: wss://elemental-td-375719008085.us-central1.run.app/ws
         run: trunk build --release --public-url "/${GITHUB_REPOSITORY#*/}/"
       - uses: actions/upload-pages-artifact@v3
         with:

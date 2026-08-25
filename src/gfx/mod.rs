@@ -16,6 +16,7 @@
 //!     which is the biggest fill-rate lever available.
 
 pub mod draw;
+pub mod mesh;
 
 use std::collections::VecDeque;
 
@@ -24,6 +25,7 @@ use draw::{DrawList, Instance};
 
 use crate::game::fx::ParticleSpawn;
 use crate::math::{Camera, Mat4};
+use mesh::{SHAPE_COUNT, Span};
 
 pub const STATIC_CAP: usize = 24_576;
 pub const INSTANCE_CAP: usize = 32_768;
@@ -140,45 +142,6 @@ pub struct GpuParticle {
     color: [f32; 4],
 }
 
-#[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable, Default)]
-struct MeshVertex {
-    pos: [f32; 3],
-    nrm: [f32; 3],
-}
-
-/// A unit cube centred on the origin, as 12 triangles with face normals.
-fn cube_mesh() -> Vec<MeshVertex> {
-    // (normal, u axis, v axis)
-    const FACES: [([f32; 3], [f32; 3], [f32; 3]); 6] = [
-        ([1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]),
-        ([-1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, 1.0]),
-        ([0.0, 1.0, 0.0], [-1.0, 0.0, 0.0], [0.0, 0.0, 1.0]),
-        ([0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]),
-        ([0.0, 0.0, 1.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]),
-        ([0.0, 0.0, -1.0], [1.0, 0.0, 0.0], [0.0, -1.0, 0.0]),
-    ];
-    let mut v = Vec::with_capacity(36);
-    for (n, u, w) in FACES {
-        let corner = |su: f32, sw: f32| MeshVertex {
-            pos: [
-                n[0] * 0.5 + u[0] * su * 0.5 + w[0] * sw * 0.5,
-                n[1] * 0.5 + u[1] * su * 0.5 + w[1] * sw * 0.5,
-                n[2] * 0.5 + u[2] * su * 0.5 + w[2] * sw * 0.5,
-            ],
-            nrm: n,
-        };
-        let (a, b, c, d) = (
-            corner(-1.0, -1.0),
-            corner(1.0, -1.0),
-            corner(1.0, 1.0),
-            corner(-1.0, 1.0),
-        );
-        v.extend_from_slice(&[a, b, c, a, c, d]);
-    }
-    v
-}
-
 // ---------------------------------------------------------------- targets
 
 struct Targets {
@@ -249,12 +212,18 @@ pub struct Renderer {
     srgb_encode: bool,
     targets: Option<Targets>,
 
+    /// Where each shape lives in the shared vertex buffer.
+    spans: [Span; SHAPE_COUNT],
+    /// (instance offset, count) per shape for the static and dynamic buffers.
+    static_batches: [(u32, u32); SHAPE_COUNT],
+    dynamic_batches: [(u32, u32); SHAPE_COUNT],
     static_count: u32,
     part_head: u32,
     part_tail: u32,
     /// (time, head) marks used to retire particles that can no longer be alive.
     part_marks: VecDeque<(f32, u32)>,
     part_scratch: Vec<GpuParticle>,
+    inst_scratch: Vec<Instance>,
 
     time: f32,
     solid_count: u32,
@@ -277,8 +246,10 @@ const MESH_ATTRS: [wgpu::VertexAttribute; 2] =
     wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3];
 
 /// Solid instances sit alongside the mesh, so they start at location 2.
-const SOLID_ATTRS: [wgpu::VertexAttribute; 5] = wgpu::vertex_attr_array![
-    2 => Float32x3, 3 => Float32x3, 4 => Float32x2, 5 => Float32x2, 6 => Float32x4
+/// Location 7 carries the PBR material (roughness, metallic).
+const SOLID_ATTRS: [wgpu::VertexAttribute; 6] = wgpu::vertex_attr_array![
+    2 => Float32x3, 3 => Float32x3, 4 => Float32x2, 5 => Float32x2, 6 => Float32x4,
+    7 => Float32x2
 ];
 
 /// Billboards have no mesh buffer, so their instance data starts at location 0.
@@ -302,7 +273,7 @@ const ADD_BLEND: wgpu::BlendState = wgpu::BlendState {
 
 fn mesh_layout<'a>() -> wgpu::VertexBufferLayout<'a> {
     wgpu::VertexBufferLayout {
-        array_stride: std::mem::size_of::<MeshVertex>() as u64,
+        array_stride: std::mem::size_of::<mesh::Vertex>() as u64,
         step_mode: wgpu::VertexStepMode::Vertex,
         attributes: &MESH_ATTRS,
     }
@@ -316,9 +287,9 @@ fn solid_inst_layout<'a>() -> wgpu::VertexBufferLayout<'a> {
     }
 }
 
-fn billboard_layout<'a>() -> wgpu::VertexBufferLayout<'a> {
+fn billboard_layout<'a>(stride: u64) -> wgpu::VertexBufferLayout<'a> {
     wgpu::VertexBufferLayout {
-        array_stride: std::mem::size_of::<Instance>() as u64,
+        array_stride: stride,
         step_mode: wgpu::VertexStepMode::Instance,
         attributes: &BILLBOARD_ATTRS,
     }
@@ -596,10 +567,10 @@ impl Renderer {
             entries: &[wgpu::BindGroupEntry { binding: 0, resource: uniform.as_entire_binding() }],
         });
 
-        let verts = cube_mesh();
+        let lib = mesh::build();
         let mesh = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("unit cube"),
-            size: (verts.len() * std::mem::size_of::<MeshVertex>()) as u64,
+            label: Some("shape library"),
+            size: (lib.vertices.len() * std::mem::size_of::<mesh::Vertex>()) as u64,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -674,11 +645,15 @@ impl Renderer {
             can_msaa4,
             srgb_encode: !target_format.is_srgb(),
             targets: None,
+            spans: lib.spans,
+            static_batches: [(0, 0); SHAPE_COUNT],
+            dynamic_batches: [(0, 0); SHAPE_COUNT],
             static_count: 0,
             part_head: 0,
             part_tail: 0,
             part_marks: VecDeque::with_capacity(256),
             part_scratch: Vec::with_capacity(4096),
+            inst_scratch: Vec::with_capacity(INSTANCE_CAP),
             time: 0.0,
             solid_count: 0,
             glow_count: 0,
@@ -735,14 +710,14 @@ impl Renderer {
         });
 
         // Effects render into their own small, single-sampled, depth-free target.
-        let make_billboard = |label: &str, vs: &str, fs: &str| {
+        let make_billboard = |label: &str, vs: &str, fs: &str, stride: u64| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(label),
                 layout: Some(layout),
                 vertex: wgpu::VertexState {
                     module: bb_src,
                     entry_point: Some(vs),
-                    buffers: &[Some(billboard_layout())],
+                    buffers: &[Some(billboard_layout(stride))],
                     compilation_options: Default::default(),
                 },
                 fragment: Some(wgpu::FragmentState {
@@ -769,8 +744,18 @@ impl Renderer {
 
         ScenePipes {
             solid,
-            glow: make_billboard("glow", "vs_glow", "fs_glow"),
-            particle: make_billboard("particles", "vs_part", "fs_part"),
+            glow: make_billboard(
+                "glow",
+                "vs_glow",
+                "fs_glow",
+                std::mem::size_of::<Instance>() as u64,
+            ),
+            particle: make_billboard(
+                "particles",
+                "vs_part",
+                "fs_part",
+                std::mem::size_of::<GpuParticle>() as u64,
+            ),
             samples,
         }
     }
@@ -809,17 +794,55 @@ impl Renderer {
     }
 
     pub fn upload_static(&self, queue: &wgpu::Queue) {
-        queue.write_buffer(&self.mesh, 0, bytemuck::cast_slice(&cube_mesh()));
+        let lib = mesh::build();
+        queue.write_buffer(&self.mesh, 0, bytemuck::cast_slice(&lib.vertices));
+    }
+
+    /// Packs the shape buckets end to end into `buf` and records where each one
+    /// landed, so drawing is one call per shape with no sorting.
+    fn pack(
+        queue: &wgpu::Queue,
+        buf: &wgpu::Buffer,
+        list: &DrawList,
+        cap: usize,
+        scratch: &mut Vec<Instance>,
+    ) -> ([(u32, u32); SHAPE_COUNT], u32) {
+        scratch.clear();
+        let mut batches = [(0u32, 0u32); SHAPE_COUNT];
+        for (i, bucket) in list.solid.iter().enumerate() {
+            let room = cap.saturating_sub(scratch.len());
+            let n = bucket.len().min(room);
+            batches[i] = (scratch.len() as u32, n as u32);
+            scratch.extend_from_slice(&bucket[..n]);
+        }
+        if !scratch.is_empty() {
+            queue.write_buffer(buf, 0, bytemuck::cast_slice(scratch));
+        }
+        (batches, scratch.len() as u32)
+    }
+
+    /// Issues one instanced draw per shape.
+    fn draw_shapes(
+        pass: &mut wgpu::RenderPass<'_>,
+        spans: &[Span; SHAPE_COUNT],
+        batches: &[(u32, u32); SHAPE_COUNT],
+    ) {
+        for (i, &(first, count)) in batches.iter().enumerate() {
+            if count == 0 {
+                continue;
+            }
+            let span = spans[i];
+            pass.draw(span.first..span.first + span.count, first..first + count);
+        }
     }
 
     /// Uploads the geometry that never changes: terrain, road, scenery, pads.
     /// Called once at startup, not per frame.
-    pub fn set_static_scene(&mut self, queue: &wgpu::Queue, list: &[Instance]) {
-        let n = list.len().min(STATIC_CAP);
-        if n > 0 {
-            queue.write_buffer(&self.statics, 0, bytemuck::cast_slice(&list[..n]));
-        }
-        self.static_count = n as u32;
+    pub fn set_static_scene(&mut self, queue: &wgpu::Queue, list: &DrawList) {
+        let mut scratch = Vec::new();
+        let (batches, n) = Self::pack(queue, &self.statics, list, STATIC_CAP, &mut scratch);
+        self.static_batches = batches;
+        self.static_count = n;
     }
 
     /// Switches quality preset, rebuilding whatever the change invalidates.
@@ -1012,15 +1035,12 @@ impl Renderer {
             (rh / BLOOM_DIV).max(4) as f32,
         );
 
-        self.solid_count = list.solid.len().min(INSTANCE_CAP) as u32;
+        let mut scratch = std::mem::take(&mut self.inst_scratch);
+        let (batches, n) = Self::pack(queue, &self.instances, list, INSTANCE_CAP, &mut scratch);
+        self.inst_scratch = scratch;
+        self.dynamic_batches = batches;
+        self.solid_count = n;
         self.glow_count = list.glow.len().min(GLOW_CAP) as u32;
-        if self.solid_count > 0 {
-            queue.write_buffer(
-                &self.instances,
-                0,
-                bytemuck::cast_slice(&list.solid[..self.solid_count as usize]),
-            );
-        }
         if self.glow_count > 0 {
             queue.write_buffer(
                 &self.glows,
@@ -1057,11 +1077,11 @@ impl Renderer {
             pass.set_vertex_buffer(0, self.mesh.slice(..));
             if self.static_count > 0 {
                 pass.set_vertex_buffer(1, self.statics.slice(..));
-                pass.draw(0..36, 0..self.static_count);
+                Self::draw_shapes(&mut pass, &self.spans, &self.static_batches);
             }
             if self.solid_count > 0 {
                 pass.set_vertex_buffer(1, self.instances.slice(..));
-                pass.draw(0..36, 0..self.solid_count);
+                Self::draw_shapes(&mut pass, &self.spans, &self.dynamic_batches);
             }
         }
 
@@ -1099,11 +1119,11 @@ impl Renderer {
             pass.set_vertex_buffer(0, self.mesh.slice(..));
             if self.static_count > 0 {
                 pass.set_vertex_buffer(1, self.statics.slice(..));
-                pass.draw(0..36, 0..self.static_count);
+                Self::draw_shapes(&mut pass, &self.spans, &self.static_batches);
             }
             if self.solid_count > 0 {
                 pass.set_vertex_buffer(1, self.instances.slice(..));
-                pass.draw(0..36, 0..self.solid_count);
+                Self::draw_shapes(&mut pass, &self.spans, &self.dynamic_batches);
             }
         }
 

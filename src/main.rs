@@ -11,6 +11,8 @@ mod decor;
 mod game;
 mod gfx;
 mod math;
+mod menu;
+mod net;
 mod rng;
 mod ui;
 #[cfg(test)]
@@ -28,6 +30,8 @@ use game::fx::ParticleSpawn;
 use gfx::Renderer;
 use gfx::draw::DrawList;
 use gfx::Quality;
+use menu::{MenuState, Screen};
+use net::Net;
 use math::{Camera, Mat4, shadow_view_proj};
 
 /// How far the camera tilts down towards the board, and how much of the
@@ -165,6 +169,8 @@ struct App {
     game: Game,
     decor: Decor,
     ust: ui::UiState,
+    menu: MenuState,
+    net: Net,
     draw: DrawList,
     spawns: Vec<ParticleSpawn>,
     rs: egui_wgpu::RenderState,
@@ -201,6 +207,8 @@ impl App {
             game,
             decor,
             ust: ui::UiState::default(),
+            menu: MenuState::default(),
+            net: Net::default(),
             draw: DrawList::default(),
             spawns: Vec::with_capacity(4096),
             rs,
@@ -242,6 +250,7 @@ impl App {
             self.game.build_choice = None;
             self.game.selected = None;
             self.game.gold = 3_000;
+            self.menu.screen = Screen::Playing;
             self.game.send_wave();
         }
     }
@@ -374,6 +383,51 @@ impl App {
         }
     }
 
+    /// The title screen and lobby. The board is still drawn underneath, idling
+    /// with its scenery animating, so the menu sits on a living scene instead of
+    /// a black rectangle - and so the renderer is already warm when play starts.
+    fn menu_frame(&mut self, ui: &mut egui::Ui, dt: f32) {
+        let ctx = ui.ctx().clone();
+        egui::CentralPanel::default()
+            .frame(egui::Frame::NONE)
+            .show(ui, |ui| {
+                let rect = ui.max_rect();
+                let ppp = ctx.pixels_per_point().min(MAX_SCENE_DPR);
+                let px = [
+                    (rect.width() * ppp).round().max(8.0) as u32,
+                    (rect.height() * ppp).round().max(8.0) as u32,
+                ];
+                let camera = Camera::frame_board(
+                    BW,
+                    BH,
+                    rect.width() / rect.height().max(1.0),
+                    CAM_PITCH_DEG.to_radians(),
+                    // A slow orbit, so the title screen is not a still frame.
+                    (self.anim * 0.06).sin() * 0.22,
+                    CAM_ZOOM * 1.04,
+                );
+                self.draw.clear();
+                view::draw_scene(&self.game, &self.decor, &mut self.draw, self.anim);
+                self.spawns.clear();
+                self.publish_frame(camera, px, dt);
+                ui.painter()
+                    .add(egui_wgpu::Callback::new_paint_callback(rect, BoardCallback));
+            });
+
+        match menu::show(&ctx, &mut self.menu, &mut self.net, dt) {
+            menu::Action::SinglePlayer(d) => {
+                self.net.leave();
+                self.game.start_run(d, seed_now());
+                self.menu.screen = Screen::Playing;
+            }
+            menu::Action::Cancelled => {
+                self.game.restart(self.menu.difficulty);
+            }
+            menu::Action::None => {}
+        }
+        ctx.request_repaint();
+    }
+
     /// Hands this frame's geometry to the render callback without copying.
     fn publish_frame(&mut self, camera: Camera, px: [u32; 2], dt: f32) {
         let light = shadow_view_proj(BW, BH, LIGHT_DIR);
@@ -410,6 +464,27 @@ impl eframe::App for App {
             }
         }
 
+        // --- network: drain the socket before anything reads its state
+        if let Some(net::Event::Started { seed, difficulty }) = self.net.poll() {
+            self.game
+                .start_run(game::defs::Difficulty::from_wire(difficulty), seed);
+            self.menu.screen = Screen::Playing;
+        }
+        self.ust.online = self.net.is_online();
+
+        // --- menu: the board keeps rendering behind it as a live backdrop
+        if self.menu.screen != Screen::Playing {
+            self.menu_frame(ui, dt);
+            return;
+        }
+        if self.ust.want_menu {
+            self.ust.want_menu = false;
+            self.net.leave();
+            self.menu.screen = Screen::Title;
+            self.game.restart(self.menu.difficulty);
+            return;
+        }
+
         let keys = read_keys(ui);
         self.apply_keys(&keys);
         self.auto_quality();
@@ -417,6 +492,7 @@ impl eframe::App for App {
         // --- simulate
         self.game.update(dt);
         self.game.sound_cues.clear();
+        self.net.push(self.game.snapshot(), dt);
 
         // --- HUD
         let perf = format!(
@@ -490,10 +566,33 @@ impl eframe::App for App {
             });
 
         ui::scoreboard(&self.game, &ctx);
+        menu::room_scoreboard(&ctx, &self.net, self.ust.compact);
         ui::modals(&mut self.game, &ctx, &mut self.ust);
 
         // Games animate constantly; never idle the frame loop.
         ctx.request_repaint();
+    }
+}
+
+/// A seed for a local run. There is no `getrandom` in the wasm build on
+/// purpose, so this comes from the clock - good enough to vary a solo run, and
+/// never used for a shared one (rooms take their seed from the server).
+fn seed_now() -> u64 {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let ms = web_sys::window()
+            .and_then(|w| w.performance())
+            .map(|p| p.now())
+            .unwrap_or(1.0);
+        (ms * 4096.0) as u64 ^ 0x9E37_79B9_7F4A_7C15
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0x1234_5678)
+            ^ 0x9E37_79B9_7F4A_7C15
     }
 }
 

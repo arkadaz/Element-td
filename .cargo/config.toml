@@ -1,0 +1,8 @@
+# Wasm SIMD and bulk memory are supported by every browser that has WebGPU or
+# WebGL2 with the features this game needs, and both are free performance:
+# simd128 vectorises the maths in the simulation and the mesh builders, and
+# bulk-memory makes the large per-frame instance copies far cheaper.
+[target.wasm32-unknown-unknown]
+rustflags = [
+  "-C", "target-feature=+simd128,+bulk-memory,+nontrapping-fptoint",
+]

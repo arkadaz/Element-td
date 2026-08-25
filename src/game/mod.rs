@@ -490,13 +490,37 @@ impl Game {
         wave_at(wave, self.difficulty)
     }
 
-    /// Restarts the run at a chosen difficulty.
+    /// Restarts the run at a chosen difficulty, on a fresh road.
     pub fn restart(&mut self, difficulty: Difficulty) {
         let seed = self.rng.next_u64() ^ 0x51ED_2A17_9C3B_44D1;
+        self.start_run(difficulty, seed);
+    }
+
+    /// Restarts from an exact seed.
+    ///
+    /// This is what makes multiplayer work without the server simulating
+    /// anything: every client in a room is handed the same seed, so everyone
+    /// faces byte-identical waves on their own board.
+    pub fn start_run(&mut self, difficulty: Difficulty, seed: u64) {
         *self = Game::new();
         self.rng = Rng::new(seed);
         self.difficulty = difficulty;
         self.lives = difficulty.lives();
+    }
+
+    /// The scoreboard line shared with the rest of the room.
+    pub fn snapshot(&self) -> td_proto::Snapshot {
+        td_proto::Snapshot {
+            wave: self.wave.min(u16::MAX as u32) as u16,
+            lives: self.lives.clamp(i16::MIN as i32, i16::MAX as i32) as i16,
+            gold: self.gold.clamp(i32::MIN as i64, i32::MAX as i64) as i32,
+            net_worth: self.net_worth().clamp(0, i32::MAX as i64) as i32,
+            kills: self.stats.kills.min(u32::MAX as u64) as u32,
+            leaked: self.stats.leaked.min(u16::MAX as u32) as u16,
+            towers: self.towers.len().min(u16::MAX as usize) as u16,
+            alive: self.phase != Phase::Defeat,
+            endless: self.endless,
+        }
     }
 
     /// Clearing the campaign is a win; the player may keep going for score.

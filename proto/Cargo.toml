@@ -1,0 +1,9 @@
+[package]
+name = "td-proto"
+version = "0.1.0"
+edition = "2024"
+description = "Wire format shared by the Elemental TD client and its state server"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
