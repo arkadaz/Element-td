@@ -1,0 +1,96 @@
+// Bloom chain and final composite. Three fragment entry points share one
+// fullscreen-triangle vertex shader.
+
+struct PostU {
+    dir: vec2<f32>,
+    texel: vec2<f32>,
+    // x: bright threshold, y: bloom strength, z: encode sRGB, w: unused
+    params: vec4<f32>,
+};
+
+@group(0) @binding(0) var samp: sampler;
+@group(0) @binding(1) var tex0: texture_2d<f32>;
+@group(0) @binding(2) var tex1: texture_2d<f32>;
+@group(0) @binding(3) var<uniform> P: PostU;
+@group(0) @binding(4) var fx_tex: texture_2d<f32>;
+
+struct VsOut {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+
+@vertex
+fn vs_full(@builtin(vertex_index) i: u32) -> VsOut {
+    var corners = array<vec2<f32>, 3>(
+        vec2<f32>(-1.0, -1.0),
+        vec2<f32>(3.0, -1.0),
+        vec2<f32>(-1.0, 3.0),
+    );
+    let p = corners[i];
+    var o: VsOut;
+    o.clip = vec4<f32>(p, 0.0, 1.0);
+    o.uv = vec2<f32>(p.x * 0.5 + 0.5, 0.5 - p.y * 0.5);
+    return o;
+}
+
+@fragment
+fn fs_bright(o: VsOut) -> @location(0) vec4<f32> {
+    let c = textureSample(tex0, samp, o.uv).rgb;
+    let l = max(max(c.r, c.g), c.b);
+    let k = max(l - P.params.x, 0.0) / max(l, 1e-4);
+    // Effects are already the brightest thing on screen, so they go straight in
+    // rather than through the threshold.
+    let fx = textureSample(fx_tex, samp, o.uv).rgb;
+    return vec4<f32>(c * k + fx, 1.0);
+}
+
+@fragment
+fn fs_blur(o: VsOut) -> @location(0) vec4<f32> {
+    var w = array<f32, 5>(0.227027, 0.1945946, 0.1216216, 0.054054, 0.016216);
+    var acc = textureSample(tex0, samp, o.uv).rgb * w[0];
+    for (var i = 1; i < 5; i = i + 1) {
+        let off = P.dir * f32(i) * 1.35;
+        acc = acc + textureSample(tex0, samp, o.uv + off).rgb * w[i];
+        acc = acc + textureSample(tex0, samp, o.uv - off).rgb * w[i];
+    }
+    return vec4<f32>(acc, 1.0);
+}
+
+fn srgb_encode(c: vec3<f32>) -> vec3<f32> {
+    let lo = c * 12.92;
+    let hi = 1.055 * pow(max(c, vec3<f32>(0.0)), vec3<f32>(1.0 / 2.4)) - 0.055;
+    return select(hi, lo, c <= vec3<f32>(0.0031308));
+}
+
+/// Backdrop behind the board: a soft vertical gradient with a warm horizon.
+fn sky(uv: vec2<f32>) -> vec3<f32> {
+    let top = vec3<f32>(0.026, 0.036, 0.075);
+    let bottom = vec3<f32>(0.075, 0.085, 0.125);
+    var c = mix(top, bottom, smoothstep(0.0, 1.0, uv.y));
+    // Faint glow rising behind the horizon line.
+    let halo = exp(-pow((uv.y - 0.42) * 3.4, 2.0)) * 0.055;
+    c = c + vec3<f32>(0.22, 0.30, 0.45) * halo;
+    return c;
+}
+
+@fragment
+fn fs_composite(o: VsOut) -> @location(0) vec4<f32> {
+    let scene = textureSample(tex0, samp, o.uv);
+    // Anything the scene pass did not cover shows the sky.
+    var c = mix(sky(o.uv), scene.rgb, clamp(scene.a, 0.0, 1.0));
+    // Glows and particles were rendered small; add them back over everything.
+    c = c + textureSample(fx_tex, samp, o.uv).rgb;
+    let b = textureSample(tex1, samp, o.uv).rgb;
+    c = c + b * P.params.y;
+
+    // Soft shoulder: bright cores roll off instead of clipping to white.
+    c = c / (1.0 + c * 0.30);
+
+    let d = distance(o.uv, vec2<f32>(0.5, 0.5));
+    c = c * (1.0 - smoothstep(0.58, 1.10, d) * 0.5);
+
+    if (P.params.z > 0.5) {
+        c = srgb_encode(c);
+    }
+    return vec4<f32>(c, 1.0);
+}

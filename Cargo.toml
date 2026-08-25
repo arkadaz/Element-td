@@ -1,0 +1,36 @@
+[package]
+name = "elemental_td"
+version = "0.1.0"
+edition = "2024"
+description = "Elemental TD - a GPU-accelerated element tower defense, in pure Rust"
+
+[dependencies]
+bytemuck = { version = "1.25.2", features = ["derive"] }
+eframe = { version = "0.36.1", default-features = false, features = ["wgpu", "default_fonts"] }
+egui = "0.36"
+log = "0.4.34"
+wgpu = { version = "30", default-features = false, features = ["wgsl", "webgl", "webgpu", "dx12", "vulkan"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = ["Document", "Window", "Element", "HtmlCanvasElement", "Performance"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+env_logger = "0.11"
+
+# Dev builds still need to run at 60 fps, so optimise dependencies even in debug.
+[profile.dev]
+opt-level = 1
+# Debug symbols balloon the wasm to ~190 MB; keep them off for web dev builds.
+debug = false
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = true

@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no" />
+  <title>Elemental TD</title>
+  <meta name="description" content="A GPU-accelerated element tower defense written in pure Rust." />
+  <base data-trunk-public-url />
+
+  <link data-trunk rel="rust" data-wasm-opt="2"
+        data-wasm-opt-params="--enable-bulk-memory --enable-bulk-memory-opt --enable-nontrapping-float-to-int --enable-sign-ext --enable-mutable-globals --enable-reference-types --enable-multivalue" />
+  <link data-trunk rel="copy-file" href="assets/favicon.svg" data-target-path="" />
+  <link rel="icon" href="favicon.svg" type="image/svg+xml" />
+
+  <style>
+    html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #05060a; }
+    body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+    canvas#gamecanvas {
+      position: absolute; inset: 0; width: 100%; height: 100%;
+      display: block; outline: none; touch-action: none;
+    }
+    /* Boot splash - removed by the app once the first frame is painted. */
+    #boot {
+      position: absolute; inset: 0; display: grid; place-content: center; gap: 14px;
+      justify-items: center; color: #8e9ab5; z-index: 10;
+      background: radial-gradient(900px 600px at 50% 40%, #131a2c 0%, #05060a 70%);
+    }
+    #boot h1 {
+      margin: 0; font-size: 28px; letter-spacing: .28em; text-transform: uppercase;
+      color: #e6ecf7; font-weight: 700;
+    }
+    #boot .bar { width: 220px; height: 3px; background: #1d2436; border-radius: 2px; overflow: hidden; }
+    #boot .bar i { display: block; height: 100%; width: 40%; border-radius: 2px;
+      background: linear-gradient(90deg, #ff7328, #4aaeff, #b36bff);
+      animation: slide 1.1s ease-in-out infinite; }
+    #boot small { font-size: 11px; letter-spacing: .16em; text-transform: uppercase; }
+    @keyframes slide { 0% { transform: translateX(-110%);} 100% { transform: translateX(260%);} }
+  </style>
+</head>
+<body>
+  <canvas id="gamecanvas"></canvas>
+  <div id="boot">
+    <h1>Elemental TD</h1>
+    <div class="bar"><i></i></div>
+    <small>compiling shaders &middot; rust + wgpu</small>
+  </div>
+</body>
+</html>
