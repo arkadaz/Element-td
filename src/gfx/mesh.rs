@@ -79,7 +79,10 @@ pub fn build() -> Library {
     let mut spans = [Span::default(); SHAPE_COUNT];
 
     let mut record = |v: &mut Vec<Vertex>, idx: usize, tris: Vec<Vertex>| {
-        spans[idx] = Span { first: v.len() as u32, count: tris.len() as u32 };
+        spans[idx] = Span {
+            first: v.len() as u32,
+            count: tris.len() as u32,
+        };
         v.extend(tris);
     };
 
@@ -119,14 +122,27 @@ fn tri_n(
     c: ([f32; 3], [f32; 3]),
     out: &mut Vec<Vertex>,
 ) {
-    out.push(Vertex { pos: a.0, nrm: normalize(a.1) });
-    out.push(Vertex { pos: b.0, nrm: normalize(b.1) });
-    out.push(Vertex { pos: c.0, nrm: normalize(c.1) });
+    out.push(Vertex {
+        pos: a.0,
+        nrm: normalize(a.1),
+    });
+    out.push(Vertex {
+        pos: b.0,
+        nrm: normalize(b.1),
+    });
+    out.push(Vertex {
+        pos: c.0,
+        nrm: normalize(c.1),
+    });
 }
 
 fn normalize(v: [f32; 3]) -> [f32; 3] {
     let l = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
-    if l < 1e-6 { [0.0, 0.0, 1.0] } else { [v[0] / l, v[1] / l, v[2] / l] }
+    if l < 1e-6 {
+        [0.0, 0.0, 1.0]
+    } else {
+        [v[0] / l, v[1] / l, v[2] / l]
+    }
 }
 
 // ---------------------------------------------------------------- shapes
@@ -231,8 +247,18 @@ fn cylinder(sides: usize, capped: bool) -> Vec<Vertex> {
             &mut out,
         );
         if capped {
-            tri([0.0, 0.0, h], [p0[0], p0[1], h], [p1[0], p1[1], h], &mut out);
-            tri([0.0, 0.0, -h], [p1[0], p1[1], -h], [p0[0], p0[1], -h], &mut out);
+            tri(
+                [0.0, 0.0, h],
+                [p0[0], p0[1], h],
+                [p1[0], p1[1], h],
+                &mut out,
+            );
+            tri(
+                [0.0, 0.0, -h],
+                [p1[0], p1[1], -h],
+                [p0[0], p0[1], -h],
+                &mut out,
+            );
         }
     }
     out
@@ -257,7 +283,12 @@ fn cone(sides: usize) -> Vec<Vertex> {
             ([0.0, 0.0, h], n((c0 + c1) * 0.5, (s0 + s1) * 0.5)),
             &mut out,
         );
-        tri([0.0, 0.0, -h], [c1 * r, s1 * r, -h], [c0 * r, s0 * r, -h], &mut out);
+        tri(
+            [0.0, 0.0, -h],
+            [c1 * r, s1 * r, -h],
+            [c0 * r, s0 * r, -h],
+            &mut out,
+        );
     }
     out
 }
@@ -346,12 +377,7 @@ fn prism(sides: usize) -> Vec<Vertex> {
 fn pyramid() -> Vec<Vertex> {
     let mut out = Vec::with_capacity(18);
     let h = 0.5;
-    let c = [
-        [-h, -h, -h],
-        [h, -h, -h],
-        [h, h, -h],
-        [-h, h, -h],
-    ];
+    let c = [[-h, -h, -h], [h, -h, -h], [h, h, -h], [-h, h, -h]];
     let apex = [0.0, 0.0, h];
     for i in 0..4 {
         tri(c[i], c[(i + 1) % 4], apex, &mut out);
@@ -408,9 +434,11 @@ mod tests {
                     v.pos
                 );
             }
-            let len =
-                (v.nrm[0] * v.nrm[0] + v.nrm[1] * v.nrm[1] + v.nrm[2] * v.nrm[2]).sqrt();
-            assert!((len - 1.0).abs() < 0.01, "vertex {i} normal is not unit: {len}");
+            let len = (v.nrm[0] * v.nrm[0] + v.nrm[1] * v.nrm[1] + v.nrm[2] * v.nrm[2]).sqrt();
+            assert!(
+                (len - 1.0).abs() < 0.01,
+                "vertex {i} normal is not unit: {len}"
+            );
         }
     }
 

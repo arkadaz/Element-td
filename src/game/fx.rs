@@ -43,7 +43,15 @@ impl Fx {
         life: f32,
         size: f32,
     ) {
-        self.burst_at(rng, [pos[0], pos[1], GROUND_Z], n, spread, color, life, size);
+        self.burst_at(
+            rng,
+            [pos[0], pos[1], GROUND_Z],
+            n,
+            spread,
+            color,
+            life,
+            size,
+        );
     }
 
     /// Radial spray in three dimensions, biased upwards so debris arcs.
@@ -100,6 +108,12 @@ impl Fx {
 
     /// A single drifting ember (projectile trails, ambient motes).
     pub fn mote(&mut self, pos: [f32; 3], vel: [f32; 3], life: f32, size: f32, color: [f32; 4]) {
-        self.push(ParticleSpawn { pos, vel, life, size: [size, 0.0], color });
+        self.push(ParticleSpawn {
+            pos,
+            vel,
+            life,
+            size: [size, 0.0],
+            color,
+        });
     }
 }

@@ -1322,12 +1322,31 @@ impl Game {
             return;
         }
         const RADIUS: f32 = 2.6;
+        // Healing from several Menders is capped, not summed.
+        //
+        // Menders arrive ten at a time and walk in a clump, so summing meant a
+        // wave healed itself for thirty percent of its own health every second
+        // - a number no board can out-damage, and one that grows with the wave
+        // rather than with the difficulty curve. Wave 43 was an outright wall
+        // in every playthrough because of it. Capped, a pack of Menders is a
+        // burst check: kill one at a time and the rest cannot cover it.
+        const HEAL_CAP: f32 = 2.0;
         for c in &mut self.creeps {
+            if c.suppress > 0.0 {
+                continue;
+            }
+            let mut rate_sum = 0.0;
+            let mut strongest = 0.0f32;
             for (hp_pos, rate) in &healers {
                 let d2 = (hp_pos[0] - c.pos[0]).powi(2) + (hp_pos[1] - c.pos[1]).powi(2);
-                if d2 <= RADIUS * RADIUS && c.suppress <= 0.0 {
-                    c.hp = (c.hp + c.max_hp * rate * dt).min(c.max_hp);
+                if d2 <= RADIUS * RADIUS {
+                    rate_sum += rate;
+                    strongest = strongest.max(*rate);
                 }
+            }
+            let rate = rate_sum.min(strongest * HEAL_CAP);
+            if rate > 0.0 {
+                c.hp = (c.hp + c.max_hp * rate * dt).min(c.max_hp);
             }
         }
     }
@@ -1399,7 +1418,15 @@ impl Game {
                 continue;
             }
             let c = self.creeps[i].clone();
-            let cost = if c.kind == Kind::Boss { 10 } else { 1 };
+            // Both bosses, not just the walking one. `Kind::Boss` alone meant a
+            // Skylord - the boss whose entire job is to punish a board that
+            // cannot shoot upwards - leaked for a single life, which is the
+            // opposite of the intent.
+            //
+            // Five, not ten. A single monster taking half the run turns one
+            // unlucky wave into the whole game, and a narrated playthrough lost
+            // ten of twenty lives to the wave-30 boss and never recovered.
+            let cost = if c.kind.is_boss() { 5 } else { 1 };
             self.lives -= cost;
             self.stats.leaked += 1;
             self.shake = (self.shake + 0.5).min(1.0);

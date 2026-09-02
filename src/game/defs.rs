@@ -583,6 +583,32 @@ impl TowerDef {
         s.dmg * s.rate
     }
 
+    /// Sustained damage per second from burn and poison riders.
+    ///
+    /// Counted at a discount, because a damage-over-time never all lands: some
+    /// of it is overkill on a target that was going to die anyway, and a stack
+    /// takes seconds to build. Without this term at all - which is how it was -
+    /// every toxic tower reads as the worst damage in the game, in the tooltip
+    /// the player is looking at as much as in any valuation, and Bramble's
+    /// twelve stacks of venom are simply invisible.
+    pub fn dot_dps_at(&self, tier: u32) -> f32 {
+        const REALISM: f32 = 0.6;
+        let k = Self::scale(tier);
+        let rate = self.stats(tier).rate;
+        self.specials
+            .iter()
+            .map(|s| match *s {
+                // Burn refreshes rather than stacking, so it is worth its
+                // per-second value once.
+                Special::Burn { dps, .. } => dps * k,
+                // Poison stacks, up to twelve applications deep.
+                Special::Poison { dps, dur } => dps * k * (rate * dur).min(12.0),
+                _ => 0.0,
+            })
+            .sum::<f32>()
+            * REALISM
+    }
+
     /// Roughly how much damage a shot lands across all targets, so chain and
     /// splash towers are not judged on their single-target number alone.
     pub fn effective_dps_at(&self, tier: u32) -> f32 {
@@ -603,7 +629,18 @@ impl TowerDef {
             _ if s.splash > 0.0 => 1.0 + s.splash * 1.2,
             _ => 1.0,
         };
-        s.dmg * s.rate * spread
+        // Crit is a flat multiplier on everything the tower fires, so it goes
+        // on the direct term. Leaving it out understated Prism and Bastion in
+        // the tooltip as badly as leaving out poison understated Bramble.
+        let crit = self
+            .specials
+            .iter()
+            .find_map(|sp| match *sp {
+                Special::Crit { chance, mult } => Some(1.0 + chance * (mult - 1.0)),
+                _ => None,
+            })
+            .unwrap_or(1.0);
+        s.dmg * s.rate * spread * crit + self.dot_dps_at(tier)
     }
 }
 
@@ -690,10 +727,7 @@ pub static TOWERS: &[TowerDef] = &[
         splash: 0.0,
         cost: 60,
         delivery: Delivery::Shot { speed: 20.0 },
-        specials: &[Special::Poison {
-            dps: 12.0,
-            dur: 4.0,
-        }],
+        specials: &[Special::Poison { dps: 6.0, dur: 4.0 }],
         color: [0.42, 0.80, 0.36],
     },
     TowerDef {
@@ -705,9 +739,9 @@ pub static TOWERS: &[TowerDef] = &[
         dtype: Damage::Fire,
         targets: Targets::Both,
         dmg: 16.0,
-        rate: 1.45,
+        rate: 1.30,
         range: 3.2,
-        splash: 0.70,
+        splash: 0.55,
         cost: 65,
         delivery: Delivery::Shot { speed: 19.0 },
         specials: &[Special::Burn { dps: 6.0, dur: 2.0 }],
@@ -741,10 +775,10 @@ pub static TOWERS: &[TowerDef] = &[
         elem: (Earth, None),
         dtype: Damage::Physical,
         targets: Targets::GroundOnly,
-        dmg: 48.0,
+        dmg: 44.0,
         rate: 0.50,
         range: 3.0,
-        splash: 0.90,
+        splash: 0.75,
         cost: 70,
         delivery: Delivery::Shot { speed: 12.0 },
         specials: &[Special::Knockback { dist: 0.30 }],
@@ -804,7 +838,7 @@ pub static TOWERS: &[TowerDef] = &[
         rate: 0.95,
         range: 3.6,
         splash: 0.0,
-        cost: 165,
+        cost: 175,
         delivery: Delivery::Chain {
             bounces: 3,
             falloff: 0.84,
@@ -1401,7 +1435,7 @@ const BOARD_EXP: f32 = 1.1718;
 /// same shape as the board that has to answer it, so the pressure is roughly
 /// even from wave 5 to wave 80. The exponent below one is what leaves the
 /// player a margin to actually play well inside.
-const HP_EXP: f32 = 0.97;
+const HP_EXP: f32 = 1.02;
 
 /// Health multiplier for a campaign wave.
 fn campaign_hp(w: u32) -> f32 {

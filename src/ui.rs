@@ -1571,11 +1571,37 @@ fn draft(g: &mut Game, ctx: &Context) {
 /// What taking this element would actually do: what it unlocks, and what it
 /// raises. Without this the draft is a choice between three coloured words.
 fn draft_effects(ui: &mut Ui, g: &Game, e: Element) {
+    let held = g.essence[e.idx()] as u32;
     let mut after = g.essence;
     after[e.idx()] = after[e.idx()].saturating_add(1);
 
+    // The ceiling line comes first, and it is the important one. An offer that
+    // says only "unlocks five towers" sells the losing move: spreading into a
+    // sixth element unlocks the most and caps everything at level five. A
+    // simulated player who drafted that way died on wave 43 holding a board
+    // with an answer to everything and the numbers to kill nothing.
+    let ceiling = |n: u32| {
+        if n == 0 {
+            0
+        } else {
+            (FREE_TIERS + n).min(MAX_TIER)
+        }
+    };
+    let (from, to) = (ceiling(held), ceiling(held + 1));
+    ui.label(
+        RichText::new(if from == to {
+            format!("ceiling stays level {to}")
+        } else {
+            format!("ceiling  {from} -> level {to}")
+        })
+        .size(11.5)
+        .monospace()
+        .color(if to > from { pal::ACC } else { pal::DIM }),
+    );
+
     let mut unlocks: Vec<&str> = Vec::new();
     let mut raises = 0usize;
+    let mut raises_built = 0usize;
     for (i, d) in TOWERS.iter().enumerate() {
         let before = g.tier_cap_of(i);
         let now = tier_cap(&after, d);
@@ -1583,7 +1609,28 @@ fn draft_effects(ui: &mut Ui, g: &Game, e: Element) {
             unlocks.push(d.name);
         } else if now > before {
             raises += 1;
+            raises_built += g.towers.iter().filter(|t| t.def == i).count();
         }
+    }
+
+    // What it raises on the board you already have beats what it unlocks on the
+    // board you might build, so it is said first and in the brighter colour.
+    if raises_built > 0 {
+        ui.label(
+            RichText::new(format!(
+                "Raises {raises_built} tower{} you own",
+                if raises_built == 1 { "" } else { "s" }
+            ))
+            .size(11.5)
+            .strong()
+            .color(pal::GOOD),
+        );
+    } else if raises > 0 {
+        ui.label(
+            RichText::new(format!("Raises the ceiling of {raises} towers"))
+                .size(11.0)
+                .color(pal::ACC),
+        );
     }
 
     if unlocks.is_empty() {
@@ -1593,27 +1640,21 @@ fn draft_effects(ui: &mut Ui, g: &Game, e: Element) {
                 .color(pal::DIM),
         );
     } else {
-        ui.label(RichText::new("Unlocks").size(10.0).color(pal::DIM));
-        for n in unlocks.iter().take(4) {
-            ui.label(RichText::new(format!("  {n}")).size(11.5).color(pal::GOOD));
+        ui.label(
+            RichText::new(format!("Unlocks {}", unlocks.len()))
+                .size(10.0)
+                .color(pal::DIM),
+        );
+        for n in unlocks.iter().take(3) {
+            ui.label(RichText::new(format!("  {n}")).size(11.0).color(pal::INK));
         }
-        if unlocks.len() > 4 {
+        if unlocks.len() > 3 {
             ui.label(
-                RichText::new(format!("  and {} more", unlocks.len() - 4))
-                    .size(11.0)
+                RichText::new(format!("  and {} more", unlocks.len() - 3))
+                    .size(10.5)
                     .color(pal::DIM),
             );
         }
-    }
-    if raises > 0 {
-        ui.label(
-            RichText::new(format!(
-                "Raises the ceiling of {raises} tower{}",
-                if raises == 1 { "" } else { "s" }
-            ))
-            .size(11.0)
-            .color(pal::ACC),
-        );
     }
 }
 

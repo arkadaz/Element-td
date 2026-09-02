@@ -38,15 +38,42 @@ pub struct Material {
 }
 
 impl Material {
-    pub const STONE: Material = Material { roughness: 0.92, metallic: 0.0 };
-    pub const EARTH: Material = Material { roughness: 0.98, metallic: 0.0 };
-    pub const FOLIAGE: Material = Material { roughness: 0.86, metallic: 0.0 };
-    pub const WOOD: Material = Material { roughness: 0.78, metallic: 0.0 };
-    pub const METAL: Material = Material { roughness: 0.34, metallic: 1.0 };
-    pub const DARK_METAL: Material = Material { roughness: 0.52, metallic: 0.9 };
-    pub const GEM: Material = Material { roughness: 0.14, metallic: 0.2 };
-    pub const CHITIN: Material = Material { roughness: 0.55, metallic: 0.1 };
-    pub const WATER: Material = Material { roughness: 0.08, metallic: 0.0 };
+    pub const STONE: Material = Material {
+        roughness: 0.92,
+        metallic: 0.0,
+    };
+    pub const EARTH: Material = Material {
+        roughness: 0.98,
+        metallic: 0.0,
+    };
+    pub const FOLIAGE: Material = Material {
+        roughness: 0.86,
+        metallic: 0.0,
+    };
+    pub const WOOD: Material = Material {
+        roughness: 0.78,
+        metallic: 0.0,
+    };
+    pub const METAL: Material = Material {
+        roughness: 0.34,
+        metallic: 1.0,
+    };
+    pub const DARK_METAL: Material = Material {
+        roughness: 0.52,
+        metallic: 0.9,
+    };
+    pub const GEM: Material = Material {
+        roughness: 0.14,
+        metallic: 0.2,
+    };
+    pub const CHITIN: Material = Material {
+        roughness: 0.55,
+        metallic: 0.1,
+    };
+    pub const WATER: Material = Material {
+        roughness: 0.08,
+        metallic: 0.0,
+    };
 
     #[inline]
     fn pack(self) -> [f32; 2] {
@@ -124,7 +151,16 @@ impl DrawList {
     // -------------------------------------------------- convenience
 
     pub fn cube(&mut self, pos: [f32; 3], scale: [f32; 3], yaw: f32, color: Color) {
-        self.shape(Shape::Box, pos, scale, yaw, 0.0, color, Material::STONE, 0.0);
+        self.shape(
+            Shape::Box,
+            pos,
+            scale,
+            yaw,
+            0.0,
+            color,
+            Material::STONE,
+            0.0,
+        );
     }
 
     pub fn cube_mat(
@@ -148,11 +184,28 @@ impl DrawList {
     }
 
     pub fn sphere_lit(&mut self, pos: [f32; 3], d: f32, color: Color, em: f32) {
-        self.shape(Shape::Sphere, pos, [d, d, d], 0.0, 0.0, color, Material::GEM, em);
+        self.shape(
+            Shape::Sphere,
+            pos,
+            [d, d, d],
+            0.0,
+            0.0,
+            color,
+            Material::GEM,
+            em,
+        );
     }
 
     /// A cylinder standing on its Z axis.
-    pub fn cylinder(&mut self, pos: [f32; 3], d: f32, h: f32, yaw: f32, color: Color, mat: Material) {
+    pub fn cylinder(
+        &mut self,
+        pos: [f32; 3],
+        d: f32,
+        h: f32,
+        yaw: f32,
+        color: Color,
+        mat: Material,
+    ) {
         self.shape(Shape::Cylinder, pos, [d, d, h], yaw, 0.0, color, mat, 0.0);
     }
 
@@ -164,7 +217,15 @@ impl DrawList {
         self.shape(Shape::Prism, pos, [d, d, h], yaw, 0.0, color, mat, 0.0);
     }
 
-    pub fn pyramid(&mut self, pos: [f32; 3], d: f32, h: f32, yaw: f32, color: Color, mat: Material) {
+    pub fn pyramid(
+        &mut self,
+        pos: [f32; 3],
+        d: f32,
+        h: f32,
+        yaw: f32,
+        color: Color,
+        mat: Material,
+    ) {
         self.shape(Shape::Pyramid, pos, [d, d, h], yaw, 0.0, color, mat, 0.0);
     }
 
@@ -232,7 +293,11 @@ impl DrawList {
         }
         // The mesh runs along Z, so the instance is scaled on Z and pitched to
         // point from a to b.
-        let centre = [(a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5, (a[2] + b[2]) * 0.5];
+        let centre = [
+            (a[0] + b[0]) * 0.5,
+            (a[1] + b[1]) * 0.5,
+            (a[2] + b[2]) * 0.5,
+        ];
         let yaw = d[1].atan2(d[0]);
         let pitch = d[2].atan2(flat) - std::f32::consts::FRAC_PI_2;
         self.shape(shape, centre, [w, w, len], yaw, pitch, color, mat, em);
