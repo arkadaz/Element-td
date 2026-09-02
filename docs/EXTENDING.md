@@ -6,58 +6,74 @@ logic. Almost every addition below is a one-place edit.
 | I want to... | Edit | Logic changes needed |
 | --- | --- | --- |
 | Retune a tower | `game/defs.rs` → `TOWERS` | none |
-| Add a tower | `game/defs.rs` → `TOWERS` | none |
-| Change a tier-3 fork | `game/defs.rs` → that tower's `forks` | none |
+| Retune an element's reach | `game/defs.rs` → `FREE_TIERS`, `TIER_PER_ESSENCE` | none |
+| Change the draft schedule | `game/defs.rs` → `ESSENCE_WAVES` | none |
 | Add a tower effect | `game/defs.rs` → `Special` + 2 match arms | small |
 | Add an attack style | `game/defs.rs` → `Delivery` + 1 match arm | small |
-| Add a monster | `game/defs.rs` → `Kind` + `kind_for` + `build_waves` | small |
-| Retune difficulty | `game/defs.rs` → `build_waves()` | none |
+| Add a monster | `game/defs.rs` → `Kind` + `kind_for` + `shape_of` | small |
+| Retune difficulty | `game/defs.rs` → `HP_EXP` | none |
 | Redraw the level | `game/board.rs` → `WAYPOINTS` | none |
-| Recolour anything | `view.rs` → `theme`, `ui.rs` → `pal` | none |
+| Recolour anything | `view/mod.rs` → `theme`, `ui.rs` → `pal` | none |
 | Add scenery | `decor.rs` | none |
 | Change the lighting | `gfx/shaders/solid.wgsl`, `Renderer` tunables | none |
 
 ---
 
-## Add a tower
+## The roster is not a list, it is a lattice
 
-`TOWERS` is a slice, so there is no count to keep in sync. Append an entry:
+There are exactly twenty-one towers because there are six elements: one **pure**
+tower per element, and one **dual** tower per unordered pair. `pure_index` and
+`dual_index` compute positions from the declaration order rather than searching
+it, and `the_roster_is_exactly_six_pures_and_every_pair` asserts every pair maps
+to a distinct tower, findable from either side.
+
+So you do not add a twenty-second tower. You either **retune an existing one**,
+or you add a **seventh element** - which is seven new towers (one pure, six
+duals) and a column in the armour table, and is a design decision rather than an
+edit.
+
+## Retune a tower
 
 ```rust
 TowerDef {
-    id: "harpoon", name: "Harpoon", role: "Puller",
-    desc: "Drags the front rank back down the road.",
-    dtype: Damage::Physical,
-    dmg: 30.0, rate: 0.8, range: 4.0, splash: 0.0, cost: 85,
-    delivery: Delivery::Shot { speed: 20.0 },
-    specials: &[Special::Knockback { dist: 0.8 }],
-    color: [0.60, 0.78, 0.86],
-    forks: [ /* two specialisations */ ],
+    id: "abyss", name: "Abyss", role: "Pull",
+    desc: "Drags them back down the road they just walked.",
+    elem: (Water, Some(Dark)),
+    dtype: Damage::Magic, targets: Targets::Both,
+    dmg: 27.0, rate: 0.80, range: 3.5, splash: 0.45, cost: 195,
+    delivery: Delivery::Shot { speed: 16.0 },
+    specials: &[Special::Pull { dist: 0.85 }, Special::Slow { amt: 0.20, dur: 1.5 }],
+    color: [0.44, 0.42, 0.86],
 },
 ```
 
-That is the whole change. It appears in the build palette sorted by cost, gets
-tier scaling, a tooltip built from its specials and forks, a minimap colour and a
-3D model tinted to `color`.
+`elem` decides everything about availability: which essences unlock it, how far
+it upgrades, which pips the build card shows, and which base and crown its model
+is assembled from. Nothing else needs to know.
 
-**Two rules the tests enforce**, so keep them in mind:
+**Three rules the tests enforce**, so keep them in mind:
 
-1. `role` must be unique — if your new tower does the same job as an existing one,
-   the design is weaker for having both.
-2. Both forks must actually differ, from the base *and* from each other.
+1. `role` must be unique. If your change makes a tower do the same job as
+   another, the design is weaker for having both.
+2. No two attackers may share a damage type, a delivery *and* an effect set.
+3. Every element must unlock at least one tower that can shoot at the air,
+   or drafting it is a coin toss on whether the run can answer the sky.
 
-## Design the forks
+## Two things that must stay true of any new effect
 
-A fork is the interesting decision in the game, so make it a real trade, not a
-bigger number. The existing ones follow one of three shapes:
+Both of these have shipped as bugs, more than once, and both end a run by hanging
+it rather than by losing it.
 
-- **Trade rate for punch** (Marksman vs Repeater, Mortar vs Grapeshot).
-- **Trade damage for utility** (Glacier freezes; Rime makes everything else hit harder).
-- **Change the mechanism** (Storm chains five times; Overload chains twice and stuns).
+- **Displacement must be bounded per monster, not per second.** A cooldown alone
+  does not stop a wave being pinned in place: a shove of 0.85 tiles every 0.75
+  seconds beats a slowed monster's walking speed, so it never arrives, never
+  dies and never leaks. Spend from `Creep::push_left`, via `combat::push_back`.
+- **Nothing may scale a *distance* by the damage curve.** `Pull` briefly used
+  `dist * scale.sqrt()`, which at level eight dragged a monster six tiles a hit.
+  Tiles of road do not get longer as a tower gets stronger.
 
-`keep_base: true` keeps the base specials and adds the fork's on top;
-`keep_base: false` replaces them. `delivery: Some(...)` swaps the attack style
-entirely.
+The balance harness asserts that no wave takes more than 200 seconds, which is
+what catches the next one of these.
 
 ## Add a tower effect
 
@@ -71,7 +87,7 @@ entirely.
      `interest_rate`
 
 The compiler will point you at every match that needs the new arm. `SpecialSet`
-holds six inline, so a tower can carry base + fork specials without allocating.
+holds six inline, so a tower carries its whole effect set without allocating.
 
 ## Add a monster
 

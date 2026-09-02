@@ -57,6 +57,8 @@ pub fn draw(d: &mut DrawList, c: &Creep) {
         Kind::Mender => mender(d, c, body, dark),
         Kind::Bulwark => bulwark(d, c, body, dark),
         Kind::Phaser => phaser(d, c, body, dark),
+        Kind::Wraith => wraith(d, c, body, dark),
+        Kind::Seraph => seraph(d, c, body, dark),
         Kind::Boss => boss(d, c, body, dark),
         Kind::Wisp => wisp(d, c, body, dark),
         Kind::Drake => drake(d, c, body, dark),
@@ -77,16 +79,15 @@ fn legs(d: &mut DrawList, c: &Creep, col: Color, count: usize, spread: f32, len:
         let fwd = if i < 2 { 1.0 } else { -1.0 };
         let side = if i % 2 == 0 { 1.0 } else { -1.0 };
         let phase = c.bob * 2.0 + (i as f32) * std::f32::consts::FRAC_PI_2;
-        let lift = if walking { (phase.sin() * 0.5 + 0.5) * r * 0.30 } else { 0.0 };
+        let lift = if walking {
+            (phase.sin() * 0.5 + 0.5) * r * 0.30
+        } else {
+            0.0
+        };
         // Legs swing forward as they lift, so the gait reads.
         let swing = if walking { phase.cos() * r * 0.18 } else { 0.0 };
         let hip = local(c.pos, c.facing, fwd * r * spread, side * r * spread);
-        let foot = local(
-            c.pos,
-            c.facing,
-            fwd * r * spread + swing,
-            side * r * spread,
-        );
+        let foot = local(c.pos, c.facing, fwd * r * spread + swing, side * r * spread);
         d.link(
             Shape::Capsule,
             [hip[0], hip[1], len + lift],
@@ -102,14 +103,28 @@ fn legs(d: &mut DrawList, c: &Creep, col: Color, count: usize, spread: f32, len:
 fn eyes(d: &mut DrawList, c: &Creep, at: [f32; 2], z: f32, size: f32, spread: f32) {
     for s in [-1.0f32, 1.0] {
         let e = local(at, c.facing, size * 0.55, s * spread);
-        d.sphere_lit([e[0], e[1], z], size * 0.42, rgba([1.0, 0.90, 0.68], 1.0), 1.0);
+        d.sphere_lit(
+            [e[0], e[1], z],
+            size * 0.42,
+            rgba([1.0, 0.90, 0.68], 1.0),
+            1.0,
+        );
     }
 }
 
 /// A rounded body: one squashed sphere, which is the whole difference between
 /// "creature" and "crate".
 #[allow(clippy::too_many_arguments)]
-fn body_blob(d: &mut DrawList, c: &Creep, z: f32, l: f32, w: f32, h: f32, col: Color, mat: Material) {
+fn body_blob(
+    d: &mut DrawList,
+    c: &Creep,
+    z: f32,
+    l: f32,
+    w: f32,
+    h: f32,
+    col: Color,
+    mat: Material,
+) {
     d.shape(
         Shape::Sphere,
         [c.pos[0], c.pos[1], z],
@@ -217,7 +232,12 @@ fn brute(d: &mut DrawList, c: &Creep, col: Color, dark: Color) {
         );
     }
     let h = local(c.pos, c.facing, r * 0.9, 0.0);
-    d.sphere([h[0], h[1], bz + r * 0.25], r * 0.85, dark, Material::CHITIN);
+    d.sphere(
+        [h[0], h[1], bz + r * 0.25],
+        r * 0.85,
+        dark,
+        Material::CHITIN,
+    );
     eyes(d, c, h, bz + r * 0.33, r * 0.36, r * 0.20);
 }
 
@@ -242,13 +262,23 @@ fn swarm(d: &mut DrawList, c: &Creep, col: Color, dark: Color) {
         0.0,
     );
     let th = local(c.pos, c.facing, r * 0.35, 0.0);
-    d.sphere([th[0], th[1], bz + r * 0.10], r * 1.15, dark, Material::CHITIN);
+    d.sphere(
+        [th[0], th[1], bz + r * 0.10],
+        r * 1.15,
+        dark,
+        Material::CHITIN,
+    );
     eyes(d, c, th, bz + r * 0.22, r * 0.44, r * 0.22);
 
     // Antennae, flicking with the gait.
     for sd in [-1.0f32, 1.0] {
         let base = local(c.pos, c.facing, r * 0.75, sd * r * 0.20);
-        let tip = local(c.pos, c.facing + sd * (c.bob * 3.0).sin() * 0.25, r * 1.5, sd * r * 0.55);
+        let tip = local(
+            c.pos,
+            c.facing + sd * (c.bob * 3.0).sin() * 0.25,
+            r * 1.5,
+            sd * r * 0.55,
+        );
         d.link(
             Shape::Cone,
             [base[0], base[1], bz + r * 0.30],
@@ -278,7 +308,12 @@ fn warden(d: &mut DrawList, c: &Creep, col: Color, dark: Color) {
         0.0,
     );
     let h = local(c.pos, c.facing, r * 0.12, 0.0);
-    d.sphere([h[0], h[1], bz + r * 0.72], r * 0.95, dark, Material::CHITIN);
+    d.sphere(
+        [h[0], h[1], bz + r * 0.72],
+        r * 0.95,
+        dark,
+        Material::CHITIN,
+    );
     eyes(d, c, h, bz + r * 0.72, r * 0.42, r * 0.20);
     // Orbiting wards: the tell that magic bounces off it.
     for i in 0..3 {
@@ -313,7 +348,12 @@ fn mender(d: &mut DrawList, c: &Creep, col: Color, dark: Color) {
         Material::CHITIN,
         0.0,
     );
-    d.sphere([c.pos[0], c.pos[1], bz + r * 0.30], r * 1.35, col, Material::GEM);
+    d.sphere(
+        [c.pos[0], c.pos[1], bz + r * 0.30],
+        r * 1.35,
+        col,
+        Material::GEM,
+    );
     // Halo ring.
     let spin = c.bob * 1.2;
     for i in 0..6 {
@@ -332,7 +372,13 @@ fn mender(d: &mut DrawList, c: &Creep, col: Color, dark: Color) {
     }
     // The heal aura: impossible to miss, so it can be focused down.
     let pulse = (c.bob * 1.8).sin() * 0.5 + 0.5;
-    d.ground_ring(c.pos, 2.6 * (0.85 + pulse * 0.15), 0.09, rgba([0.45, 1.0, 0.62], 0.45), 40);
+    d.ground_ring(
+        c.pos,
+        2.6 * (0.85 + pulse * 0.15),
+        0.09,
+        rgba([0.45, 1.0, 0.62], 0.45),
+        40,
+    );
     d.glow(
         [c.pos[0], c.pos[1], bz],
         r * 3.2,
@@ -352,7 +398,11 @@ fn bulwark(d: &mut DrawList, c: &Creep, col: Color, dark: Color) {
     d.sphere([h[0], h[1], bz + r * 0.72], r * 0.8, dark, Material::CHITIN);
     eyes(d, c, h, bz + r * 0.75, r * 0.34, r * 0.18);
 
-    let frac = if c.max_shield > 0.0 { (c.shield / c.max_shield).clamp(0.0, 1.0) } else { 0.0 };
+    let frac = if c.max_shield > 0.0 {
+        (c.shield / c.max_shield).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
     if frac > 0.0 {
         let q = local(c.pos, c.facing, r * 1.3, 0.0);
         let hgt = r * (1.2 + 1.5 * frac);
@@ -363,11 +413,19 @@ fn bulwark(d: &mut DrawList, c: &Creep, col: Color, dark: Color) {
             [r * 0.45, r * 2.2, hgt],
             c.facing,
             0.0,
-            rgba(mix([0.55, 0.75, 1.0], [1.0, 1.0, 1.0], 1.0 - frac), 0.42 + 0.45 * frac),
+            rgba(
+                mix([0.55, 0.75, 1.0], [1.0, 1.0, 1.0], 1.0 - frac),
+                0.42 + 0.45 * frac,
+            ),
             Material::GEM,
             0.35,
         );
-        d.glow([q[0], q[1], bz + r * 0.2], r * 2.4, 2.0, rgba([0.5, 0.72, 1.0], 0.20 * frac));
+        d.glow(
+            [q[0], q[1], bz + r * 0.2],
+            r * 2.4,
+            2.0,
+            rgba([0.5, 0.72, 1.0], 0.20 * frac),
+        );
     } else {
         // Broken: only the boss of the shield remains, hanging off the arm.
         let q = local(c.pos, c.facing, r * 1.05, 0.0);
@@ -394,7 +452,12 @@ fn phaser(d: &mut DrawList, c: &Creep, col: Color, dark: Color) {
         0.15,
     );
     let h = local(c.pos, c.facing, r * 0.3, 0.0);
-    d.sphere([h[0], h[1], bz + r * 1.0], r * 0.85, [dark[0], dark[1], dark[2], a], Material::GEM);
+    d.sphere(
+        [h[0], h[1], bz + r * 1.0],
+        r * 0.85,
+        [dark[0], dark[1], dark[2], a],
+        Material::GEM,
+    );
     eyes(d, c, h, bz + r * 1.0, r * 0.4, r * 0.20);
 
     // After-image, strongest while it is ignoring slows.
@@ -411,8 +474,129 @@ fn phaser(d: &mut DrawList, c: &Creep, col: Color, dark: Color) {
         0.8,
     );
     if ghosting {
-        d.glow([c.pos[0], c.pos[1], bz], r * 3.0, 2.2, rgba(c.armor.color(), 0.30));
+        d.glow(
+            [c.pos[0], c.pos[1], bz],
+            r * 3.0,
+            2.2,
+            rgba(c.armor.color(), 0.30),
+        );
     }
+}
+
+/// Ethereal, and it should look it: no legs, a torn shroud, and a body you can
+/// see the road through. A physical weapon passing through it has to be a thing
+/// the player can believe from the silhouette alone.
+fn wraith(d: &mut DrawList, c: &Creep, col: Color, dark: Color) {
+    let r = c.radius;
+    let drift = (c.bob * 1.6).sin() * r * 0.18;
+    let bz = r * 1.5 + drift;
+    let ghost = 0.42;
+
+    // A tapering shroud, wide at the shoulders and frayed to nothing below -
+    // it never touches the ground.
+    for k in 0..5 {
+        let t = k as f32 / 4.0;
+        let w = r * (1.35 - t * 0.85);
+        let sway = (c.bob * 2.0 + t * 3.0).sin() * r * 0.22 * t;
+        let q = local(c.pos, c.facing, sway * 0.4, sway);
+        d.shape(
+            Shape::Capsule,
+            [q[0], q[1], bz - t * r * 1.5],
+            [w, w, r * 0.9],
+            c.facing,
+            0.0,
+            [col[0], col[1], col[2], ghost * (1.0 - t * 0.55)],
+            Material::GEM,
+            0.10,
+        );
+    }
+    // A hood with nothing inside it but two lights.
+    let h = local(c.pos, c.facing, r * 0.12, 0.0);
+    d.sphere(
+        [h[0], h[1], bz + r * 0.95],
+        r * 1.15,
+        [dark[0], dark[1], dark[2], ghost + 0.20],
+        Material::GEM,
+    );
+    eyes(d, c, h, bz + r * 0.95, r * 0.34, r * 0.24);
+    // Trailing wisps where the legs should be.
+    for k in 1..4 {
+        let t = k as f32;
+        let p = local(c.pos, c.facing, -r * 0.8 * t, (c.bob + t).sin() * r * 0.25);
+        d.sphere(
+            [p[0], p[1], bz - r * 1.2 - t * r * 0.15],
+            r * (0.7 - t * 0.15),
+            [col[0], col[1], col[2], 0.20 / t],
+            Material::GEM,
+        );
+    }
+    d.glow(
+        [c.pos[0], c.pos[1], bz],
+        r * 3.4,
+        2.0,
+        rgba(c.armor.color(), 0.26),
+    );
+}
+
+/// The Ethereal flyer: a ring of light with a hollow centre and no body at all.
+/// Deliberately unlike the Wisp it will be mistaken for at a distance - the Wisp
+/// is a solid mote, this is an empty halo.
+fn seraph(d: &mut DrawList, c: &Creep, col: Color, dark: Color) {
+    let r = c.radius;
+    let z = c.height();
+    let spin = c.bob * 1.1;
+
+    // Two counter-rotating rings, standing on edge.
+    for (ring, tilt) in [(0usize, 0.0f32), (1, 1.2)] {
+        let dir = if ring == 0 { 1.0 } else { -1.0 };
+        for i in 0..12 {
+            let a = i as f32 * std::f32::consts::FRAC_PI_6 + spin * dir;
+            let x = a.cos() * r * 1.8;
+            let y = a.sin() * r * 1.8 * tilt.cos();
+            let zz = a.sin() * r * 1.8 * tilt.sin();
+            let q = local(c.pos, c.facing, x, y);
+            d.sphere_lit(
+                [q[0], q[1], z + zz],
+                r * 0.30,
+                [col[0], col[1], col[2], 0.85],
+                0.9,
+            );
+        }
+    }
+    // A hollow core - a dark sphere with a bright rim, so the middle reads empty.
+    d.sphere(
+        [c.pos[0], c.pos[1], z],
+        r * 0.9,
+        [0.02, 0.03, 0.05, 0.55],
+        Material::GEM,
+    );
+    d.sphere(
+        [c.pos[0], c.pos[1], z],
+        r * 1.25,
+        [dark[0], dark[1], dark[2], 0.22],
+        Material::GEM,
+    );
+    // Four blades of light standing off the rings.
+    for i in 0..4 {
+        let a = i as f32 * 1.571 - spin * 0.6;
+        let tip = local(c.pos, c.facing, a.cos() * r * 3.0, a.sin() * r * 3.0);
+        let root = local(c.pos, c.facing, a.cos() * r * 1.9, a.sin() * r * 1.9);
+        d.link(
+            Shape::Capsule,
+            [root[0], root[1], z],
+            [tip[0], tip[1], z + (a * 2.0).sin() * r * 0.3],
+            r * 0.13,
+            [col[0], col[1], col[2], 0.75],
+            Material::GEM,
+            0.85,
+        );
+    }
+    d.glow(
+        [c.pos[0], c.pos[1], z],
+        r * 5.0,
+        1.9,
+        rgba(c.armor.color(), 0.32),
+    );
 }
 
 /// Enormous, crowned, horned, spined. Should stop the player mid-sentence.
@@ -468,7 +652,12 @@ fn boss(d: &mut DrawList, c: &Creep, col: Color, dark: Color) {
             0.0,
         );
     }
-    d.glow([c.pos[0], c.pos[1], bz], r * 3.4, 2.0, rgba(c.armor.color(), 0.35));
+    d.glow(
+        [c.pos[0], c.pos[1], bz],
+        r * 3.4,
+        2.0,
+        rgba(c.armor.color(), 0.35),
+    );
 }
 
 // ---------------------------------------------------------------- overlays
@@ -477,7 +666,12 @@ fn status(d: &mut DrawList, c: &Creep) {
     let r = c.radius;
     let bz = c.height();
     if c.slow.t > 0.0 && !c.slow_off {
-        d.glow([c.pos[0], c.pos[1], bz], r * 2.6, 1.8, rgba([0.45, 0.80, 1.0], 0.32));
+        d.glow(
+            [c.pos[0], c.pos[1], bz],
+            r * 2.6,
+            1.8,
+            rgba([0.45, 0.80, 1.0], 0.32),
+        );
     }
     if c.stun > 0.0 {
         // A ring of sparks spinning overhead.
@@ -496,10 +690,20 @@ fn status(d: &mut DrawList, c: &Creep) {
         }
     }
     if c.burn.t > 0.0 {
-        d.glow([c.pos[0], c.pos[1], bz + r * 0.5], r * 2.8, 1.7, rgba([1.0, 0.45, 0.12], 0.42));
+        d.glow(
+            [c.pos[0], c.pos[1], bz + r * 0.5],
+            r * 2.8,
+            1.7,
+            rgba([1.0, 0.45, 0.12], 0.42),
+        );
     }
     if c.poison.t > 0.0 {
-        d.glow([c.pos[0], c.pos[1], bz + r * 0.5], r * 2.6, 1.7, rgba([0.45, 1.0, 0.35], 0.36));
+        d.glow(
+            [c.pos[0], c.pos[1], bz + r * 0.5],
+            r * 2.6,
+            1.7,
+            rgba([0.45, 1.0, 0.35], 0.36),
+        );
     }
     if c.shred.t > 0.0 {
         d.ground_ring(c.pos, r * 1.9, 0.06, rgba([0.85, 0.45, 1.0], 0.65), 14);
@@ -525,7 +729,11 @@ fn health_bar(d: &mut DrawList, c: &Creep) {
         Material::EARTH,
         0.35,
     );
-    let fill = if hp > 0.35 { theme::HP_FILL } else { theme::HP_LOW };
+    let fill = if hp > 0.35 {
+        theme::HP_FILL
+    } else {
+        theme::HP_LOW
+    };
     d.shape(
         Shape::Quad,
         [c.pos[0] - w * 0.5 * (1.0 - hp), c.pos[1], bar_z + 0.015],
@@ -574,7 +782,15 @@ fn wings(
         let tip = local([at[0], at[1]], c.facing, -chord * 0.35, s * span);
         let ez = at[2] + flap * span * 0.30;
         let tz = at[2] + flap * span * 0.55;
-        d.link(Shape::Capsule, at, [elbow[0], elbow[1], ez], chord * 0.16, col, Material::CHITIN, 0.0);
+        d.link(
+            Shape::Capsule,
+            at,
+            [elbow[0], elbow[1], ez],
+            chord * 0.16,
+            col,
+            Material::CHITIN,
+            0.0,
+        );
         d.link(
             Shape::Capsule,
             [elbow[0], elbow[1], ez],
@@ -606,13 +822,27 @@ fn wisp(d: &mut DrawList, c: &Creep, col: Color, dark: Color) {
     let z = c.height();
     let pulse = (c.bob * 4.0).sin() * 0.5 + 0.5;
 
-    d.sphere_lit([c.pos[0], c.pos[1], z], r * 1.7 + pulse * r * 0.25, col, 0.85);
-    d.sphere([c.pos[0], c.pos[1], z], r * 2.5, [col[0], col[1], col[2], 0.22], Material::GEM);
+    d.sphere_lit(
+        [c.pos[0], c.pos[1], z],
+        r * 1.7 + pulse * r * 0.25,
+        col,
+        0.85,
+    );
+    d.sphere(
+        [c.pos[0], c.pos[1], z],
+        r * 2.5,
+        [col[0], col[1], col[2], 0.22],
+        Material::GEM,
+    );
     // Three motes orbiting the core, so it shimmers rather than sitting still.
     for i in 0..3 {
         let a = c.bob * 2.4 + i as f32 * 2.094;
         d.sphere_lit(
-            [c.pos[0] + a.cos() * r * 1.5, c.pos[1] + a.sin() * r * 1.5, z + (a * 2.0).sin() * r * 0.5],
+            [
+                c.pos[0] + a.cos() * r * 1.5,
+                c.pos[1] + a.sin() * r * 1.5,
+                z + (a * 2.0).sin() * r * 0.5,
+            ],
             r * 0.42,
             dark,
             1.0,
@@ -629,7 +859,12 @@ fn wisp(d: &mut DrawList, c: &Creep, col: Color, dark: Color) {
             Material::GEM,
         );
     }
-    d.glow([c.pos[0], c.pos[1], z], r * 4.0, 2.0, [col[0], col[1], col[2], 0.34]);
+    d.glow(
+        [c.pos[0], c.pos[1], z],
+        r * 4.0,
+        2.0,
+        [col[0], col[1], col[2], 0.34],
+    );
 }
 
 /// A plated flying serpent: long body, real wings, horned head. Heavy armour,
@@ -709,8 +944,23 @@ fn drake(d: &mut DrawList, c: &Creep, col: Color, dark: Color) {
     // Tail, tapering to a barb.
     let t0 = local(c.pos, c.facing, -r * 1.3, 0.0);
     let t1 = local(c.pos, c.facing + sway * 0.5, -r * 2.6, 0.0);
-    d.link(Shape::Capsule, [t0[0], t0[1], z], [t1[0], t1[1], z - r * 0.2], r * 0.26, col, Material::CHITIN, 0.0);
-    d.cone([t1[0], t1[1], z - r * 0.3], r * 0.4, r * 0.7, c.facing, dark, Material::METAL);
+    d.link(
+        Shape::Capsule,
+        [t0[0], t0[1], z],
+        [t1[0], t1[1], z - r * 0.2],
+        r * 0.26,
+        col,
+        Material::CHITIN,
+        0.0,
+    );
+    d.cone(
+        [t1[0], t1[1], z - r * 0.3],
+        r * 0.4,
+        r * 0.7,
+        c.facing,
+        dark,
+        Material::METAL,
+    );
 }
 
 /// The air boss: enormous wings, a crown, and a mantle of orbiting shards.
@@ -752,14 +1002,23 @@ fn skylord(d: &mut DrawList, c: &Creep, col: Color, dark: Color) {
     );
 
     let head = local(c.pos, c.facing, r * 0.25, 0.0);
-    d.sphere([head[0], head[1], z + r * 1.5], r * 0.95, dark, Material::CHITIN);
+    d.sphere(
+        [head[0], head[1], z + r * 1.5],
+        r * 0.95,
+        dark,
+        Material::CHITIN,
+    );
     eyes(d, c, head, z + r * 1.55, r * 0.5, r * 0.26);
     // Crown of cones.
     for k in 0..5 {
         let a = k as f32 * 1.257 - 0.63 + c.facing;
         let hgt = r * (0.7 + 0.35 * (2 - (k as i32 - 2).abs()) as f32);
         d.cone(
-            [head[0] + a.cos() * r * 0.5, head[1] + a.sin() * r * 0.5, z + r * 2.1 + hgt * 0.5],
+            [
+                head[0] + a.cos() * r * 0.5,
+                head[1] + a.sin() * r * 0.5,
+                z + r * 2.1 + hgt * 0.5,
+            ],
             r * 0.26,
             hgt,
             a,
@@ -772,7 +1031,11 @@ fn skylord(d: &mut DrawList, c: &Creep, col: Color, dark: Color) {
         let a = c.bob * 1.1 + i as f32 * 1.047;
         d.shape(
             Shape::Prism,
-            [c.pos[0] + a.cos() * r * 2.2, c.pos[1] + a.sin() * r * 2.2, z - r * 0.4 + (a * 2.0).sin() * r * 0.3],
+            [
+                c.pos[0] + a.cos() * r * 2.2,
+                c.pos[1] + a.sin() * r * 2.2,
+                z - r * 0.4 + (a * 2.0).sin() * r * 0.3,
+            ],
             [r * 0.42, r * 0.42, r * 0.30],
             a,
             0.0,
@@ -781,5 +1044,10 @@ fn skylord(d: &mut DrawList, c: &Creep, col: Color, dark: Color) {
             1.0,
         );
     }
-    d.glow([c.pos[0], c.pos[1], z], r * 4.5, 2.0, rgba(c.armor.color(), 0.38));
+    d.glow(
+        [c.pos[0], c.pos[1], z],
+        r * 4.5,
+        2.0,
+        rgba(c.armor.color(), 0.38),
+    );
 }

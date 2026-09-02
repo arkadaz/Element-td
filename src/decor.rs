@@ -38,7 +38,10 @@ impl Decor {
         scatter(&mut d, board, &mut rng);
         lamps(&mut d, &mut torches, board);
 
-        Self { statics: d, torches }
+        Self {
+            statics: d,
+            torches,
+        }
     }
 }
 
@@ -71,7 +74,13 @@ fn cliffs(d: &mut DrawList, rng: &mut Rng) {
             (-out, BH * 0.5, t, h),
             (BW + out, BH * 0.5, t, h),
         ] {
-            d.cube_mat([cx, cy, z], [sx, sy, 1.4], 0.0, rgba(col, 1.0), Material::STONE);
+            d.cube_mat(
+                [cx, cy, z],
+                [sx, sy, 1.4],
+                0.0,
+                rgba(col, 1.0),
+                Material::STONE,
+            );
         }
     }
     // Boulders perched on the shelves: squashed spheres, never boxes.
@@ -90,7 +99,7 @@ fn cliffs(d: &mut DrawList, rng: &mut Rng) {
             Shape::Sphere,
             [x, y, rng.range(0.0, 0.4)],
             [r, r * rng.range(0.7, 1.2), r * rng.range(0.55, 0.9)],
-            rng.range(0.0, 3.14),
+            rng.range(0.0, std::f32::consts::PI),
             rng.range(-0.3, 0.3),
             rgba([0.20, 0.21, 0.25], 1.0),
             Material::STONE,
@@ -112,14 +121,32 @@ fn water(d: &mut DrawList, rng: &mut Rng, board: &Board) {
             if edge > 0.95 || !is_free(board, p, 1.0) {
                 continue;
             }
-            d.slab_mat(p, [1.0, 1.0], -0.10, 0.5, rgba([0.055, 0.075, 0.090], 1.0), Material::STONE);
+            d.slab_mat(
+                p,
+                [1.0, 1.0],
+                -0.10,
+                0.5,
+                rgba([0.055, 0.075, 0.090], 1.0),
+                Material::STONE,
+            );
             // A near-mirror surface: this is where PBR earns its keep.
-            d.slab_mat(p, [0.99, 0.99], 0.055, 0.06, rgba([0.09, 0.30, 0.42], 0.94), Material::WATER);
+            d.slab_mat(
+                p,
+                [0.99, 0.99],
+                0.055,
+                0.06,
+                rgba([0.09, 0.30, 0.42], 0.94),
+                Material::WATER,
+            );
             if edge > 0.6 && rng.chance(0.4) {
                 for _ in 0..3 {
                     let h = rng.range(0.30, 0.55);
                     d.cylinder(
-                        [p[0] + rng.range(-0.4, 0.4), p[1] + rng.range(-0.4, 0.4), 0.05 + h * 0.5],
+                        [
+                            p[0] + rng.range(-0.4, 0.4),
+                            p[1] + rng.range(-0.4, 0.4),
+                            0.05 + h * 0.5,
+                        ],
                         0.05,
                         h,
                         0.0,
@@ -149,7 +176,14 @@ fn fences(d: &mut DrawList, board: &Board, rng: &mut Rng) {
                 continue;
             }
             let ph = rng.range(0.38, 0.48);
-            d.cylinder([px, py, ph * 0.5], 0.10, ph, 0.0, rgba(wood, 1.0), Material::WOOD);
+            d.cylinder(
+                [px, py, ph * 0.5],
+                0.10,
+                ph,
+                0.0,
+                rgba(wood, 1.0),
+                Material::WOOD,
+            );
             // Cap the post so it reads as turned timber.
             d.sphere([px, py, ph], 0.13, rgba(wood, 1.0), Material::WOOD);
             let nx = p[0] + hd[0] * step + side[0] * sgn * off;
@@ -207,7 +241,11 @@ fn tree(d: &mut DrawList, rng: &mut Rng, p: [f32; 2]) {
     );
 
     let tint = rng.unit();
-    let leaf = [0.105 + tint * 0.055, 0.255 + tint * 0.095, 0.135 + tint * 0.045];
+    let leaf = [
+        0.105 + tint * 0.055,
+        0.255 + tint * 0.095,
+        0.135 + tint * 0.045,
+    ];
     let broadleaf = rng.chance(0.35);
     if broadleaf {
         // Round canopy: two overlapping squashed spheres.
@@ -259,9 +297,13 @@ fn rocks(d: &mut DrawList, rng: &mut Rng, p: [f32; 2]) {
         let r = rng.range(0.22, 0.46);
         d.shape(
             Shape::Sphere,
-            [p[0] + rng.range(-0.3, 0.3), p[1] + rng.range(-0.3, 0.3), r * 0.34],
+            [
+                p[0] + rng.range(-0.3, 0.3),
+                p[1] + rng.range(-0.3, 0.3),
+                r * 0.34,
+            ],
             [r, r * rng.range(0.7, 1.2), r * rng.range(0.5, 0.85)],
-            rng.range(0.0, 3.14),
+            rng.range(0.0, std::f32::consts::PI),
             rng.range(-0.25, 0.25),
             rgba([0.215, 0.225, 0.265], 1.0),
             Material::STONE,
@@ -277,7 +319,11 @@ fn bush(d: &mut DrawList, rng: &mut Rng, p: [f32; 2]) {
         let rr = r * rng.range(0.6, 1.0);
         d.shape(
             Shape::Sphere,
-            [p[0] + a.cos() * r * 0.24, p[1] + a.sin() * r * 0.24, rr * 0.42],
+            [
+                p[0] + a.cos() * r * 0.24,
+                p[1] + a.sin() * r * 0.24,
+                rr * 0.42,
+            ],
             [rr, rr, rr * 0.8],
             0.0,
             0.0,
@@ -291,11 +337,15 @@ fn bush(d: &mut DrawList, rng: &mut Rng, p: [f32; 2]) {
 fn tuft(d: &mut DrawList, rng: &mut Rng, p: [f32; 2]) {
     for _ in 0..3 {
         let h = rng.range(0.16, 0.32);
-        let a = rng.range(0.0, 3.14);
+        let a = rng.range(0.0, std::f32::consts::PI);
         // Blades lean, so grass does not look like a bed of nails.
         d.shape(
             Shape::Cone,
-            [p[0] + rng.range(-0.25, 0.25), p[1] + rng.range(-0.25, 0.25), h * 0.5 + 0.05],
+            [
+                p[0] + rng.range(-0.25, 0.25),
+                p[1] + rng.range(-0.25, 0.25),
+                h * 0.5 + 0.05,
+            ],
             [0.075, 0.075, h],
             a,
             rng.range(-0.25, 0.25),
@@ -326,7 +376,10 @@ fn lamps(d: &mut DrawList, torches: &mut Vec<Torch>, board: &Board) {
             d.prism([px, py, 1.20], 0.30, 0.26, 0.0, iron, Material::DARK_METAL);
             d.sphere_lit([px, py, 1.20], 0.20, rgba([1.0, 0.62, 0.24], 1.0), 1.0);
             d.cone([px, py, 1.40], 0.34, 0.16, 0.0, iron, Material::DARK_METAL);
-            torches.push(Torch { pos: [px, py, 1.22], phase: i as f32 * 1.7 });
+            torches.push(Torch {
+                pos: [px, py, 1.22],
+                phase: i as f32 * 1.7,
+            });
         }
         dist += 7.5;
         i += 1;

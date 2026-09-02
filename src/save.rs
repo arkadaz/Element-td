@@ -17,20 +17,19 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::game::defs::MAX_TIER;
+use crate::game::defs::{ESSENCE_WAVES, MAX_TIER, tier_cap};
 use crate::game::{Game, Phase, TargetMode};
 
 /// Bumped whenever the shape below changes. An older save is discarded rather
 /// than half-read, because a half-restored board is worse than a fresh start.
-const VERSION: u16 = 1;
+const VERSION: u16 = 2;
 
-const KEY: &str = "elemental_td_save_v1";
+const KEY: &str = "elemental_td_save_v2";
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SavedTower {
     pub def: u16,
     pub tier: u8,
-    pub fork: Option<u8>,
     pub slot: u16,
     pub invested: u32,
     pub kills: u32,
@@ -47,6 +46,10 @@ pub struct Save {
     pub gold: i64,
     pub lives: i32,
     pub endless: bool,
+    /// Essences held, by element index. Without these a resumed run could not
+    /// rebuild the board it saved, let alone upgrade it.
+    pub essence: [u8; 6],
+    pub drafts_taken: u16,
     pub kills: u64,
     pub leaked: u32,
     pub gold_earned: u64,
@@ -83,6 +86,8 @@ impl Save {
             gold: g.gold,
             lives: g.lives,
             endless: g.endless,
+            essence: g.essence,
+            drafts_taken: g.drafts_taken.min(u16::MAX as usize) as u16,
             kills: g.stats.kills,
             leaked: g.stats.leaked,
             gold_earned: g.stats.gold_earned,
@@ -95,7 +100,6 @@ impl Save {
                 .map(|t| SavedTower {
                     def: t.def as u16,
                     tier: t.tier as u8,
-                    fork: t.fork.map(|f| f as u8),
                     slot: t.slot as u16,
                     invested: t.invested,
                     kills: t.kills,
@@ -114,13 +118,21 @@ impl Save {
             return false;
         }
         let towers = crate::game::defs::TOWERS.len();
+        // A saved tower must be one this build can construct *at the level it
+        // was saved at*, which now depends on the essences saved beside it. A
+        // save claiming a level-8 Bastion with one Light essence describes a
+        // board the game would never have allowed, so it is refused whole.
         let valid = self.towers.iter().all(|t| {
             (t.def as usize) < towers
                 && (1..=MAX_TIER).contains(&(t.tier as u32))
                 && (t.slot as usize) < g.board.slots.len()
-                && t.fork.is_none_or(|f| (f as usize) < 2)
+                && t.tier as u32
+                    <= tier_cap(&self.essence, &crate::game::defs::TOWERS[t.def as usize])
         });
-        if !valid || self.lives <= 0 {
+        let essence_sane = self.drafts_taken as usize <= ESSENCE_WAVES.len()
+            && self.essence.iter().map(|&n| n as usize).sum::<usize>()
+                == self.drafts_taken as usize;
+        if !valid || !essence_sane || self.lives <= 0 {
             return false;
         }
 
@@ -129,6 +141,11 @@ impl Save {
         g.gold = self.gold;
         g.lives = self.lives;
         g.endless = self.endless;
+        // Restored before the towers, because try_build reads the essence pool
+        // to decide whether each one is allowed to exist.
+        g.essence = self.essence;
+        g.drafts_taken = self.drafts_taken as usize;
+        g.pending_draft = None;
         g.stats.kills = self.kills;
         g.stats.leaked = self.leaked;
         g.stats.gold_earned = self.gold_earned;
@@ -152,7 +169,6 @@ impl Save {
                 continue;
             }
             let ti = g.towers.len() - 1;
-            g.towers[ti].fork = t.fork.map(|f| f as usize);
             g.towers[ti].invested = t.invested;
             g.towers[ti].kills = t.kills;
             g.towers[ti].damage = t.damage;
@@ -165,15 +181,18 @@ impl Save {
         g.rebuild_auras();
         g.phase = Phase::Build;
         g.build_timer = crate::game::BUILD_TIME;
+        // A run saved mid-draft comes back owing the same draft.
+        g.offer_draft_if_due();
         true
     }
 
     /// A one-line summary for the menu button.
     pub fn label(&self) -> String {
         format!(
-            "Wave {} · {} towers · {} lives",
+            "Wave {} · {} towers · {} essences · {} lives",
             self.wave,
             self.towers.len(),
+            self.drafts_taken,
             self.lives
         )
     }
@@ -187,7 +206,9 @@ pub fn store(g: &Game) {
         clear();
         return;
     }
-    let Ok(text) = serde_json::to_string(&Save::capture(g)) else { return };
+    let Ok(text) = serde_json::to_string(&Save::capture(g)) else {
+        return;
+    };
     write(&text);
 }
 
@@ -234,7 +255,11 @@ fn path() -> Option<std::path::PathBuf> {
     let base = std::env::var_os("APPDATA")
         .or_else(|| std::env::var_os("XDG_CONFIG_HOME"))
         .or_else(|| std::env::var_os("HOME"))?;
-    Some(std::path::PathBuf::from(base).join("elemental_td").join("save.json"))
+    Some(
+        std::path::PathBuf::from(base)
+            .join("elemental_td")
+            .join("save.json"),
+    )
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -259,12 +284,25 @@ mod tests {
     fn played_game() -> Game {
         let mut g = Game::new();
         g.gold = 500_000;
+        // A lopsided pool: deep in two elements, thin in two more, none at
+        // all in the last two - so the fixture exercises the essence ceiling
+        // rather than a board where everything happens to be legal.
+        g.essence = [4, 4, 2, 2, 0, 0];
+        g.drafts_taken = 12;
         for (n, slot) in (0..g.board.slots.len()).step_by(3).enumerate().take(12) {
-            g.build_choice = Some((n % TOWERS.len(), 1));
+            let def = n % TOWERS.len();
+            if !g.unlocked(def) {
+                continue;
+            }
+            g.build_choice = Some((def, 1));
             if g.try_build(slot) {
                 let ti = g.towers.len() - 1;
                 while g.towers[ti].tier < 5 {
-                    g.upgrade(ti, Some(n % 2));
+                    let before = g.towers[ti].tier;
+                    g.upgrade(ti);
+                    if g.towers[ti].tier == before {
+                        break;
+                    }
                 }
             }
         }
@@ -288,24 +326,48 @@ mod tests {
 
         let back: Save = serde_json::from_str(&text).expect("deserialises");
         let mut after = Game::new();
-        assert!(back.restore(&mut after), "a save this build wrote must restore");
+        assert!(
+            back.restore(&mut after),
+            "a save this build wrote must restore"
+        );
 
         assert_eq!(after.wave, before.wave);
         assert_eq!(after.gold, before.gold);
         assert_eq!(after.lives, before.lives);
-        assert_eq!(after.seed, before.seed, "the seed is what makes the waves match");
+        assert_eq!(
+            after.seed, before.seed,
+            "the seed is what makes the waves match"
+        );
         assert_eq!(after.stats.kills, before.stats.kills);
+        assert_eq!(
+            after.essence, before.essence,
+            "a resumed run lost its essences"
+        );
+        assert_eq!(after.drafts_taken, before.drafts_taken);
         assert_eq!(after.towers.len(), before.towers.len());
 
-        let mut a: Vec<_> = after.towers.iter().map(|t| (t.slot, t.def, t.tier, t.fork)).collect();
-        let mut b: Vec<_> = before.towers.iter().map(|t| (t.slot, t.def, t.tier, t.fork)).collect();
+        let mut a: Vec<_> = after
+            .towers
+            .iter()
+            .map(|t| (t.slot, t.def, t.tier))
+            .collect();
+        let mut b: Vec<_> = before
+            .towers
+            .iter()
+            .map(|t| (t.slot, t.def, t.tier))
+            .collect();
         a.sort_unstable();
         b.sort_unstable();
         assert_eq!(a, b, "the restored board is not the board that was saved");
 
         // The pads have to agree with the towers, or selling one corrupts the board.
         for (i, t) in after.towers.iter().enumerate() {
-            assert_eq!(after.board.slots[t.slot].tower, Some(i), "pad {} disagrees", t.slot);
+            assert_eq!(
+                after.board.slots[t.slot].tower,
+                Some(i),
+                "pad {} disagrees",
+                t.slot
+            );
         }
 
         // And the next wave must be the same one the saved run was facing.
@@ -325,14 +387,20 @@ mod tests {
             |s: &mut Save| s.towers[0].tier = 0,
             |s: &mut Save| s.towers[0].tier = 99,
             |s: &mut Save| s.towers[0].slot = 60_000,
-            |s: &mut Save| s.towers[0].fork = Some(7),
+            // Essences that could not have built this board.
+            |s: &mut Save| s.essence = [0; 6],
+            // A pool whose total does not match the number of drafts taken.
+            |s: &mut Save| s.drafts_taken = 99,
             |s: &mut Save| s.lives = 0,
         ] {
             save = good.clone();
             break_it(&mut save);
             let mut g = Game::new();
             let before = (g.wave, g.gold, g.towers.len());
-            assert!(!save.restore(&mut g), "a broken save was accepted: {save:?}");
+            assert!(
+                !save.restore(&mut g),
+                "a broken save was accepted: {save:?}"
+            );
             assert_eq!(
                 (g.wave, g.gold, g.towers.len()),
                 before,

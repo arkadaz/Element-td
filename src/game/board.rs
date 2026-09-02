@@ -85,14 +85,28 @@ impl Board {
     /// Build plots are a plain, regular grid: every tile that is clear of the road
     /// and close enough to it to be useful. One tile, one plot, no exceptions -
     /// so the buildable area reads as a field, not as scattered platforms.
+    /// The build plots, on a checkerboard inside the band beside the road.
+    ///
+    /// Every tile in the band used to be a plot, which gave a hundred and
+    /// ninety-eight of them - so many that *where* a tower went never mattered
+    /// and filling the board with cheap towers beat levelling good ones. A
+    /// campaign purse that can cover two hundred plots is a campaign with no
+    /// placement decision in it. Half as many, on alternating tiles, makes each
+    /// one worth thinking about and leaves levels as the real sink for gold.
     fn make_slots(&self) -> Vec<Slot> {
         let mut out = Vec::new();
         for ty in 0..BH as i32 {
             for tx in 0..BW as i32 {
+                if (tx + ty) % 2 != 0 {
+                    continue;
+                }
                 let p = [tx as f32 + 0.5, ty as f32 + 0.5];
                 let d = self.dist_to_road(p);
                 if (BUILD_NEAR..=BUILD_FAR).contains(&d) {
-                    out.push(Slot { pos: p, tower: None });
+                    out.push(Slot {
+                        pos: p,
+                        tower: None,
+                    });
                 }
             }
         }
@@ -138,7 +152,11 @@ impl Board {
         .clamp(1, self.path.len() - 1);
         let (a, b) = (self.path[i - 1], self.path[i]);
         let (ca, cb) = (self.cum[i - 1], self.cum[i]);
-        let t = if cb > ca { (dist - ca) / (cb - ca) } else { 0.0 };
+        let t = if cb > ca {
+            (dist - ca) / (cb - ca)
+        } else {
+            0.0
+        };
         [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]
     }
 
@@ -148,7 +166,11 @@ impl Board {
         let b = self.sample((dist + 0.25).min(self.total));
         let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
         let l = (dx * dx + dy * dy).sqrt();
-        if l < 1e-5 { [1.0, 0.0] } else { [dx / l, dy / l] }
+        if l < 1e-5 {
+            [1.0, 0.0]
+        } else {
+            [dx / l, dy / l]
+        }
     }
 
     /// Shortest distance from a point to the road centre line.
@@ -226,5 +248,9 @@ fn len(v: [f32; 2]) -> f32 {
 }
 fn norm(v: [f32; 2]) -> [f32; 2] {
     let l = len(v);
-    if l < 1e-6 { [0.0, 0.0] } else { [v[0] / l, v[1] / l] }
+    if l < 1e-6 {
+        [0.0, 0.0]
+    } else {
+        [v[0] / l, v[1] / l]
+    }
 }

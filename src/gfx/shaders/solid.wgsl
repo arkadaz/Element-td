@@ -97,6 +97,12 @@ fn shadow_at(light_pos: vec4<f32>, ndl: f32) -> f32 {
     if (light_pos.w <= 0.0) {
         return 1.0;
     }
+    // Zero taps means the shadow pass never ran and the map holds nothing.
+    // SHADOW_TAPS is a build-time constant, so this whole function folds to a
+    // constant 1.0 at the Performance preset.
+    if (SHADOW_TAPS == 0) {
+        return 1.0;
+    }
     let proj = light_pos.xyz / light_pos.w;
     let uv = vec2<f32>(proj.x * 0.5 + 0.5, 0.5 - proj.y * 0.5);
     if (uv.x < 0.001 || uv.x > 0.999 || uv.y < 0.001 || uv.y > 0.999 || proj.z > 1.0) {

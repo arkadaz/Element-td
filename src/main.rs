@@ -7,6 +7,8 @@
 //! Rendering runs on wgpu (WebGPU in the browser, WebGL2 as a fallback, native
 //! Vulkan/DX12 on the desktop). egui draws the HUD on top of the same surface.
 
+#[cfg(test)]
+mod bench_tests;
 mod decor;
 mod game;
 mod gfx;
@@ -16,7 +18,6 @@ mod net;
 mod rng;
 mod save;
 mod ui;
-#[cfg(test)]
 mod ui_layout_tests;
 mod view;
 
@@ -28,12 +29,12 @@ use game::Game;
 use game::board::{BH, BW};
 use game::defs::TOWERS;
 use game::fx::ParticleSpawn;
+use gfx::Quality;
 use gfx::Renderer;
 use gfx::draw::DrawList;
-use gfx::Quality;
+use math::{Camera, Mat4, shadow_view_proj};
 use menu::{MenuState, Screen};
 use net::Net;
-use math::{Camera, Mat4, shadow_view_proj};
 
 /// How far the camera tilts down towards the board, and how much of the
 /// viewport the board fills.
@@ -103,7 +104,9 @@ impl egui_wgpu::CallbackTrait for BoardCallback {
         pass: &mut wgpu::RenderPass<'static>,
         res: &egui_wgpu::CallbackResources,
     ) {
-        let Some(gs) = res.get::<GpuState>() else { return };
+        let Some(gs) = res.get::<GpuState>() else {
+            return;
+        };
         let vp = info.viewport_in_pixels();
         gs.renderer.composite(
             pass,
@@ -257,10 +260,10 @@ impl App {
         // uploaded once instead of being rebuilt every frame.
         let statics = view::build_static(&game, &decor);
         renderer.set_static_scene(&rs.queue, &statics.casters, &statics.flat);
-        rs.renderer
-            .write()
-            .callback_resources
-            .insert(GpuState { renderer, frame: FrameData::default() });
+        rs.renderer.write().callback_resources.insert(GpuState {
+            renderer,
+            frame: FrameData::default(),
+        });
 
         ui::install_style(&cc.egui_ctx);
 
@@ -268,7 +271,10 @@ impl App {
             game,
             decor,
             ust: ui::UiState::default(),
-            menu: MenuState { saved: save::load(), ..MenuState::default() },
+            menu: MenuState {
+                saved: save::load(),
+                ..MenuState::default()
+            },
             net: Net::default(),
             draw: DrawList::default(),
             spawns: Vec::with_capacity(4096),
@@ -290,11 +296,18 @@ impl App {
     fn apply_demo_env(&mut self) {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let Ok(v) = std::env::var("TD_DEMO") else { return };
+            let Ok(v) = std::env::var("TD_DEMO") else {
+                return;
+            };
             if v.is_empty() || v == "0" {
                 return;
             }
             let level: u32 = v.parse().unwrap_or(1).clamp(1, game::defs::MAX_TIER);
+            // A played-in board implies a drafted one. Without the essences
+            // nothing is buildable and the demo starts on an empty road.
+            self.game.essence = [(game::defs::MAX_TIER - game::defs::FREE_TIERS) as u8; 6];
+            self.game.pending_draft = None;
+            self.game.drafts_taken = game::defs::ESSENCE_WAVES.len();
             self.game.gold = 400_000;
             let mut n = 0usize;
             for slot in 0..self.game.board.slots.len() {
@@ -305,8 +318,13 @@ impl App {
                 if self.game.try_build(slot) {
                     let ti = self.game.towers.len() - 1;
                     while self.game.towers[ti].tier < level {
-                        let fork = Some(n % 2);
-                        self.game.upgrade(ti, fork);
+                        let before = self.game.towers[ti].tier;
+                        self.game.upgrade(ti);
+                        // The essence ceiling can stop this well below `level`,
+                        // and a while-loop that cannot advance is a hang.
+                        if self.game.towers[ti].tier == before {
+                            break;
+                        }
                     }
                     n += 1;
                 }
@@ -388,7 +406,7 @@ impl App {
         }
         if k.upgrade {
             if let Some(ti) = g.selected {
-                g.upgrade(ti, None);
+                g.upgrade(ti);
             }
         }
         if k.sell {
@@ -462,25 +480,50 @@ impl App {
     #[cfg(target_arch = "wasm32")]
     fn throttle(&mut self) {}
 
-    /// Steps the quality preset down on its own if the frame rate stays poor,
-    /// so a weak GPU gets a playable game without the player hunting for a menu.
+    /// Tunes the quality preset to the machine, in both directions.
+    ///
+    /// Sustained slow frames step it down; sustained fast ones step it back up,
+    /// but never above [`UiState::quality_ceiling`], which drops the first time
+    /// a preset is found wanting. Without that ceiling a machine sitting right
+    /// on the boundary would flip between two presets forever, rebuilding
+    /// pipelines each time - which is itself a stall.
     fn auto_quality(&mut self) {
         if !self.ust.auto_quality {
             return;
         }
         if self.fps < 50.0 {
             self.ust.slow_frames += 1;
+            self.ust.fast_frames = 0;
         } else {
             self.ust.slow_frames = self.ust.slow_frames.saturating_sub(2);
+            if self.fps > 58.0 {
+                self.ust.fast_frames += 1;
+            }
         }
         if self.ust.slow_frames > 150 {
             self.ust.slow_frames = 0;
+            self.ust.fast_frames = 0;
+            self.ust.quality_ceiling = self.ust.quality;
             if let Some(q) = self.ust.quality.lower() {
                 self.ust.quality = q;
                 self.ust.quality_dirty = true;
-                self.game.toast(format!("Graphics lowered to {}", q.label()));
+                self.game
+                    .toast(format!("Graphics lowered to {}", q.label()));
             } else {
                 self.ust.auto_quality = false;
+            }
+        }
+        // Climbing needs a much longer run of good frames than falling does:
+        // dropping a preset costs a little fidelity, raising one that cannot be
+        // sustained costs the player a visible stutter.
+        if self.ust.fast_frames > 600 {
+            self.ust.fast_frames = 0;
+            if let Some(q) = self.ust.quality.raise() {
+                if q <= self.ust.quality_ceiling {
+                    self.ust.quality = q;
+                    self.ust.quality_dirty = true;
+                    self.game.toast(format!("Graphics raised to {}", q.label()));
+                }
             }
         }
     }
@@ -551,7 +594,9 @@ impl App {
     fn publish_frame(&mut self, camera: Camera, px: [u32; 2], dt: f32) {
         let light = shadow_view_proj(BW, BH, LIGHT_DIR);
         let mut w = self.rs.renderer.write();
-        let Some(gs) = w.callback_resources.get_mut::<GpuState>() else { return };
+        let Some(gs) = w.callback_resources.get_mut::<GpuState>() else {
+            return;
+        };
         std::mem::swap(&mut gs.frame.list, &mut self.draw);
         std::mem::swap(&mut gs.frame.spawns, &mut self.spawns);
         gs.frame.camera = camera;
@@ -710,7 +755,10 @@ impl eframe::App for App {
         ui::scoreboard(&self.game, &ctx);
         menu::room_scoreboard(&ctx, &self.net, self.ust.compact);
         ui::modals(&mut self.game, &ctx, &mut self.ust);
-        Profile::feed(&mut self.prof.hud, now_ms() - t_hud - self.prof.build as f64);
+        Profile::feed(
+            &mut self.prof.hud,
+            now_ms() - t_hud - self.prof.build as f64,
+        );
         Profile::feed(&mut self.prof.total, now_ms() - t_frame);
 
         // Games animate constantly, but there is no point drawing frames the
@@ -782,15 +830,26 @@ fn high_performance_gpu() -> egui_wgpu::WgpuConfiguration {
                 .filter(|a| surface.is_none_or(|s| !s.get_capabilities(a).formats.is_empty()))
                 .collect();
             let pick = |kind: wgpu::DeviceType| {
-                usable.iter().find(|a| a.get_info().device_type == kind).copied()
+                usable
+                    .iter()
+                    .find(|a| a.get_info().device_type == kind)
+                    .copied()
             };
             let chosen = pick(wgpu::DeviceType::DiscreteGpu)
                 .or_else(|| pick(wgpu::DeviceType::IntegratedGpu))
                 .or_else(|| usable.first().copied())
                 .ok_or_else(|| "no usable GPU adapter".to_string())?;
             let info = chosen.get_info();
-            log::info!("GPU: {} ({:?}, {:?})", info.name, info.device_type, info.backend);
-            println!("GPU: {} ({:?}, {:?})", info.name, info.device_type, info.backend);
+            log::info!(
+                "GPU: {} ({:?}, {:?})",
+                info.name,
+                info.device_type,
+                info.backend
+            );
+            println!(
+                "GPU: {} ({:?}, {:?})",
+                info.name, info.device_type, info.backend
+            );
             Ok(chosen.clone())
         }));
     }

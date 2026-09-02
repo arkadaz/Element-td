@@ -1,19 +1,165 @@
 //! Static game data. See `docs/DESIGN.md` for why any of these numbers are
 //! what they are.
 //!
-//! Eight towers, each owning a role nothing else covers, each forking into two
-//! specialisations at tier 3. Nine monster types, each punishing one lazy habit.
+//! Six elements. Every element gives a **pure** tower, and every unordered pair
+//! of elements gives a **dual** tower - six plus fifteen, twenty-one in all.
+//! Which of them a player may build, and how far they may be upgraded, is
+//! decided entirely by the essences they have drafted. Gold buys towers; only
+//! essences decide *which* towers exist for you at all.
+
+use crate::rng::Rng;
+
+// ---------------------------------------------------------------- elements
+
+/// The six elements. Declaration order is the canonical order everywhere: in
+/// the draft offer, in the build panel, and in the essence counters.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, PartialOrd, Ord)]
+pub enum Element {
+    Nature,
+    Fire,
+    Water,
+    Earth,
+    Light,
+    Dark,
+}
+
+pub const ELEMENTS: [Element; 6] = [
+    Element::Nature,
+    Element::Fire,
+    Element::Water,
+    Element::Earth,
+    Element::Light,
+    Element::Dark,
+];
+
+impl Element {
+    pub fn idx(self) -> usize {
+        self as usize
+    }
+    pub fn name(self) -> &'static str {
+        match self {
+            Element::Nature => "Nature",
+            Element::Fire => "Fire",
+            Element::Water => "Water",
+            Element::Earth => "Earth",
+            Element::Light => "Light",
+            Element::Dark => "Dark",
+        }
+    }
+    /// One-word temperament, shown under the name in the draft.
+    pub fn flavour(self) -> &'static str {
+        match self {
+            Element::Nature => "Poison that gets worse",
+            Element::Fire => "Burst, burn and area",
+            Element::Water => "Slow, chain, control",
+            Element::Earth => "Weight and broken armour",
+            Element::Light => "Range, precision, buffs",
+            Element::Dark => "Debuffs, execution, gold",
+        }
+    }
+    pub fn color(self) -> [f32; 3] {
+        match self {
+            Element::Nature => [0.44, 0.86, 0.38],
+            Element::Fire => [1.00, 0.50, 0.16],
+            Element::Water => [0.34, 0.72, 1.00],
+            Element::Earth => [0.80, 0.58, 0.32],
+            Element::Light => [1.00, 0.88, 0.48],
+            Element::Dark => [0.70, 0.46, 0.98],
+        }
+    }
+    /// Single letter for the cramped corners of the HUD.
+    pub fn glyph(self) -> &'static str {
+        match self {
+            Element::Nature => "N",
+            Element::Fire => "F",
+            Element::Water => "W",
+            Element::Earth => "E",
+            Element::Light => "L",
+            Element::Dark => "D",
+        }
+    }
+}
+
+/// How many essences the campaign hands out, and on which waves.
+///
+/// Front-loaded, so the opening has real choices, and thinning out, so the late
+/// game is about using the board you committed to rather than still being
+/// handed new toys.
+pub const ESSENCE_WAVES: [u32; 20] = [
+    1, 2, 3, 5, 7, 9, 12, 15, 18, 21, 25, 29, 33, 37, 42, 47, 52, 58, 64, 71,
+];
+
+/// How many elements the player chooses between at each award.
+pub const DRAFT_SIZE: usize = 3;
+
+/// Essences of one element needed before a tower using it reaches full level.
+/// Two levels are free, so six essences reach [`MAX_TIER`].
+pub const TIER_PER_ESSENCE: u32 = 1;
+pub const FREE_TIERS: u32 = 2;
+
+/// The ceiling a tower can be upgraded to, given the essences held.
+///
+/// A pure tower reads its own element; a dual tower reads whichever of its two
+/// elements the player has fewer of, which is what makes a two-element
+/// commitment cost twice as much as a one-element one.
+pub fn tier_cap(essence: &[u8; 6], def: &TowerDef) -> u32 {
+    let held = |e: Element| essence[e.idx()] as u32;
+    let n = match def.elem {
+        (a, None) => held(a),
+        (a, Some(b)) => held(a).min(held(b)),
+    };
+    if n == 0 {
+        return 0;
+    }
+    (FREE_TIERS + n * TIER_PER_ESSENCE).min(MAX_TIER)
+}
+
+/// Builds the three-element offer for a draft.
+///
+/// Whenever both are possible the offer holds **at least one element already
+/// held** and **at least one not held**, so the choice is always between going
+/// deeper and going wider. An offer of three elements the player already has
+/// six of is not a decision, it is a notification with buttons.
+pub fn draft_offer(rng: &mut Rng, essence: &[u8; 6]) -> [Element; DRAFT_SIZE] {
+    let mut pool = ELEMENTS;
+    // Fisher-Yates from the run's own stream, so a seed reproduces every offer.
+    for i in (1..pool.len()).rev() {
+        let j = (rng.next_u64() % (i as u64 + 1)) as usize;
+        pool.swap(i, j);
+    }
+    let held = |e: Element| essence[e.idx()] > 0;
+    let mut offer = [pool[0], pool[1], pool[2]];
+
+    // Only enforce the mix when the board can actually satisfy it.
+    let any_held = ELEMENTS.iter().any(|&e| held(e));
+    let any_new = ELEMENTS.iter().any(|&e| !held(e));
+    if any_held && !offer.iter().any(|&e| held(e)) {
+        if let Some(&swap) = pool[DRAFT_SIZE..].iter().find(|&&e| held(e)) {
+            offer[DRAFT_SIZE - 1] = swap;
+        }
+    }
+    if any_new && !offer.iter().any(|&e| !held(e)) {
+        if let Some(&swap) = pool[DRAFT_SIZE..].iter().find(|&&e| !held(e)) {
+            offer[0] = swap;
+        }
+    }
+    offer
+}
 
 // ---------------------------------------------------------------- damage / armour
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Damage {
-    /// Arrows and cannonballs. Bounces off plate, shreds casters.
+    /// Weight and edges. Bounces off plate, punches through wards, and passes
+    /// straight through anything that is not properly there.
     Physical,
-    /// Frost and lightning. Melts plate, fizzles on wards.
+    /// Frost, light and the void. Melts plate, fizzles on wards, and is the one
+    /// thing an Ethereal cannot ignore.
     Magic,
-    /// Venom and fire. Never resisted, never bonus, ignores shields.
-    Poison,
+    /// Heat. Loves a crowd of unarmoured things and hates a ghost.
+    Fire,
+    /// Venom and rot. Never resisted, never bonus. The honest answer.
+    Toxic,
     /// Support towers that do not attack.
     None,
 }
@@ -23,7 +169,8 @@ impl Damage {
         match self {
             Damage::Physical => "Physical",
             Damage::Magic => "Magic",
-            Damage::Poison => "Poison",
+            Damage::Fire => "Fire",
+            Damage::Toxic => "Toxic",
             Damage::None => "Support",
         }
     }
@@ -31,7 +178,8 @@ impl Damage {
         match self {
             Damage::Physical => [0.85, 0.80, 0.62],
             Damage::Magic => [0.42, 0.68, 1.00],
-            Damage::Poison => [0.52, 0.90, 0.36],
+            Damage::Fire => [1.00, 0.56, 0.22],
+            Damage::Toxic => [0.52, 0.90, 0.36],
             Damage::None => [0.80, 0.72, 1.00],
         }
     }
@@ -40,8 +188,11 @@ impl Damage {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Armor {
     Unarmoured,
-    Heavy,
+    Plated,
     Warded,
+    /// Half-there. Physical weapons pass through and fire barely warms it, but
+    /// magic bites harder than on anything else in the game.
+    Ethereal,
     Boss,
 }
 
@@ -49,38 +200,55 @@ impl Armor {
     pub fn name(self) -> &'static str {
         match self {
             Armor::Unarmoured => "Unarmoured",
-            Armor::Heavy => "Heavy",
+            Armor::Plated => "Plated",
             Armor::Warded => "Warded",
+            Armor::Ethereal => "Ethereal",
             Armor::Boss => "Boss",
         }
     }
     pub fn color(self) -> [f32; 3] {
         match self {
             Armor::Unarmoured => [0.58, 0.72, 0.52],
-            Armor::Heavy => [0.62, 0.66, 0.76],
+            Armor::Plated => [0.62, 0.66, 0.76],
             Armor::Warded => [0.72, 0.52, 0.95],
+            Armor::Ethereal => [0.58, 0.92, 0.90],
             Armor::Boss => [0.95, 0.42, 0.30],
         }
     }
 }
 
-/// The counter triangle. This table is the spine of the whole game.
+/// The counter table. This is the spine of the whole game: it is the reason a
+/// board of the single highest-damage tower loses, and the reason breadth in the
+/// draft is worth giving up levels for.
 pub fn armor_mult(d: Damage, a: Armor) -> f32 {
+    use Armor::*;
+    use Damage::*;
     match (d, a) {
-        (Damage::Physical, Armor::Heavy) => 0.55,
-        (Damage::Physical, Armor::Warded) => 1.25,
-        (Damage::Magic, Armor::Heavy) => 1.25,
-        (Damage::Magic, Armor::Warded) => 0.55,
-        // Bosses tax everything, so they are beaten with volume and debuffs.
-        (Damage::Poison, Armor::Boss) => 1.0,
-        (_, Armor::Boss) => 0.85,
+        // Toxic is flat against everything, including bosses. It is the worst
+        // raw damage in the roster and the only damage that is never wrong.
+        (Toxic, _) => 1.0,
+        (Physical, Plated) => 0.55,
+        (Physical, Warded) => 1.25,
+        (Physical, Ethereal) => 0.70,
+        (Magic, Plated) => 1.25,
+        (Magic, Warded) => 0.55,
+        (Magic, Ethereal) => 1.30,
+        (Fire, Unarmoured) => 1.15,
+        (Fire, Plated) => 0.85,
+        // Fire is not the universal second answer. Without this a board of
+        // magic and fire has no hole at all - magic beats plate and ghosts,
+        // fire beats crowds, and wards were the one thing left for it to fear.
+        (Fire, Warded) => 0.85,
+        (Fire, Ethereal) => 0.60,
+        (Fire, Boss) => 0.90,
+        (_, Boss) => 0.85,
         _ => 1.0,
     }
 }
 
 /// Which layer a monster travels on. The single biggest source of build
-/// tension in the game: your two hardest-hitting towers cannot touch the air,
-/// so a board that only answers the road dies the first time something flies.
+/// tension in the game: five towers cannot touch the air, so a board that only
+/// answers the road dies the first time something flies.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Layer {
     Ground,
@@ -90,7 +258,7 @@ pub enum Layer {
 /// What a tower is able to shoot at.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Targets {
-    /// Mortars and fire pools. They own the ground and pay for it.
+    /// Mortars, swamps and fire pools. They own the ground and pay for it.
     GroundOnly,
     Both,
     /// Support and economy - never attacks anything.
@@ -126,13 +294,15 @@ pub enum Delivery {
     Lance { speed: f32 },
     /// Leaps from the target to nearby monsters. `hop` is how far each leap can
     /// reach, which matters more than the bounce count on a spread-out road.
-    Chain { bounces: u32, falloff: f32, hop: f32 },
+    Chain {
+        bounces: u32,
+        falloff: f32,
+        hop: f32,
+    },
     /// Untargeted shockwave rolling out from the tower.
     Nova,
-    /// Sets a patch of road alight and leaves it burning. The tower does not
-    /// track a monster at all - it holds ground. Nothing else in the roster
-    /// does this, which is the point: it is the only tower whose *position on
-    /// the road* is worth more than its stats.
+    /// Claims a patch of road and holds it. The tower does not track a monster
+    /// at all - which is what makes *where it stands* worth more than its stats.
     Zone { radius: f32, dur: f32 },
     /// Does not attack at all.
     Aura,
@@ -140,30 +310,80 @@ pub enum Delivery {
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Special {
-    Burn { dps: f32, dur: f32 },
-    Slow { amt: f32, dur: f32 },
-    Poison { dps: f32, dur: f32 },
-    Crit { chance: f32, mult: f32 },
-    Stun { chance: f32, dur: f32 },
+    Burn {
+        dps: f32,
+        dur: f32,
+    },
+    Slow {
+        amt: f32,
+        dur: f32,
+    },
+    Poison {
+        dps: f32,
+        dur: f32,
+    },
+    Crit {
+        chance: f32,
+        mult: f32,
+    },
+    Stun {
+        chance: f32,
+        dur: f32,
+    },
     /// Target takes `amt` extra damage from everything for `dur`.
-    Shred { amt: f32, dur: f32 },
+    Shred {
+        amt: f32,
+        dur: f32,
+    },
     /// Damage grows while the tower holds the same target.
-    Ramp { per_hit: f32, max: f32 },
-    Knockback { dist: f32 },
-    /// Buffs every tower in range. Beacon only.
-    Buff { dmg: f32, rate: f32, range: f32 },
+    Ramp {
+        per_hit: f32,
+        max: f32,
+    },
+    Knockback {
+        dist: f32,
+    },
+    /// Drags the target back down the road. Unlike knockback this is not a
+    /// shove away from the tower - it is distance *un-walked*, which is the
+    /// only effect in the game that buys back time rather than health.
+    Pull {
+        dist: f32,
+    },
+    /// Multiplies damage against a target already below `below` health.
+    Execute {
+        below: f32,
+        mult: f32,
+    },
+    /// Stops regeneration and Mender healing on anything it touches.
+    Suppress,
+    /// Buffs every tower in range. Grove only.
+    Buff {
+        dmg: f32,
+        rate: f32,
+        range: f32,
+    },
     /// Pays out at the end of every wave.
-    Income { per_wave: u32 },
+    Income {
+        per_wave: u32,
+    },
     /// Extra gold on kill.
-    Bounty { flat: u32, chance: f32, bonus: u32 },
+    Bounty {
+        flat: u32,
+        chance: f32,
+        bonus: u32,
+    },
     /// Adds to the interest rate.
-    Interest { extra: f32 },
+    Interest {
+        extra: f32,
+    },
     /// Damage-over-time jumps to nearby monsters when the victim dies.
-    Contagion { radius: f32 },
+    Contagion {
+        radius: f32,
+    },
 }
 
 impl Special {
-    /// One-line description with the numbers already scaled to a tier.
+    /// One-line description with the numbers already scaled to a level.
     pub fn describe(&self, k: f32) -> String {
         match *self {
             Special::Burn { dps, dur } => format!("Burns {:.0}/s for {:.0}s", dps * k, dur),
@@ -185,7 +405,12 @@ impl Special {
                 per_hit * 100.0,
                 max * 100.0
             ),
-            Special::Knockback { dist } => format!("Knocks back {:.1} tiles", dist),
+            Special::Knockback { dist } => format!("Knocks back {dist:.1} tiles"),
+            Special::Pull { dist } => format!("Drags {dist:.1} tiles back down the road"),
+            Special::Execute { below, mult } => {
+                format!("{:.1}x damage below {:.0}% health", mult, below * 100.0)
+            }
+            Special::Suppress => "Stops regeneration and healing".to_string(),
             Special::Buff { dmg, rate, range } => format!(
                 "Nearby towers: +{:.0}% damage, +{:.0}% rate, +{:.1} range",
                 dmg * 100.0,
@@ -193,8 +418,17 @@ impl Special {
                 range
             ),
             Special::Income { per_wave } => format!("+{per_wave} gold every wave"),
-            Special::Bounty { flat, chance, bonus } => {
-                format!("+{} gold per kill, {:.0}% for +{}", flat, chance * 100.0, bonus)
+            Special::Bounty {
+                flat,
+                chance,
+                bonus,
+            } => {
+                format!(
+                    "+{} gold per kill, {:.0}% for +{}",
+                    flat,
+                    chance * 100.0,
+                    bonus
+                )
             }
             Special::Interest { extra } => format!("+{:.0}% interest each wave", extra * 100.0),
             Special::Contagion { radius } => {
@@ -204,25 +438,13 @@ impl Special {
     }
 }
 
-/// A tier-3 specialisation. Applied on top of the tier-3 base stats.
-pub struct Fork {
-    pub name: &'static str,
-    pub desc: &'static str,
-    pub dmg_mul: f32,
-    pub rate_mul: f32,
-    pub range_add: f32,
-    pub splash_add: f32,
-    /// Replaces the base specials when non-empty, otherwise they carry over.
-    pub specials: &'static [Special],
-    pub keep_base: bool,
-    pub delivery: Option<Delivery>,
-}
-
 pub struct TowerDef {
     pub id: &'static str,
     pub name: &'static str,
     pub role: &'static str,
     pub desc: &'static str,
+    /// The element, or pair of elements, that unlocks this tower.
+    pub elem: (Element, Option<Element>),
     pub dtype: Damage,
     /// Which layers this tower can shoot at.
     pub targets: Targets,
@@ -237,29 +459,45 @@ pub struct TowerDef {
     pub delivery: Delivery,
     pub specials: &'static [Special],
     pub color: [f32; 3],
-    pub forks: [Fork; 2],
 }
 
-/// Six upgrade levels. Levels 1-3 grow the base tower, level 4 forks into one of
-/// two specialisations, levels 5-6 grow inside that fork.
-pub const MAX_TIER: u32 = 10;
-/// The level at which the player must choose a specialisation.
-pub const FORK_TIER: u32 = 4;
-/// Past this level a tower is "awakened": the fork's identity is dialled up
-/// hard, and the model shows it. It gives the back half of the upgrade ladder
-/// a moment instead of ten identical steps.
-pub const AWAKEN_TIER: u32 = 8;
+impl TowerDef {
+    pub fn is_dual(&self) -> bool {
+        self.elem.1.is_some()
+    }
+    /// Both elements, in canonical order.
+    pub fn elements(&self) -> impl Iterator<Item = Element> {
+        [Some(self.elem.0), self.elem.1].into_iter().flatten()
+    }
+    /// "Nature" or "Nature + Fire".
+    pub fn element_label(&self) -> String {
+        match self.elem {
+            (a, None) => a.name().to_string(),
+            (a, Some(b)) => format!("{} + {}", a.name(), b.name()),
+        }
+    }
+}
+
+/// Eight levels. There are no forks - the branching decision lives in the essence
+/// draft now, and forty-two fork variants layered on twenty-one towers would be
+/// noise rather than choice. Two visible milestones mark the ladder instead.
+pub const MAX_TIER: u32 = 8;
+/// The level at which a tower's special effect sharpens hard.
+pub const ATTUNE_TIER: u32 = 4;
+/// The level at which damage takes a step up and the model changes shape.
+pub const ASCEND_TIER: u32 = 7;
 
 // Damage grows faster than cost every level, so upgrading always beats building
-// wide - that is what makes a single plot worth pouring gold into. The gap per
+// wide - that is what makes a single pad worth pouring gold into. The gap per
 // level is deliberately small (1.76 vs 1.62, about 9% better per gold) so the
-// choice stays close across all ten levels rather than being decided at level 2.
-// Ten levels over eighty waves is roughly one upgrade every eight waves per
-// tower, which is the pace an hour-long run wants. See docs/DESIGN.md.
+// choice stays close across all eight levels rather than being decided at level
+// two.
 const DMG_STEP: f32 = 1.76;
 const COST_STEP: f32 = 1.62;
-/// Extra damage multiplier applied once a tower is awakened.
-const AWAKEN_BONUS: f32 = 1.35;
+/// Extra damage multiplier applied once a tower has ascended.
+const ASCEND_BONUS: f32 = 1.32;
+/// How much harder a special hits once the tower is attuned.
+const ATTUNE_BONUS: f32 = 1.45;
 
 impl TowerDef {
     pub fn scale(tier: u32) -> f32 {
@@ -280,79 +518,79 @@ impl TowerDef {
         };
         ((raw / step).round() * step).max(step) as u32
     }
-    /// Stats for a level, with the fork applied once the tower has reached
-    /// [`FORK_TIER`].
-    pub fn stats(&self, tier: u32, fork: Option<usize>) -> Stats {
+    /// Stats for a level.
+    pub fn stats(&self, tier: u32) -> Stats {
         let k = Self::scale(tier);
         let step = (tier - 1) as f32;
         let mut s = Stats {
             dmg: self.dmg * k,
             rate: self.rate,
             range: self.range + 0.16 * step,
-            splash: if self.splash > 0.0 { self.splash + 0.09 * step } else { 0.0 },
+            splash: if self.splash > 0.0 {
+                self.splash + 0.09 * step
+            } else {
+                0.0
+            },
             delivery: self.delivery,
             scale: k,
         };
-        if tier >= AWAKEN_TIER {
-            s.dmg *= AWAKEN_BONUS;
-        }
-        if tier >= FORK_TIER {
-            if let Some(f) = fork.and_then(|i| self.forks.get(i)) {
-                s.dmg *= f.dmg_mul;
-                s.rate *= f.rate_mul;
-                s.range += f.range_add;
-                if s.splash > 0.0 || f.splash_add > 0.0 {
-                    s.splash = (s.splash + f.splash_add).max(0.0);
-                }
-                if let Some(d) = f.delivery {
-                    s.delivery = d;
-                }
-            }
+        if tier >= ASCEND_TIER {
+            s.dmg *= ASCEND_BONUS;
         }
         // A chain tower's reach per leap grows with its level, so upgrading it
         // widens the web instead of only hardening each hit.
-        if let Delivery::Chain { bounces, falloff, hop } = s.delivery {
+        if let Delivery::Chain {
+            bounces,
+            falloff,
+            hop,
+        } = s.delivery
+        {
             s.delivery = Delivery::Chain {
                 bounces: bounces + (tier / 3),
                 falloff,
                 hop: hop + 0.30 * step,
             };
         }
+        if let Delivery::Zone { radius, dur } = s.delivery {
+            s.delivery = Delivery::Zone {
+                radius: radius + 0.06 * step,
+                dur,
+            };
+        }
         s
     }
 
-    /// How much stronger a support or economy effect is at this level. These do
-    /// not scale with damage, so they get their own curve - otherwise a Beacon or
-    /// a Mint stops being worth a plot by the midgame.
+    /// How much stronger a support, control or economy effect is at this level.
+    /// These do not ride the damage curve, so they get their own - otherwise a
+    /// Grove or a Tombstone stops being worth a pad by the midgame.
     pub fn utility_scale(tier: u32) -> f32 {
-        1.0 + 0.55 * (tier - 1) as f32
-    }
-    /// Every special active at this level and fork. Returned by value so the
-    /// combat loop never allocates.
-    pub fn specials_for(&self, fork: Option<usize>) -> SpecialSet {
-        let mut set = SpecialSet::default();
-        match fork.and_then(|i| self.forks.get(i)) {
-            Some(f) => {
-                if f.keep_base {
-                    set.extend(self.specials);
-                }
-                set.extend(f.specials);
-            }
-            None => set.extend(self.specials),
+        let base = 1.0 + 0.55 * (tier - 1) as f32;
+        if tier >= ATTUNE_TIER {
+            base * ATTUNE_BONUS
+        } else {
+            base
         }
+    }
+    /// Every special active at this level. Returned by value so the combat loop
+    /// never allocates.
+    pub fn specials_for(&self) -> SpecialSet {
+        let mut set = SpecialSet::default();
+        set.extend(self.specials);
         set
     }
-    pub fn dps_at(&self, tier: u32, fork: Option<usize>) -> f32 {
-        let s = self.stats(tier, fork);
+    pub fn dps_at(&self, tier: u32) -> f32 {
+        let s = self.stats(tier);
         s.dmg * s.rate
     }
 
     /// Roughly how much damage a shot lands across all targets, so chain and
     /// splash towers are not judged on their single-target number alone.
-    pub fn effective_dps_at(&self, tier: u32, fork: Option<usize>) -> f32 {
-        let s = self.stats(tier, fork);
+    pub fn effective_dps_at(&self, tier: u32) -> f32 {
+        let s = self.stats(tier);
         let spread = match s.delivery {
-            Delivery::Chain { bounces, falloff, .. } => {
+            Delivery::Chain {
+                bounces, falloff, ..
+            } => {
                 let mut total = 1.0;
                 let mut f = 1.0;
                 for _ in 0..bounces {
@@ -378,7 +616,10 @@ pub struct SpecialSet {
 
 impl Default for SpecialSet {
     fn default() -> Self {
-        Self { arr: [Special::Knockback { dist: 0.0 }; 6], n: 0 }
+        Self {
+            arr: [Special::Knockback { dist: 0.0 }; 6],
+            n: 0,
+        }
     }
 }
 
@@ -425,256 +666,501 @@ pub fn tower_color(d: &TowerDef) -> [f32; 3] {
     d.color
 }
 
+// ---------------------------------------------------------------- the roster
+
+use Element::{Dark, Earth, Fire, Light, Nature, Water};
+
+/// Twenty-one towers: six pure, then fifteen duals in canonical pair order.
+///
+/// The ordering matters - [`pure_index`] and [`dual_index`] compute positions
+/// from it rather than searching, and the build panel reads it straight through.
 pub static TOWERS: &[TowerDef] = &[
+    // ---------------------------------------------------------- pure
     TowerDef {
-        id: "ballista", name: "Ballista", role: "Single target",
-        desc: "Cheap, reliable, always worth having. Bolts punch through wards, and they go up.",
-        dtype: Damage::Physical,
+        id: "bramble",
+        name: "Bramble",
+        role: "Stacking poison",
+        desc: "Cheap, and never wrong. Toxic damage is the one thing no armour in the game reduces.",
+        elem: (Nature, None),
+        dtype: Damage::Toxic,
         targets: Targets::Both,
-        dmg: 20.0, rate: 1.10, range: 3.6, splash: 0.0, cost: 55,
-        delivery: Delivery::Shot { speed: 22.0 },
-        specials: &[],
-        color: [0.86, 0.74, 0.46],
-        forks: [
-            Fork {
-                name: "Marksman",
-                desc: "One enormous bolt at extreme range, and it crits.",
-                dmg_mul: 2.2, rate_mul: 0.55, range_add: 1.6, splash_add: 0.0,
-                specials: &[Special::Crit { chance: 0.35, mult: 2.5 }],
-                keep_base: true, delivery: None,
-            },
-            Fork {
-                name: "Repeater",
-                desc: "Triple rate of fire. Shreds anything without a shield.",
-                dmg_mul: 0.45, rate_mul: 3.0, range_add: 0.2, splash_add: 0.0,
-                specials: &[], keep_base: true, delivery: None,
-            },
-        ],
+        dmg: 11.0,
+        rate: 1.20,
+        range: 3.4,
+        splash: 0.0,
+        cost: 60,
+        delivery: Delivery::Shot { speed: 20.0 },
+        specials: &[Special::Poison {
+            dps: 12.0,
+            dur: 4.0,
+        }],
+        color: [0.42, 0.80, 0.36],
     },
     TowerDef {
-        id: "cannon", name: "Cannon", role: "Splash",
-        desc: "The hardest hitter on the road, and it cannot elevate. Pair it with something that can.",
-        dtype: Damage::Physical,
-        targets: Targets::GroundOnly,
-        dmg: 46.0, rate: 0.50, range: 3.1, splash: 1.10, cost: 70,
-        delivery: Delivery::Shot { speed: 11.0 },
-        specials: &[],
-        color: [0.78, 0.56, 0.36],
-        forks: [
-            Fork {
-                name: "Mortar",
-                desc: "Lobs across the map with a much wider blast.",
-                dmg_mul: 1.5, rate_mul: 0.70, range_add: 1.8, splash_add: 0.9,
-                specials: &[], keep_base: true, delivery: None,
-            },
-            Fork {
-                name: "Grapeshot",
-                desc: "Short-range shrapnel, fired fast. Devastating up close.",
-                dmg_mul: 0.55, rate_mul: 2.2, range_add: -0.5, splash_add: 0.5,
-                specials: &[Special::Knockback { dist: 0.35 }],
-                keep_base: true, delivery: None,
-            },
-        ],
+        id: "ember",
+        name: "Ember",
+        role: "Small splash",
+        desc: "Fast, hot and slightly wide. Loves a crowd of unarmoured things.",
+        elem: (Fire, None),
+        dtype: Damage::Fire,
+        targets: Targets::Both,
+        dmg: 16.0,
+        rate: 1.45,
+        range: 3.2,
+        splash: 0.70,
+        cost: 65,
+        delivery: Delivery::Shot { speed: 19.0 },
+        specials: &[Special::Burn { dps: 6.0, dur: 2.0 }],
+        color: [1.00, 0.54, 0.20],
     },
     TowerDef {
-        id: "frost", name: "Frost", role: "Control",
+        id: "tide",
+        name: "Tide",
+        role: "Slow",
         desc: "Barely hurts. Buys every other tower on the board more shots, on either layer.",
+        elem: (Water, None),
         dtype: Damage::Magic,
         targets: Targets::Both,
-        dmg: 15.0, rate: 1.05, range: 3.4, splash: 0.0, cost: 60,
+        dmg: 14.0,
+        rate: 1.10,
+        range: 3.5,
+        splash: 0.0,
+        cost: 60,
         delivery: Delivery::Shot { speed: 18.0 },
-        specials: &[Special::Slow { amt: 0.45, dur: 2.0 }],
-        color: [0.46, 0.80, 1.00],
-        forks: [
-            Fork {
-                name: "Glacier",
-                desc: "Freezes outright, and hits far harder while it does.",
-                dmg_mul: 1.3, rate_mul: 1.0, range_add: 0.3, splash_add: 0.0,
-                specials: &[Special::Stun { chance: 0.22, dur: 1.1 }],
-                keep_base: true, delivery: None,
-            },
-            Fork {
-                name: "Rime",
-                desc: "The chill makes them brittle - everything else hits harder.",
-                dmg_mul: 1.0, rate_mul: 1.2, range_add: 0.3, splash_add: 0.0,
-                specials: &[
-                    Special::Slow { amt: 0.55, dur: 2.5 },
-                    Special::Shred { amt: 0.30, dur: 3.0 },
-                ],
-                keep_base: false, delivery: None,
-            },
-        ],
+        specials: &[Special::Slow {
+            amt: 0.40,
+            dur: 2.0,
+        }],
+        color: [0.36, 0.74, 1.00],
     },
     TowerDef {
-        id: "pyre", name: "Pyre", role: "Area denial",
-        desc: "Sets the road itself on fire. Everything standing in it takes more damage from everything else you own.",
-        dtype: Damage::Poison,
+        id: "boulder",
+        name: "Boulder",
+        role: "Heavy ground hit",
+        desc: "The hardest single hit you can buy early, and it cannot elevate. Pair it with something that can.",
+        elem: (Earth, None),
+        dtype: Damage::Physical,
         targets: Targets::GroundOnly,
-        dmg: 26.0, rate: 0.42, range: 3.2, splash: 0.0, cost: 75,
-        delivery: Delivery::Zone { radius: 1.15, dur: 4.5 },
-        // The damage is the smaller half of this tower. The shred is why you
-        // build it: a Pyre on a corner makes every other tower on the board
-        // hit harder for as long as the fire burns.
-        specials: &[Special::Shred { amt: 0.28, dur: 1.0 }],
-        color: [1.00, 0.52, 0.20],
-        forks: [
-            Fork {
-                name: "Wildfire",
-                desc: "A far wider blaze that burns much longer. Shuts down a whole bend.",
-                dmg_mul: 0.80, rate_mul: 1.0, range_add: 0.8, splash_add: 0.0,
-                specials: &[Special::Shred { amt: 0.24, dur: 1.0 }],
-                keep_base: false,
-                delivery: Some(Delivery::Zone { radius: 1.95, dur: 7.0 }),
-            },
-            Fork {
-                name: "Crucible",
-                desc: "A tighter, hotter blaze that strips defences almost completely.",
-                dmg_mul: 1.55, rate_mul: 1.15, range_add: 0.2, splash_add: 0.0,
-                specials: &[Special::Shred { amt: 0.55, dur: 1.0 }],
-                keep_base: false,
-                delivery: Some(Delivery::Zone { radius: 0.90, dur: 4.0 }),
-            },
-        ],
+        dmg: 48.0,
+        rate: 0.50,
+        range: 3.0,
+        splash: 0.90,
+        cost: 70,
+        delivery: Delivery::Shot { speed: 12.0 },
+        specials: &[Special::Knockback { dist: 0.30 }],
+        color: [0.78, 0.58, 0.34],
     },
     TowerDef {
-        id: "tesla", name: "Tesla", role: "Chain",
-        desc: "Arcs from target to target, ground or air. Its reach per leap grows every level.",
+        id: "prism",
+        name: "Prism",
+        role: "Long range",
+        desc: "Sees further than anything else this cheap, and lands the occasional enormous hit.",
+        elem: (Light, None),
         dtype: Damage::Magic,
         targets: Targets::Both,
-        dmg: 19.0, rate: 0.90, range: 3.6, splash: 0.0, cost: 80,
-        delivery: Delivery::Chain { bounces: 3, falloff: 0.80, hop: 3.2 },
-        specials: &[],
-        color: [0.62, 0.86, 1.00],
-        forks: [
-            Fork {
-                name: "Storm",
-                desc: "Far more leaps, each reaching much further. Clears a road on its own.",
-                dmg_mul: 1.15, rate_mul: 1.0, range_add: 0.8, splash_add: 0.0,
-                specials: &[], keep_base: true,
-                delivery: Some(Delivery::Chain { bounces: 7, falloff: 0.88, hop: 4.6 }),
-            },
-            Fork {
-                name: "Overload",
-                desc: "Fewer leaps, but every one can stop a monster dead.",
-                dmg_mul: 1.55, rate_mul: 1.0, range_add: 0.4, splash_add: 0.0,
-                specials: &[Special::Stun { chance: 0.25, dur: 0.7 }],
-                keep_base: true,
-                delivery: Some(Delivery::Chain { bounces: 4, falloff: 0.90, hop: 3.8 }),
-            },
-        ],
+        dmg: 26.0,
+        rate: 0.85,
+        range: 4.4,
+        splash: 0.0,
+        cost: 70,
+        delivery: Delivery::Shot { speed: 26.0 },
+        specials: &[Special::Crit {
+            chance: 0.25,
+            mult: 2.0,
+        }],
+        color: [1.00, 0.90, 0.54],
     },
     TowerDef {
-        id: "venom", name: "Venom", role: "Single target ramp",
-        desc: "Stacks on one target and grows the longer it holds it. Never resisted - the answer to a boss of any armour.",
-        dtype: Damage::Poison,
+        id: "shade",
+        name: "Shade",
+        role: "Bounty",
+        desc: "The weakest damage in the roster. It pays for itself, and then it pays for the next tower.",
+        elem: (Dark, None),
+        dtype: Damage::Toxic,
         targets: Targets::Both,
-        dmg: 9.0, rate: 1.10, range: 3.2, splash: 0.0, cost: 80,
-        delivery: Delivery::Shot { speed: 17.0 },
-        // Poison plus ramp: weak on a swarm it never stays on, brutal on one
-        // enormous health bar it can sit on for twenty seconds.
+        dmg: 17.0,
+        rate: 1.00,
+        range: 3.3,
+        splash: 0.0,
+        cost: 65,
+        delivery: Delivery::Shot { speed: 20.0 },
+        specials: &[Special::Bounty {
+            flat: 2,
+            chance: 0.15,
+            bonus: 12,
+        }],
+        color: [0.66, 0.44, 0.96],
+    },
+    // ---------------------------------------------------------- dual
+    TowerDef {
+        id: "wildfire",
+        name: "Wildfire",
+        role: "Burning arcs",
+        desc: "Fire jumps from target to target and keeps burning after it lands. Answers a packed road.",
+        elem: (Nature, Some(Fire)),
+        dtype: Damage::Fire,
+        targets: Targets::Both,
+        dmg: 22.0,
+        rate: 0.95,
+        range: 3.6,
+        splash: 0.0,
+        cost: 165,
+        delivery: Delivery::Chain {
+            bounces: 3,
+            falloff: 0.84,
+            hop: 3.2,
+        },
+        specials: &[Special::Burn {
+            dps: 22.0,
+            dur: 3.5,
+        }],
+        color: [0.86, 0.66, 0.20],
+    },
+    TowerDef {
+        id: "mire",
+        name: "Mire",
+        role: "Swamp",
+        desc: "Floods a stretch of road. Everything in it crawls, rots, and stops healing.",
+        elem: (Nature, Some(Water)),
+        dtype: Damage::Toxic,
+        targets: Targets::GroundOnly,
+        dmg: 30.0,
+        rate: 0.45,
+        range: 3.4,
+        splash: 0.0,
+        cost: 180,
+        delivery: Delivery::Zone {
+            radius: 1.40,
+            dur: 5.5,
+        },
         specials: &[
-            Special::Poison { dps: 16.0, dur: 5.0 },
-            Special::Ramp { per_hit: 0.055, max: 2.4 },
-        ],
-        color: [0.56, 0.92, 0.38],
-        forks: [
-            Fork {
-                name: "Blight",
-                desc: "Ramps far higher and far faster. Melts anything that lives long enough.",
-                dmg_mul: 1.15, rate_mul: 1.15, range_add: 0.3, splash_add: 0.0,
-                specials: &[
-                    Special::Poison { dps: 26.0, dur: 6.0 },
-                    Special::Ramp { per_hit: 0.075, max: 4.0 },
-                ],
-                keep_base: false, delivery: None,
+            Special::Slow {
+                amt: 0.50,
+                dur: 1.2,
             },
-            Fork {
-                name: "Plague",
-                desc: "Whatever it kills infects the pack around it. Gives up the ramp for reach.",
-                dmg_mul: 1.05, rate_mul: 1.25, range_add: 0.5, splash_add: 0.0,
-                specials: &[
-                    Special::Poison { dps: 24.0, dur: 6.0 },
-                    Special::Contagion { radius: 2.2 },
-                ],
-                keep_base: false, delivery: None,
-            },
+            Special::Suppress,
         ],
+        color: [0.38, 0.66, 0.56],
     },
     TowerDef {
-        id: "beacon", name: "Beacon", role: "Support",
-        desc: "Fires nothing. Makes every tower around it substantially better.",
-        dtype: Damage::None,
-        targets: Targets::Nothing,
-        dmg: 0.0, rate: 0.0, range: 3.0, splash: 0.0, cost: 90,
-        delivery: Delivery::Aura,
-        specials: &[Special::Buff { dmg: 0.30, rate: 0.22, range: 0.6 }],
-        color: [0.86, 0.76, 1.00],
-        forks: [
-            Fork {
-                name: "Warhorn",
-                desc: "Pure aggression: a large damage boost to everything nearby.",
-                dmg_mul: 1.0, rate_mul: 1.0, range_add: 0.4, splash_add: 0.0,
-                specials: &[Special::Buff { dmg: 0.70, rate: 0.22, range: 0.5 }],
-                keep_base: false, delivery: None,
+        id: "thornwall",
+        name: "Thornwall",
+        role: "Roots",
+        desc: "Throws a wall of thorns across the road. Wide, heavy, and it stops things dead.",
+        elem: (Nature, Some(Earth)),
+        dtype: Damage::Physical,
+        targets: Targets::GroundOnly,
+        dmg: 44.0,
+        rate: 0.72,
+        range: 3.2,
+        splash: 1.00,
+        cost: 175,
+        delivery: Delivery::Shot { speed: 14.0 },
+        specials: &[
+            Special::Slow {
+                amt: 0.45,
+                dur: 2.2,
             },
-            Fork {
-                name: "Lodestone",
-                desc: "Stretches the reach of the whole cluster, and sharpens it.",
-                dmg_mul: 1.0, rate_mul: 1.0, range_add: 0.6, splash_add: 0.0,
-                specials: &[
-                    Special::Buff { dmg: 0.25, rate: 0.45, range: 1.5 },
-                    Special::Crit { chance: 0.20, mult: 2.0 },
-                ],
-                keep_base: false, delivery: None,
-            },
+            Special::Knockback { dist: 0.25 },
         ],
+        color: [0.54, 0.64, 0.32],
     },
     TowerDef {
-        id: "mint", name: "Mint", role: "Economy",
-        // It fires nothing at all. A Mint that also shot things would just be a
-        // worse Ballista with a bonus, and the decision to build one would be
-        // free - the whole point is that it costs you a plot during the waves
-        // you are most fragile.
-        desc: "Fires nothing. Pays every wave, forever. Build it early or not at all.",
+        id: "grove",
+        name: "Grove",
+        role: "Support aura",
+        desc: "Fires nothing. Makes every tower around it substantially better, and costs you a pad to do it.",
+        elem: (Nature, Some(Light)),
         dtype: Damage::None,
         targets: Targets::Nothing,
-        dmg: 0.0, rate: 0.0, range: 2.9, splash: 0.0, cost: 85,
+        dmg: 0.0,
+        rate: 0.0,
+        range: 3.0,
+        splash: 0.0,
+        cost: 190,
         delivery: Delivery::Aura,
-        specials: &[Special::Income { per_wave: 26 }],
-        color: [1.00, 0.82, 0.34],
-        forks: [
-            Fork {
-                name: "Treasury",
-                desc: "Pays far more each wave, and nudges up the interest on what you are holding.",
-                dmg_mul: 1.0, rate_mul: 1.0, range_add: 0.0, splash_add: 0.0,
-                specials: &[
-                    Special::Income { per_wave: 60 },
-                    Special::Interest { extra: 0.02 },
-                ],
-                keep_base: false, delivery: None,
+        specials: &[Special::Buff {
+            dmg: 0.30,
+            rate: 0.22,
+            range: 0.6,
+        }],
+        color: [0.72, 0.90, 0.46],
+    },
+    TowerDef {
+        id: "blight",
+        name: "Blight",
+        role: "Ramp and spread",
+        desc: "Grows the longer it holds one target, and whatever it kills infects the pack around it.",
+        elem: (Nature, Some(Dark)),
+        dtype: Damage::Toxic,
+        targets: Targets::Both,
+        dmg: 13.0,
+        rate: 1.15,
+        range: 3.4,
+        splash: 0.0,
+        cost: 185,
+        delivery: Delivery::Shot { speed: 18.0 },
+        specials: &[
+            Special::Poison {
+                dps: 24.0,
+                dur: 5.0,
             },
-            Fork {
-                name: "Toll",
-                desc: "Takes a cut of every monster that dies anywhere near it.",
-                dmg_mul: 1.0, rate_mul: 1.0, range_add: 1.2, splash_add: 0.0,
-                specials: &[
-                    Special::Income { per_wave: 32 },
-                    Special::Bounty { flat: 6, chance: 0.25, bonus: 25 },
-                ],
-                keep_base: false, delivery: None,
+            Special::Ramp {
+                per_hit: 0.065,
+                max: 2.8,
+            },
+            Special::Contagion { radius: 2.2 },
+        ],
+        color: [0.50, 0.72, 0.34],
+    },
+    TowerDef {
+        id: "steam",
+        name: "Steam",
+        role: "Nova",
+        desc: "Aims at nothing. Scalding pressure rolls out in every direction and catches both layers at once.",
+        elem: (Fire, Some(Water)),
+        dtype: Damage::Fire,
+        targets: Targets::Both,
+        dmg: 30.0,
+        rate: 0.80,
+        range: 3.1,
+        splash: 0.0,
+        cost: 175,
+        delivery: Delivery::Nova,
+        specials: &[Special::Slow {
+            amt: 0.25,
+            dur: 1.4,
+        }],
+        color: [0.78, 0.86, 0.92],
+    },
+    TowerDef {
+        id: "magma",
+        name: "Magma",
+        role: "Burning ground",
+        desc: "Sets the road itself alight. The damage is the smaller half - the shred is why you build it.",
+        elem: (Fire, Some(Earth)),
+        dtype: Damage::Fire,
+        targets: Targets::GroundOnly,
+        dmg: 34.0,
+        rate: 0.48,
+        range: 3.2,
+        splash: 0.0,
+        cost: 185,
+        delivery: Delivery::Zone {
+            radius: 1.20,
+            dur: 4.5,
+        },
+        specials: &[Special::Shred {
+            amt: 0.30,
+            dur: 1.0,
+        }],
+        color: [0.94, 0.42, 0.18],
+    },
+    TowerDef {
+        id: "solar",
+        name: "Solar",
+        role: "Piercing lance",
+        desc: "A beam of daylight down the whole lane. Everything standing in the line takes it.",
+        elem: (Fire, Some(Light)),
+        dtype: Damage::Fire,
+        targets: Targets::Both,
+        dmg: 52.0,
+        rate: 0.62,
+        range: 4.6,
+        splash: 0.0,
+        cost: 205,
+        delivery: Delivery::Lance { speed: 34.0 },
+        specials: &[Special::Burn {
+            dps: 26.0,
+            dur: 3.0,
+        }],
+        color: [1.00, 0.80, 0.30],
+    },
+    TowerDef {
+        id: "hellfire",
+        name: "Hellfire",
+        role: "Execute",
+        desc: "Mediocre against a full health bar. Annihilates anything already hurt - the finisher for a board that chips.",
+        elem: (Fire, Some(Dark)),
+        dtype: Damage::Fire,
+        targets: Targets::Both,
+        dmg: 34.0,
+        rate: 0.78,
+        range: 3.5,
+        splash: 0.55,
+        cost: 195,
+        delivery: Delivery::Shot { speed: 21.0 },
+        specials: &[Special::Execute {
+            below: 0.35,
+            mult: 2.6,
+        }],
+        color: [0.90, 0.28, 0.32],
+    },
+    TowerDef {
+        id: "silt",
+        name: "Silt",
+        role: "Wide splash",
+        desc: "The widest blast on the board, and it leaves everything it hits slower and softer.",
+        elem: (Water, Some(Earth)),
+        dtype: Damage::Physical,
+        targets: Targets::GroundOnly,
+        dmg: 54.0,
+        rate: 0.58,
+        range: 3.6,
+        splash: 1.55,
+        cost: 190,
+        delivery: Delivery::Shot { speed: 13.0 },
+        specials: &[
+            Special::Slow {
+                amt: 0.30,
+                dur: 1.8,
+            },
+            Special::Shred {
+                amt: 0.20,
+                dur: 2.5,
             },
         ],
+        color: [0.60, 0.68, 0.62],
+    },
+    TowerDef {
+        id: "mirror",
+        name: "Mirror",
+        role: "Long chain",
+        desc: "Refracts from target to target and barely loses anything on the way. Clears a road on its own.",
+        elem: (Water, Some(Light)),
+        dtype: Damage::Magic,
+        targets: Targets::Both,
+        dmg: 24.0,
+        rate: 0.95,
+        range: 3.8,
+        splash: 0.0,
+        cost: 200,
+        delivery: Delivery::Chain {
+            bounces: 4,
+            falloff: 0.82,
+            hop: 4.2,
+        },
+        specials: &[],
+        color: [0.66, 0.90, 1.00],
+    },
+    TowerDef {
+        id: "abyss",
+        name: "Abyss",
+        role: "Pull",
+        desc: "Drags them back down the road they just walked. The only tower that buys time instead of health.",
+        elem: (Water, Some(Dark)),
+        dtype: Damage::Magic,
+        targets: Targets::Both,
+        dmg: 27.0,
+        rate: 0.80,
+        range: 3.5,
+        splash: 0.45,
+        cost: 195,
+        delivery: Delivery::Shot { speed: 16.0 },
+        specials: &[
+            Special::Pull { dist: 0.85 },
+            Special::Slow {
+                amt: 0.20,
+                dur: 1.5,
+            },
+        ],
+        color: [0.44, 0.42, 0.86],
+    },
+    TowerDef {
+        id: "bastion",
+        name: "Bastion",
+        role: "Single target",
+        desc: "The biggest number in the game against one target, and it can elevate. Expensive for exactly that reason.",
+        elem: (Earth, Some(Light)),
+        dtype: Damage::Physical,
+        targets: Targets::Both,
+        dmg: 78.0,
+        rate: 0.55,
+        range: 4.0,
+        splash: 0.0,
+        cost: 215,
+        delivery: Delivery::Beam { pierce: 1 },
+        specials: &[Special::Crit {
+            chance: 0.20,
+            mult: 2.2,
+        }],
+        color: [0.88, 0.82, 0.58],
+    },
+    TowerDef {
+        id: "tombstone",
+        name: "Tombstone",
+        role: "Economy",
+        // It fires nothing at all. A Tombstone that also shot things would just
+        // be a worse Bramble with a bonus, and the decision to build one would
+        // be free - the whole point is that it costs a pad during the waves you
+        // are most fragile.
+        desc: "Fires nothing. Pays every wave, forever, and lifts the interest on what you are holding. Build it early or not at all.",
+        elem: (Earth, Some(Dark)),
+        dtype: Damage::None,
+        targets: Targets::Nothing,
+        dmg: 0.0,
+        rate: 0.0,
+        range: 2.9,
+        splash: 0.0,
+        cost: 190,
+        delivery: Delivery::Aura,
+        specials: &[
+            Special::Income { per_wave: 34 },
+            Special::Interest { extra: 0.015 },
+        ],
+        color: [0.72, 0.66, 0.78],
+    },
+    TowerDef {
+        id: "eclipse",
+        name: "Eclipse",
+        role: "Boss answer",
+        desc: "Stops things dead and leaves them defenceless. Thin damage of its own - it is what the rest of your board hits through.",
+        elem: (Light, Some(Dark)),
+        dtype: Damage::Magic,
+        targets: Targets::Both,
+        dmg: 21.0,
+        rate: 0.90,
+        range: 3.7,
+        splash: 0.0,
+        cost: 210,
+        delivery: Delivery::Shot { speed: 22.0 },
+        specials: &[
+            Special::Stun {
+                chance: 0.22,
+                dur: 0.9,
+            },
+            Special::Shred {
+                amt: 0.45,
+                dur: 3.5,
+            },
+        ],
+        color: [0.86, 0.62, 1.00],
     },
 ];
+
+/// Index of the pure tower for an element.
+pub fn pure_index(e: Element) -> usize {
+    e.idx()
+}
+
+/// Index of the dual tower for a pair, in either order.
+pub fn dual_index(a: Element, b: Element) -> Option<usize> {
+    if a == b {
+        return None;
+    }
+    let (lo, hi) = if a < b { (a, b) } else { (b, a) };
+    TOWERS.iter().position(|t| t.elem == (lo, Some(hi)))
+}
 
 pub fn tower_index(id: &str) -> usize {
     TOWERS.iter().position(|t| t.id == id).unwrap_or(0)
 }
 
-/// Shop order: cheapest first. Nothing is gated - gold is the only limit.
+/// Build-panel order: the six pures first, then the duals, cheapest first
+/// inside each group. Availability is decided by essences, not by this.
 pub fn shop_order() -> Vec<usize> {
     let mut idx: Vec<usize> = (0..TOWERS.len()).collect();
-    idx.sort_by_key(|&i| TOWERS[i].cost);
+    idx.sort_by_key(|&i| (TOWERS[i].is_dual(), TOWERS[i].cost));
     idx
 }
 
@@ -690,12 +1176,16 @@ pub enum Kind {
     Mender,
     Bulwark,
     Phaser,
+    /// Ground, half-there. Physical weapons pass straight through it.
+    Wraith,
     Boss,
     /// Air. Fast, fragile, arrives in a cloud. Punishes having no anti-air.
     Wisp,
     /// Air, heavily plated. Punishes anti-air that is all physical damage.
     Drake,
-    /// Air boss. If your whole answer to bosses was a wall of cannons, this is
+    /// Air and Ethereal. Punishes it much harder.
+    Seraph,
+    /// Air boss. If your whole answer to bosses was a wall of Boulders, this is
     /// where the run ends.
     Skylord,
 }
@@ -711,9 +1201,11 @@ impl Kind {
             Kind::Mender => "Mender",
             Kind::Bulwark => "Bulwark",
             Kind::Phaser => "Phaser",
+            Kind::Wraith => "Wraith",
             Kind::Boss => "BOSS",
             Kind::Wisp => "Wisp",
             Kind::Drake => "Drake",
+            Kind::Seraph => "Seraph",
             Kind::Skylord => "SKYLORD",
         }
     }
@@ -721,7 +1213,7 @@ impl Kind {
     /// Which layer this monster travels on.
     pub fn layer(self) -> Layer {
         match self {
-            Kind::Wisp | Kind::Drake | Kind::Skylord => Layer::Air,
+            Kind::Wisp | Kind::Drake | Kind::Seraph | Kind::Skylord => Layer::Air,
             _ => Layer::Ground,
         }
     }
@@ -733,6 +1225,7 @@ impl Kind {
         match self {
             Kind::Wisp => 1.55,
             Kind::Drake => 1.75,
+            Kind::Seraph => 1.90,
             Kind::Skylord => 2.10,
             _ => 0.0,
         }
@@ -742,8 +1235,9 @@ impl Kind {
     }
     pub fn armor(self) -> Armor {
         match self {
-            Kind::Brute | Kind::Bulwark | Kind::Drake => Armor::Heavy,
+            Kind::Brute | Kind::Bulwark | Kind::Drake => Armor::Plated,
             Kind::Warden | Kind::Phaser => Armor::Warded,
+            Kind::Wraith | Kind::Seraph => Armor::Ethereal,
             Kind::Boss | Kind::Skylord => Armor::Boss,
             _ => Armor::Unarmoured,
         }
@@ -753,6 +1247,7 @@ impl Kind {
             Kind::Swarm => 0.20,
             Kind::Wisp => 0.22,
             Kind::Runner => 0.24,
+            Kind::Wraith | Kind::Seraph => 0.28,
             Kind::Grunt | Kind::Warden | Kind::Phaser => 0.30,
             Kind::Mender => 0.32,
             Kind::Drake => 0.38,
@@ -766,15 +1261,17 @@ impl Kind {
         match self {
             Kind::Grunt => "",
             Kind::Runner => "very fast",
-            Kind::Brute => "heavy armour",
+            Kind::Brute => "heavy plate",
             Kind::Swarm => "huge pack",
             Kind::Warden => "warded",
             Kind::Mender => "heals nearby",
             Kind::Bulwark => "damage shield",
             Kind::Phaser => "shrugs off slows",
+            Kind::Wraith => "ETHEREAL, needs magic",
             Kind::Boss => "immune to stun",
             Kind::Wisp => "FLYING, fast swarm",
-            Kind::Drake => "FLYING, heavy armour",
+            Kind::Drake => "FLYING, heavy plate",
+            Kind::Seraph => "FLYING, ETHEREAL",
             Kind::Skylord => "FLYING boss",
         }
     }
@@ -858,25 +1355,58 @@ pub const N_WAVES: u32 = CAMPAIGN_WAVES;
 pub const ENDLESS_HP_STEP: f32 = 1.075;
 pub const ENDLESS_GOLD_STEP: f32 = 1.062;
 
-/// Per-wave growth of monster health and of the gold a wave pays out.
-///
-/// These two numbers are the difficulty curve, and they are tuned by playing
-/// the game, not by argument - `a_sensible_build_clears_the_campaign` runs a
-/// full eighty-wave campaign with a deliberately unsophisticated strategy and
-/// checks it wins with lives in single figures. At 1.1350 it finishes with 8
-/// of 20; at 1.1375 it dies on wave 76. That margin is the game.
-///
-/// Health has to outrun gold by a lot, because the player's board also grows by
-/// *count* and not only by level - and because a board stops growing entirely
-/// once it is maxed, while the waves never do.
-/// Health of a wave-1 monster. Sets how tight the opening is, and therefore how
-/// much surplus the player carries into the rest of the run - a generous
-/// opening compounds into a trivial endgame.
+/// Health of a wave-1 monster. Sets how tight the opening is.
 const HP_BASE: f32 = 70.0;
 /// Gold a wave-1 wave pays out in total.
 const GOLD_BASE: f32 = 58.0;
-const HP_STEP: f32 = 1.1550;
-const GOLD_STEP: f32 = 1.0655;
+/// Per-wave growth of the gold a wave pays out. This one really is a geometric
+/// curve, because it is the only thing in the game that compounds cleanly.
+const GOLD_STEP: f32 = 1.0700;
+
+/// Every gold piece the player could have had by the end of wave `w`.
+///
+/// The opening purse is part of this and matters enormously: by wave ten the
+/// campaign has paid out about eight hundred gold, and starting with two
+/// hundred and sixty of it changes the board's growth over those ten waves from
+/// fourteenfold to threefold. Leaving it out made the first fifteen waves
+/// unwinnable.
+fn purse_through(w: u32) -> f32 {
+    let n = w.max(1) as i32;
+    crate::game::START_GOLD as f32 + GOLD_BASE * (GOLD_STEP.powi(n) - 1.0) / (GOLD_STEP - 1.0)
+}
+
+/// How fast a board can grow, as a power of the gold poured into it.
+///
+/// A level costs `COST_STEP` times the last and deals `DMG_STEP` times the
+/// damage, so a board's output is a super-linear function of its total spend:
+/// `ln(DMG_STEP) / ln(COST_STEP)` = 1.17. Anything the player can do is bounded
+/// by this, which makes it the right yardstick to measure a wave against.
+const BOARD_EXP: f32 = 1.1718;
+
+/// How much of that growth the waves actually claim.
+///
+/// **This is the difficulty knob, and its shape matters more than its value.**
+///
+/// Health used to be a plain geometric curve, and a plain geometric curve is
+/// the wrong shape. Gold arrives as a *sum* of wave purses, so the player's
+/// board grows very fast in the first twenty waves - from nothing to a full
+/// road - and then far more slowly, because after that the only thing left to
+/// buy is levels. A geometric health curve is flatter than that early and
+/// steeper late, so it produced a campaign that was measurably free: a bot
+/// reached wave 64 of 80 without losing a single life, and then died twice in
+/// the last fifteen. Sixty-four waves of no pressure is not a difficulty curve,
+/// it is a loading screen.
+///
+/// Pinning health to the *cumulative purse* instead makes the wave grow at the
+/// same shape as the board that has to answer it, so the pressure is roughly
+/// even from wave 5 to wave 80. The exponent below one is what leaves the
+/// player a margin to actually play well inside.
+const HP_EXP: f32 = 0.97;
+
+/// Health multiplier for a campaign wave.
+fn campaign_hp(w: u32) -> f32 {
+    HP_BASE * (purse_through(w.min(CAMPAIGN_WAVES)) / purse_through(1)).powf(HP_EXP * BOARD_EXP)
+}
 
 /// The road is roughly 60 tiles long; this sets how briskly monsters cover it.
 pub const WALK_SPEED: f32 = 1.7;
@@ -885,18 +1415,20 @@ pub const WALK_SPEED: f32 = 1.7;
 ///
 /// Three difficulty settings meant three curves, and only one of them was ever
 /// tuned properly. A single curve that is actually good is worth more than a
-/// menu of curves that are roughly right - so the run is balanced to be beaten
-/// by a player who reads the wave preview and answers it, and to punish one who
-/// does not.
+/// menu of curves that are roughly right.
 pub const START_LIVES: i32 = 20;
 
 /// Which monster shows up on which wave. New types arrive on a schedule so the
 /// player always has one wave of warning to buy the counter.
 fn kind_for(wave: u32) -> Kind {
-    // Bosses alternate layers, so a board built entirely out of cannons meets
+    // Bosses alternate layers, so a board built entirely out of Boulders meets
     // something it cannot touch every twenty waves.
     if wave % 10 == 0 {
-        return if (wave / 10) % 2 == 0 { Kind::Skylord } else { Kind::Boss };
+        return if (wave / 10) % 2 == 0 {
+            Kind::Skylord
+        } else {
+            Kind::Boss
+        };
     }
     // Types unlock on a schedule, always with a wave of warning in the preview.
     let mut pool: Vec<Kind> = vec![Kind::Grunt];
@@ -929,6 +1461,14 @@ fn kind_for(wave: u32) -> Kind {
     if wave >= 32 {
         pool.push(Kind::Phaser);
     }
+    // Act III opens with the armour class that answers nothing the player has
+    // been leaning on: a board of Boulders and Silts has no reply at all.
+    if wave >= 41 {
+        pool.push(Kind::Wraith);
+    }
+    if wave >= 48 {
+        pool.push(Kind::Seraph);
+    }
     pool[(wave as usize * 7 + wave as usize / 3) % pool.len()]
 }
 
@@ -946,6 +1486,8 @@ fn shape_of(kind: Kind) -> (u32, f32, f32) {
         Kind::Mender => (10, 1.10, 1.00),
         Kind::Warden => (12, 1.15, 1.05),
         Kind::Phaser => (12, 1.25, 1.15),
+        Kind::Wraith => (11, 1.30, 1.20),
+        Kind::Seraph => (9, 1.35, 1.25),
         Kind::Grunt => (14, 1.0, 1.15),
     }
 }
@@ -965,8 +1507,8 @@ fn is_debut(wave: u32, kind: Kind) -> bool {
     wave > 1 && (1..wave).all(|w| kind_for(w) != kind)
 }
 
-/// Builds any wave, at any number, at any difficulty. Waves past the campaign
-/// keep escalating, so a run is only over when the player runs out of lives.
+/// Builds any wave, at any number. Waves past the campaign keep escalating, so
+/// a run is only over when the player runs out of lives.
 pub fn wave_at(i: u32) -> WaveDef {
     let i = i.max(1);
     let kind = kind_for(i);
@@ -978,29 +1520,30 @@ pub fn wave_at(i: u32) -> WaveDef {
     // Health and gold both grow geometrically, and health grows faster. That
     // gap is the difficulty: early on your gold outruns the monsters and the
     // board fills up, late on it does not and you have to choose what to feed.
-    // A flat gold curve against a geometric health curve (which is what this
-    // used to be) makes the back half unwinnable rather than hard.
     let campaign = i.min(CAMPAIGN_WAVES);
     let over = i.saturating_sub(CAMPAIGN_WAVES);
-    let base = HP_BASE * HP_STEP.powi(campaign as i32 - 1);
+    let base = campaign_hp(campaign);
     // A debut wave is half the size and two thirds the health: enough to hurt,
     // not enough to end a run that had no answer ready.
-    let (count, debut_hp) = if debut { ((count as f32 * 0.55).ceil() as u32, 0.65) } else { (count, 1.0) };
+    let (count, debut_hp) = if debut {
+        ((count as f32 * 0.55).ceil() as u32, 0.65)
+    } else {
+        (count, 1.0)
+    };
     let hp = base * ENDLESS_HP_STEP.powi(over as i32) * hp_mul * debut_hp;
 
     let purse =
         GOLD_BASE * GOLD_STEP.powi(campaign as i32 - 1) * ENDLESS_GOLD_STEP.powi(over as i32);
-    // Only part of the purse rides on kills. See KILL_SHARE.
-    // Clamped: an f32 above u32::MAX saturates rather than wrapping, and the
-    // result is a wave that pays exactly 4,294,967,295 gold. Deep endless is
-    // meant to end because the monsters win, not because the arithmetic gives
-    // up.
     // The escort is decided before the bounty, because a wave's purse is fixed:
     // adding an escort splits the same money across more monsters rather than
     // paying extra for them. Getting this wrong made escorted waves *easier* -
     // more targets, more gold, a bigger board.
     let escort = escort_for(i, kind, base);
     let paying = count + escort.map_or(0, |e| e.count);
+    // Clamped: an f32 above u32::MAX saturates rather than wrapping, and the
+    // result is a wave that pays exactly 4,294,967,295 gold. Deep endless is
+    // meant to end because the monsters win, not because the arithmetic gives
+    // up.
     let bounty = (purse * KILL_SHARE / paying as f32).clamp(1.0, MAX_PAYOUT) as u32;
 
     WaveDef {
@@ -1015,8 +1558,11 @@ pub fn wave_at(i: u32) -> WaveDef {
             _ => 0.60,
         },
         // Bulwarks absorb a flat pool that scales with the wave.
+        // A Bulwark's shield rides the same curve its health does, at a fixed
+        // fraction of it - so a flat shield stays a meaningful wall late
+        // instead of becoming a rounding error on the health bar.
         shield: if kind == Kind::Bulwark {
-            120.0 * 1.14f32.powi(campaign as i32 - 1) * ENDLESS_HP_STEP.powi(over as i32)
+            hp * 0.45
         } else {
             0.0
         },
@@ -1033,7 +1579,7 @@ pub fn wave_at(i: u32) -> WaveDef {
 /// Escorts start at wave 25 as an occasional second type, and from wave 45
 /// every escorted wave crosses the layers: a ground wave brings flyers, a
 /// flying wave brings walkers. That is what stops a board from being a pile of
-/// cannons that happens to survive.
+/// Boulders that happens to survive.
 fn escort_for(wave: u32, main: Kind, base: f32) -> Option<Escort> {
     if wave < 25 {
         return None;
@@ -1044,16 +1590,22 @@ fn escort_for(wave: u32, main: Kind, base: f32) -> Option<Escort> {
     if boss && wave < 50 {
         return None;
     }
-    // Not every wave, or an escort stops being an event.
-    if !boss && wave % 3 != 1 {
+    // Not every wave, or an escort stops being an event. Act IV is the
+    // exception: from wave 61 every wave brings one, which is what makes the
+    // last twenty a different game rather than the same one with bigger numbers.
+    if !boss && wave < 61 && wave % 3 != 1 {
         return None;
     }
 
     let cross = wave >= 45 || boss;
     let candidates: &[Kind] = if cross && !main.flying() {
-        &[Kind::Wisp, Kind::Drake]
+        if wave >= 48 {
+            &[Kind::Wisp, Kind::Drake, Kind::Seraph]
+        } else {
+            &[Kind::Wisp, Kind::Drake]
+        }
     } else if cross {
-        &[Kind::Swarm, Kind::Brute, Kind::Runner]
+        &[Kind::Swarm, Kind::Brute, Kind::Runner, Kind::Wraith]
     } else {
         &[Kind::Runner, Kind::Swarm, Kind::Warden, Kind::Brute]
     };
@@ -1065,14 +1617,17 @@ fn escort_for(wave: u32, main: Kind, base: f32) -> Option<Escort> {
     let (base_count, hp_mul, _) = shape_of(kind);
     // An escort is a real threat, not a garnish - about half a wave of it.
     let count = ((base_count as f32) * if boss { 0.45 } else { 0.55 }).ceil() as u32;
-    Some(Escort { kind, count: count.max(2), hp: base * hp_mul * 0.85 })
+    Some(Escort {
+        kind,
+        count: count.max(2),
+        hp: base * hp_mul * 0.85,
+    })
 }
 
 pub fn build_waves() -> Vec<WaveDef> {
     (1..=N_WAVES).map(wave_at).collect()
 }
 
-/// Gold handed out for clearing a wave.
 /// How much of a wave's purse is paid per kill rather than for surviving it.
 ///
 /// Paying the whole purse on kills sounds right and plays badly: a wave you
@@ -1082,8 +1637,8 @@ pub fn build_waves() -> Vec<WaveDef> {
 /// or collapsed at wave 60, with almost nothing in between.
 ///
 /// Splitting the purse fixes the shape. Falling behind still costs lives, which
-/// is the real currency, but it no longer quietly destroys the economy you need
-/// to recover. Killing things is still clearly better than not.
+/// is the real currency, but it no longer quietly destroys the economy needed to
+/// recover. Killing things is still clearly better than not.
 const KILL_SHARE: f32 = 0.55;
 
 /// Paid for reaching the end of a wave, whatever leaked. The other side of
@@ -1092,9 +1647,6 @@ pub fn wave_clear_bonus(wave: u32) -> u32 {
     let campaign = wave.min(CAMPAIGN_WAVES);
     let over = wave.saturating_sub(CAMPAIGN_WAVES);
     let purse = GOLD_BASE * GOLD_STEP.powi(campaign as i32 - 1);
-    // The split half of the purse, plus the flat survival payment that has
-    // always been here. Total wave income is unchanged by the split - only who
-    // has to earn it is.
     let flat = (25 + campaign * 5) as f32;
     ((purse * (1.0 - KILL_SHARE) + flat) * ENDLESS_GOLD_STEP.powi(over as i32)).min(MAX_PAYOUT)
         as u32

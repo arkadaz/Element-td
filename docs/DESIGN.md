@@ -1,292 +1,345 @@
-# Elemental TD — game design
+# Elemental TD - design
 
-One difficulty, eighty waves, about an hour. Everything below exists to make
-each of those waves a decision rather than a wait.
+This document is the specification. Where the code and this file disagree, the
+file is wrong and should be fixed.
 
-## 1. The thesis
+---
 
-A tower defense is only as good as the question it asks each wave. Ours asks
-three at once, and no single build answers all three:
+## 1. What was wrong with the old design
 
-1. **Layer** — is it walking or flying? Your two hardest hitters cannot shoot up.
-2. **Armour** — physical bounces off plate, magic fizzles on wards, poison is
-   never resisted but never bonused.
-3. **Tempo** — gold spent on damage now, or on economy that pays for more damage
-   in ten waves' time.
+The previous version was a competent tower defense that stopped being a game
+around wave 20. Eight towers, all available from wave 1, all affordable by wave
+15. After that the only decision left was *which tower do I pour gold into*,
+answered once and then repeated sixty times. Length was added by raising health
+numbers, which is not the same thing as depth.
 
-Any two of these can be solved by one build. All three cannot. That is the game.
+Three specific failures:
 
-## 2. The roster: eight towers, eight verbs
+- **No scarcity.** Everything unlocked immediately, so there was never a build
+  to discover, only a build to execute.
+- **No variance.** Every run drew the same towers against the same waves on the
+  same road. Nothing to learn on run two.
+- **One axis of growth.** Gold in, damage out. A single scalar cannot carry an
+  hour.
 
-The previous roster had a real flaw, and it is worth naming: **Pyre and Venom
-were the same tower.** Both were poison-type damage-over-time that ignored
-armour. Two towers competing for one job means one of them is always strictly
-worse, and the player is right to feel the roster is padded.
+The fix is not more waves. It is a second resource that the player spends on
+*what they are allowed to build* rather than on how much of it.
 
-Every tower now owns exactly one verb that nothing else in the game does:
+---
 
-| Tower | Verb — owned outright | Damage | Layers | Why you build it |
+## 2. The core loop
+
+> **Draft an element. Elements combine into towers. Towers hold the road.**
+
+The player never buys a tower from an open shop. They earn **essences**, one
+element at a time, and their collection of essences decides which of the
+twenty-one towers they may build and how far each may be upgraded.
+
+Every run therefore has three interleaved decisions:
+
+1. **Draft** - which element to take, from three offered.
+2. **Build** - which of the towers that unlocked to actually put on the road.
+3. **Invest** - upgrade what is there, build wider, or bank for interest.
+
+The first is the new one, and it is the one that makes runs differ.
+
+---
+
+## 3. Essences
+
+There are six elements:
+
+| Element | Colour | Temperament |
+|---|---|---|
+| **Nature** | green | poison, decay, things that get worse over time |
+| **Fire** | orange | burst, burn, area |
+| **Water** | blue | slow, chain, control |
+| **Earth** | brown | weight, armour-breaking, ground only |
+| **Light** | gold | precision, range, buffs |
+| **Dark** | violet | debuffs, execution, gold |
+
+**Twenty essences** are awarded over a campaign, at waves
+
+```
+1, 2, 3, 5, 7, 9, 12, 15, 18, 21, 25, 29, 33, 37, 42, 47, 52, 58, 64, 71
+```
+
+front-loaded so the opening has choices, thinning out so the late game is about
+using what you built rather than still being handed new toys.
+
+At each award the player is offered **three of the six**, and takes one. The
+offer is drawn from the run seed, and is constrained so that - whenever both are
+possible - it contains **at least one element already held** (so you can always
+deepen) and **at least one not held** (so you can always broaden). Without that
+rule a draft can be a non-choice, which is worse than no draft at all.
+
+Combat does not start until the pending draft is taken. It is a decision, not a
+notification.
+
+### What essences buy
+
+Let `e[X]` be how many essences of element `X` are held.
+
+- **Pure tower X** is buildable when `e[X] >= 1`.
+  Its ceiling is `min(8, 2 + e[X])`.
+- **Dual tower XY** is buildable when `e[X] >= 1` **and** `e[Y] >= 1`.
+  Its ceiling is `min(8, 2 + min(e[X], e[Y]))`.
+
+So six essences in one element max out that pure tower; six in each of two
+elements max out the dual between them.
+
+This is the whole strategic spine, and it is a genuine dilemma:
+
+| Spread over 20 essences | What you get |
+|---|---|
+| 20 in one | one maxed pure tower and nothing else - a losing build |
+| 10 / 10 | two pures and one dual, all at ceiling 8 |
+| 7 / 7 / 6 | three pures, three duals, all at 8 |
+| 4 / 4 / 4 / 4 / 4 | five pures, ten duals, all capped at 6 |
+| 3 each of six, plus 2 | everything unlocked, nothing above 5 |
+
+Breadth buys answers. Depth buys numbers. The waves are built so that neither
+extreme survives: a narrow board meets an armour class it cannot hurt, and a
+wide board of tier-5 towers cannot out-damage a wave-70 health bar.
+
+Essences are never refunded and never respecced. Towers sell back at 75%.
+
+---
+
+## 4. The twenty-one towers
+
+Six pure, fifteen dual - every unordered pair of elements. Each owns exactly one
+role; no two share both a delivery and a special.
+
+### Pure - cheap, immediate, always relevant
+
+| Tower | Element | Damage | Targets | Role |
 |---|---|---|---|---|
-| **Ballista** | Single-target burst | Physical | Ground + Air | The reliable answer to one big thing |
-| **Cannon** | Instant splash on impact | Physical | **Ground only** | The answer to a crowd on the road |
-| **Frost** | Slow | Magic | Ground + Air | Buys every other tower more shots |
-| **Tesla** | Chain between targets | Magic | Ground + Air | The answer to a spread-out line, and to air |
-| **Venom** | Stacking DoT that ramps on one target | Poison | Ground + Air | The boss killer |
-| **Pyre** | **Persistent ground zone + shred** | Poison | **Ground only** | Makes the road itself dangerous |
-| **Beacon** | Buffs neighbouring towers | — | — | Makes a cluster worth more than its parts |
-| **Mint** | Income and interest | — | — | Trades tempo now for a bigger late game |
+| **Bramble** | Nature | Toxic | air + ground | stacking poison, the reliable opener |
+| **Ember** | Fire | Fire | air + ground | small fast splash |
+| **Tide** | Water | Magic | air + ground | slow; buys every other tower more shots |
+| **Boulder** | Earth | Physical | **ground only** | one heavy shot, knocks back |
+| **Prism** | Light | Magic | air + ground | long range, crits |
+| **Shade** | Dark | Toxic | air + ground | weakest damage, pays gold per kill |
 
-### What changed and why
+### Dual - expensive, specialised, the reason to broaden
 
-**Pyre is no longer a burn tower.** It does not target a monster at all. It
-lights a **patch of road on fire** and leaves it burning. Everything standing in
-the patch takes modest damage and — the real payload — is **shredded**: it takes
-more damage from *everything else on the board* while it stands there.
+| Tower | Pair | Damage | Targets | Role |
+|---|---|---|---|---|
+| **Wildfire** | N+F | Fire | air + ground | fire arcs from target to target |
+| **Mire** | N+W | Toxic | **ground only** | swamp: heavy slow, poison, **suppresses healing** |
+| **Thornwall** | N+E | Physical | **ground only** | roots: hard slow with splash |
+| **Grove** | N+L | - | none | aura: damage, rate and range to neighbours |
+| **Blight** | N+D | Toxic | air + ground | ramps on one target, spreads on kill |
+| **Steam** | F+W | Fire | air + ground | untargeted nova, hits both layers |
+| **Magma** | F+E | Fire | **ground only** | sets the road alight, shreds armour |
+| **Solar** | F+L | Fire | air + ground | piercing lance down a whole lane |
+| **Hellfire** | F+D | Fire | air + ground | **executes** anything under a third health |
+| **Silt** | W+E | Physical | **ground only** | widest splash, slows, shreds |
+| **Mirror** | W+L | Magic | air + ground | longest chain in the game |
+| **Abyss** | W+D | Magic | air + ground | **drags monsters back down the road** |
+| **Bastion** | E+L | Physical | air + ground | highest single-target damage |
+| **Tombstone** | E+D | - | none | economy: pays every wave, raises interest |
+| **Eclipse** | L+D | Magic | air + ground | stuns and shreds - the boss answer |
 
-That gives Pyre a verb nobody else has (a persistent zone), a distinct reason to
-exist (it is the force multiplier for the *road*, the way Beacon is the force
-multiplier for *towers*), and a natural, honest reason it cannot hit air: it
-burns the ground. Placement matters for the first time — a Pyre on a corner
-where monsters bunch is worth several elsewhere.
+Five towers cannot shoot upwards (Boulder, Mire, Thornwall, Magma, Silt). Two do
+not shoot at all (Grove, Tombstone). Both facts are load-bearing: they are what
+stops "build the highest-DPS thing everywhere" from being correct.
 
-**Venom becomes the single-target specialist.** Its poison stacks with itself
-and ramps the longer it stays on one target, so it is weak against a swarm and
-devastating against one enormous health bar. It is the answer to a boss, and
-being poison it is the answer to a boss of *any* armour type.
+### Levels
 
-So the four damage towers now pair off cleanly rather than overlapping:
+Eight levels. No forks - the branching decision now lives in the draft, and
+forty-two fork variants on top of twenty-one towers would be noise rather than
+choice. Instead there are two visible milestones:
 
-- **Cannon and Pyre** both hit the ground crowd — but one is instant burst and
-  the other is sustained area denial. You want both.
-- **Ballista and Venom** both kill one big thing — but one is burst that lands
-  now and the other is a ramp that pays off over ten seconds.
-- **Frost and Tesla** are the layer-agnostic pair: hold everything still, arc
-  through everything at once.
+- **Level 4 - Attuned.** The tower's special effect strengthens sharply.
+- **Level 7 - Ascendant.** Damage takes a step up and the model changes shape.
 
-## 3. Ground and air
+Damage per level multiplies by **1.76**, cost by **1.62**. Upgrading is about 9%
+more gold-efficient than building another copy, which is small enough that the
+choice stays live at every level instead of being settled at level 2.
 
-The single biggest addition, and the reason the roster has tension.
+---
 
-| Monster | Layer | Punishes |
+## 5. Damage and armour
+
+Four damage types against five armour classes. This table is the reason a wide
+board beats a tall one at least some of the time.
+
+|              | Unarmoured | Plated | Warded | Ethereal | Boss |
+|---|---|---|---|---|---|
+| **Physical** | 1.00 | 0.55 | 1.25 | 0.70 | 0.85 |
+| **Magic**    | 1.00 | 1.25 | 0.55 | 1.30 | 0.85 |
+| **Fire**     | 1.15 | 0.85 | 0.85 | 0.60 | 0.90 |
+| **Toxic**    | 1.00 | 1.00 | 1.00 | 1.00 | 1.00 |
+
+Toxic is never resisted and never bonused. It is the honest answer to anything,
+and it is why the Nature and Dark pures stay worth a pad into the late game
+while being the worst raw damage in the roster.
+
+Fire is the swarm answer and nothing else's. It was briefly neutral against
+wards, which quietly made magic-plus-fire a board with no hole in it at all -
+magic beat plate and ghosts, fire beat crowds, and wards were the one thing left
+for the pair to fear. Now a board needs a third answer.
+
+---
+
+## 6. Monsters
+
+Fourteen types. Each one punishes exactly one lazy habit.
+
+| Monster | Layer | Armour | Punishes |
+|---|---|---|---|
+| Grunt | ground | Unarmoured | - |
+| Runner | ground | Unarmoured | slow projectiles, no control |
+| Swarm | ground | Unarmoured | single-target boards |
+| Brute | ground | Plated | all-physical boards |
+| Warden | ground | Warded | all-magic boards |
+| **Wraith** | ground | **Ethereal** | all-physical boards, harder |
+| Mender | ground | Unarmoured | not focusing, no burst |
+| Bulwark | ground | Plated | chip damage - a flat shield absorbs it |
+| Phaser | ground | Warded | relying on slow |
+| Wisp | **air** | Unarmoured | no anti-air |
+| Drake | **air** | Plated | anti-air that is all physical |
+| **Seraph** | **air** | **Ethereal** | anti-air that is all physical, harder |
+| **Boss** | ground | Boss | thin damage, stun reliance |
+| **Skylord** | air | Boss | ground-only boards |
+
+Ethereal is new and deliberately nasty: it takes 70% from physical and 60% from
+fire, but 130% from magic. A board of Bastions and Silts meets a Wraith wave and
+finds out.
+
+### Escalation
+
+New types arrive on a schedule and **always debut at 55% count and 65% health**,
+so the first Wisp wave costs a life, not the run. The game teaches a mechanic
+before it tests it.
+
+Wave modifiers layer on from the midgame: regenerating (every 8th wave from 20),
+splitting (every 9th from 22), and escorts - a second monster type arriving
+alongside the first, from wave 25, always crossing layers from wave 45.
+
+Bosses at every tenth wave, alternating ground and air.
+
+---
+
+## 7. Length and pacing
+
+**Eighty waves.** Sixteen seconds of build time between waves (twenty-five
+before the first), and a wave takes thirty to fifty seconds to walk the road.
+That is a measured **69 minutes** for a full campaign, and the draft pauses are
+load-bearing pacing: they are the moments the player looks up from the road.
+
+Calling a wave early pays **2 gold per second saved**. A player who reads the
+preview and knows they are safe can compress the run and get paid for it. This
+is the only speed control that is also a decision.
+
+Clearing wave 80 is a win. The run may continue into **endless**, where health
+climbs 7.5% and the purse 6.2% per wave - health outruns gold, so endless always
+ends eventually. The question is only how far.
+
+### The four acts
+
+| Act | Waves | What it is about |
 |---|---|---|
-| Wisp | Air | Having no anti-air at all. Fast, fragile, arrives in a cloud. |
-| Drake | Air | Anti-air that is all one damage type — it is heavily plated. |
-| Skylord | Air | A boss answer built entirely out of cannons. |
+| **I - The Road** | 1-20 | Learning layers and armour. First air at 7, first Plated at 9. |
+| **II - Pressure** | 21-40 | Healers, swarms, wards. Focus fire and area damage. |
+| **III - Attrition** | 41-60 | Ethereal, shields, splitting, phasing. Burst versus sustain. |
+| **IV - The Deep** | 61-80 | Cross-layer escorts every wave. Full-board answers only. |
 
-**Cannon and Pyre — the two biggest area dealers — cannot touch the air.** This
-is deliberate and it is the core build tension: the strongest ground board in
-the game is helpless against a wave it cannot reach. Every other attacker hits
-both layers, so the fix is never "build the anti-air tower", it is "do not spend
-your whole board on the road".
+---
 
-Air arrives at **wave 7**, early enough that learning it costs a life or two
-rather than the run.
+## 8. Economy
 
-## 4. The wave schedule
+- Start with **260 gold** and **20 lives**.
+- A wave's purse is fixed. **55%** rides on kills, **45%** is paid for surviving
+  it. A half-cleared wave costs lives, which is the real currency, but does not
+  quietly destroy the economy needed to recover. Paying the whole purse on kills
+  made the balance bimodal: cruise to victory, or collapse at wave 60, with
+  almost nothing between.
+- Escorts split the same purse across more monsters. They are a threat, not a
+  payday.
+- **Interest** pays 5% of gold in hand at each wave end, up to **20%** with
+  Tombstones, and only on gold up to a ceiling of twelve wave-purses. Uncapped
+  compound interest is not an economy, it is a runaway - the previous version
+  reached 813 billion gold by wave 89 and ran to wave 136 without difficulty.
+- Selling refunds **75%** of everything invested.
 
-Eighty waves. Every tenth is a boss, and bosses **alternate layers** — 10, 30,
-50, 70 walk; 20, 40, 60, 80 fly.
+### Ninety-nine pads
 
-New types arrive on a schedule, always with a wave of warning in the preview:
+The road has ninety-nine build plots beside it, on alternating tiles.
 
-| Wave | Arrival | Lesson |
+The number matters more than it looks. There used to be one on every tile in the
+band - a hundred and ninety-eight - and a campaign purse that can cover two
+hundred plots is a campaign with no placement decision in it. Filling the board
+with cheap towers beat levelling good ones, which is the opposite of what the
+cost curve is built to reward, and a simulated run confirmed it: a bot that
+papered the board with level-one towers cleared eighty waves without losing a
+life. Half as many plots makes each one worth thinking about and leaves levels
+as the real sink for gold.
+
+### Nothing may pin a wave in place
+
+Three separate stalls have shipped in this game, all the same bug wearing
+different clothes: a wave that can be held still forever neither dies nor leaks,
+so it never ends and the run hangs. Stun-lock did it, then knockback, then
+Abyss - whose pull briefly scaled with the *damage* curve and dragged monsters
+six tiles per hit at level eight.
+
+Cooldowns and diminishing returns are not enough, because they only shorten each
+effect; they do nothing about how often it lands. Two hard bounds fix it for
+good, and both are stated as guarantees rather than tunings:
+
+- After a stun ends, a monster **cannot be stunned again for 1.2 seconds**. It
+  therefore moves for at least that long out of every stun-plus-window.
+- Every monster has a **total pushback budget of 5 tiles** for its whole life,
+  shared by knockback and pull. Once spent, the road is a one-way street.
+
+The balance harness asserts that no wave takes longer than 200 seconds, which is
+what catches the next one.
+
+---
+
+## 9. Rendering
+
+The game is top-down, the camera is fixed, and the models are stylised low-poly
+solids. It was being drawn with a deferred-flavoured pipeline costing seven
+render passes a frame - shadow map, multisampled scene, separate effects buffer,
+three bloom blits, composite - and in a browser falling back to WebGL2 that is
+where the frame went. Measured on a packed board (198 towers, 5,300 instances)
+the CPU side costs **0.05 ms** to build the draw list and **0.03 ms** to step the
+simulation on a full board of ninety-nine towers and a hundred and twenty
+monsters. Nothing about the slowness was the simulation, and
+`a_packed_board_costs_almost_nothing_on_the_cpu` keeps that true.
+
+The pipeline is therefore collapsed by quality tier:
+
+| Quality | Passes | What runs |
 |---|---|---|
-| 1 | Grunt | — |
-| 3 | Runner | Speed; range coverage matters |
-| 5 | Swarm | Volume; you need splash |
-| **7** | **Wisp** | **You need something that shoots up** |
-| 9 | Brute | Heavy armour; physical is the wrong tool |
-| 13 | Warden | Warded; magic is the wrong tool |
-| **17** | **Drake** | Armoured air — anti-air needs a damage type |
-| 21 | Mender | Focus fire, or nothing dies |
-| 26 | Bulwark | Shields; poison bypasses them |
-| 32 | Phaser | Slows stop working half the time |
+| **Low** | 1 | scene straight to the screen, no shadows, no MSAA, no post |
+| **Medium** | 2 | 1024px shadow map, 1 tap, then scene to screen |
+| **High** | 3 | 2048px shadow, 4 taps, scene to HDR, tonemap composite |
+| **Ultra** | 7 | as before - 4x MSAA, bloom chain, the lot |
 
-After 32 the pool cycles, mixing types so no single counter carries.
+Low and Medium write **directly to the swapchain** - no intermediate HDR
+texture, no resolve, no composite blit. Glows are drawn in the same pass as the
+solids with additive blending and depth-test-no-write, which removes the
+separate effects target entirely.
 
-## 5. Pacing to an hour
+The default is chosen by measuring the opening seconds of frames and stepping
+down until the frame budget is met, so a phone gets Low and a desktop with a
+discrete GPU gets High without anyone being asked.
 
-| | |
-|---|---|
-| First build phase | 30 s |
-| Build phase after that | 15 s |
-| Combat, typical wave | ~30 s |
-| **Per wave** | **~45 s** |
-| **80 waves** | **~60 min** |
+---
 
-Calling a wave early pays a gold bonus proportional to the time left, so a
-player who knows the run compresses it — the classic tower-defense skill
-expression, and the reason the hour is a ceiling rather than a floor.
+## 10. What is deliberately not here
 
-## 6. Ten tower levels
-
-| Levels | What happens |
-|---|---|
-| 1–3 | The base tower grows |
-| **4** | **Fork** — pick one of two specialisations, permanently |
-| 5–7 | The fork grows |
-| **8** | **Awaken** — the fork's identity is amplified hard, and the model changes |
-| 9–10 | Final growth |
-
-Damage per level ×1.76, cost per level ×1.62. The gap is deliberately narrow —
-about 9% better damage-per-gold each level — so "upgrade this one or build
-another" stays a close call at every level instead of being settled at level 2.
-Ten levels across eighty waves is roughly one upgrade per tower every eight
-waves, which is the rhythm an hour-long run wants.
-
-Costs round to human numbers (5s, 10s, 50s, 250s). Nobody prices a decision off
-"4,187 gold".
-
-## 7. The economy
-
-Monster health grows **1.155×** per wave. Wave gold grows **1.0655×** per wave.
-
-That gap looks enormous, and it has to be. The player's board does not grow at
-the rate of their income — it grows by tower *count* and by *level* on top of
-it, and damage-per-gold improves at every level. Those compound. A gap that
-"looks fair" on paper produces a game you win with 18 of 20 lives.
-
-These two numbers were not reasoned into place, they were played into place.
-`a_sensible_build_clears_the_campaign` runs a full eighty-wave campaign and
-checks the result.
-
-The bot models **competent** play, and getting that right mattered more than the
-curve did. It first placed towers to spread evenly along the road — which is
-wrong, and losing: a monster then meets one tower at a time and survives each of
-them in turn. Concentrated fire kills, and overlapping ranges stack Beacon
-auras, so the bot now builds a **killbox**. The moment it did, it cleared the
-old curve **without losing a single life** — proof the game was too easy for
-anyone playing well, whatever the naive version had suggested.
-
-Against a killbox, 1.155 finishes with **5 of 20 lives and 15 leaks**. That is
-the number to hold.
-
-### Gold does not all ride on kills
-
-**55% of a wave's purse is paid per kill; the rest is paid for surviving it.**
-
-Paying everything on kills sounds right and plays badly. A wave you half-clear
-pays half, so your next board is weaker, so you clear even less — one bad wave
-used to spiral into a dead run. It made the balance bimodal: the same curve
-either cruised to victory with 18 lives or collapsed around wave 60, with almost
-nothing in between.
-
-Splitting the purse fixes the shape. Falling behind still costs lives, which is
-the currency that actually matters, but it no longer quietly destroys the
-economy you need to recover with.
-
-### Escorts
-
-From wave 25 some waves bring a **second monster type**, and from wave 45 that
-escort is always on the *other layer* — a ground wave brings flyers, a flying
-wave brings walkers. Bosses gain a guard from wave 50.
-
-One type per wave means one counter always answers it and the roster stops
-mattering by the midgame. Escorts are how a wave asks two questions at once.
-
-A wave's purse is fixed, so an escort **splits** the same gold across more
-monsters rather than paying extra for them. Getting that backwards made escorted
-waves *easier* — more targets, more income, a bigger board.
-
-### Debut waves are softened
-
-The first time any monster type appears it comes at **55% count and 65%
-health**. The game should teach a mechanic before it tests it. The first flying
-wave arriving at full strength against a board with no anti-air does not teach
-anything — it just ends the run before the player knows what hit them. Without
-this, wave 7 was an instant loss; with it, wave 7 costs a few lives and wave 10
-is where ignoring the lesson actually kills you.
-
-Mint and interest let a player bet on the far side of the curve. Building a Mint
-on wave 5 is a real gamble: it is a plot not shooting anything during the waves
-where you are most fragile — and it fires nothing at all, so there is no
-consolation prize.
-
-## 8. What a good run looks like
-
-- **Waves 1–10.** Cheap Ballistas and a Cannon. One Mint if you are confident.
-  Wave 7 forces the first anti-air.
-- **Waves 11–30.** Forks are chosen. Frost goes on the first corner. A Pyre
-  lands on the tightest bend on the road. Wave 20 is the first flying boss.
-- **Waves 31–55.** Beacons start paying. Venom goes down for the bosses. The
-  board stops growing outward and starts growing upward.
-- **Waves 56–80.** Nothing new is built; everything is being awakened. The
-  squeeze is real and the last five waves should genuinely hurt.
-
-## 9. Hard control is strong, never absolute
-
-Two effects could stop the game outright, and both did:
-
-- **Stuns** now diminish on repeat (each lands ~34% shorter, to a floor) and the
-  resistance only bleeds off while the target is free to move.
-- **Knockback** has a per-target cooldown of 0.75 s.
-
-Without those, a board of Frost and Grapeshot pinned a wave in place forever:
-every monster permanently frozen or shoved backwards, so nothing died, nothing
-leaked, and the wave never ended. A full campaign hung on wave 76. A control
-board should slow a wave down, not stop time.
-
-## 10. The economy cannot run away
-
-Interest is capped at **20%**, and it is paid only on gold up to a **ceiling**
-that rises with the wave.
-
-This is a bug that shipped, and it is worth stating plainly: each Treasury used
-to add `0.04 × utility_scale(tier)` to the interest rate, which at level 10 is
-**+23.8% each**, with no ceiling. Four of them put compound interest over 100%
-a wave. A real game reached **813 billion gold on wave 89**, kept everything
-maxed permanently, and coasted to wave 136. Infinite money is the same thing as
-no game.
-
-Anything that multiplies a compounding rate multiplies an exponential, so the
-Treasury bonus is no longer scaled by tier at all — a Treasury pays for itself
-through flat income and a modest rate bump.
-
-Banking a wave or two of income is a real strategy and should pay. Hoarding
-forever should not, which is what the ceiling is for.
-
-## 11. Saving
-
-The run is simulated entirely on the player's machine, so the save lives there:
-`localStorage` in the browser, a file in the OS config directory natively. The
-server stores nothing — it is sized so a gigabyte of RAM holds a thousand
-players, and per-player run state would undo that at a stroke.
-
-It is deliberately **not** keyed by IP address. An IP is not an identity: a
-phone changes it several times an hour, and everyone behind one router or one
-carrier-grade NAT shares it, so players would resume into each other's games.
-It is also personal data this needs none of.
-
-Only a seed, a wave number, a purse and one line per tower are stored — about a
-kilobyte. Waves are generated from their number, so replaying the seed
-reproduces the run exactly without storing any of it. A save is a file anyone
-can edit, so it is validated on load and refused whole rather than half-applied.
-
-## 12. Endless
-
-Clearing wave 80 is a win. The run may continue: health then climbs 7.5% a wave
-against 6.2% gold growth, a much steeper squeeze, so endless always eventually
-wins. The only question is how far.
-
-## 13. How this is kept honest
-
-Balance arguments on paper are worth very little — the curve before this one
-looked reasonable written down and was arithmetically impossible past wave 40.
-The tests play the game instead:
-
-| Test | What it refuses to let happen |
-|---|---|
-| `a_sensible_build_clears_the_campaign` | The campaign becomes unwinnable, or winnable while asleep |
-| `ignoring_the_air_loses_the_run` | The ground/air split becomes decoration |
-| `every_tower_owns_a_verb_nothing_else_has` | Two towers doing the same job (this is how Pyre/Venom was caught) |
-| `the_air_layer_splits_the_roster` | The ground-only pair losing its compensation |
-| `the_run_tightens_from_start_to_finish` | Any wave becoming a wall rather than a step |
-| `a_full_run_is_about_an_hour` | The session length drifting |
-| `ground_towers_cannot_touch_the_air` | A mortar quietly learning to shoot upward |
-| `pyre_burns_the_road_and_only_the_road` | Area denial losing either its zone or its restriction |
-| `a_wall_of_control_towers_cannot_freeze_a_wave_forever` | Stun or knockback stopping the game outright |
-| `a_board_built_entirely_of_treasuries_cannot_run_away` | The economy compounding into infinity |
-| `interest_pays_on_a_bounded_pile` | Hoarding becoming better than spending |
-| `deep_endless_payouts_stay_finite` | Gold saturating `u32` and paying nonsense |
-| `a_run_survives_a_round_trip` | A resumed board not being the board that was saved |
-| `a_corrupt_save_is_refused_rather_than_half_applied` | An edited save producing a board the game would refuse to build |
+- **No mazing.** The road is fixed. A creep's position is one scalar - how far
+  along it has walked - which is what keeps four thousand of them cheap.
+- **No difficulty menu.** One curve, tuned properly, beats three curves of which
+  one was ever tested.
+- **No ray tracing.** WebGPU does not expose it, so it cannot ship to a browser,
+  and the GPU was never the bottleneck the request assumed it was.
+- **No server-side simulation.** Every client runs its own board from a shared
+  seed. The server relays scoreboards and nothing else, which is what lets it
+  hold a thousand players in a gigabyte.

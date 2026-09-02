@@ -1,13 +1,20 @@
 //! The GPU renderer.
 //!
-//! Passes per frame:
-//!   1. a depth-only shadow pass from the light,
-//!   2. the lit scene: static geometry, then this frame's dynamic instances,
-//!      then additive glows, then the live slice of the particle ring,
-//!   3. bright-pass and separable blur at quarter resolution,
+//! Passes per frame, by quality preset - two at Performance, three at Balanced,
+//! six at Ultra:
+//!   1. a depth-only shadow pass from the light (Balanced and above),
+//!   2. the lit scene: static geometry, this frame's dynamic instances, then
+//!      additive glows and the live slice of the particle ring in the *same*
+//!      pass, depth-tested but not depth-writing,
+//!   3. bright-pass and separable blur at quarter resolution (Ultra only),
 //!   4. a composite triangle that adds sky, bloom and tone mapping.
 //!
-//! Three things keep this cheap:
+//! The pass count is the number that decides whether this runs in a browser.
+//! A packed board costs 0.02 ms of CPU to build and 0.03 ms to simulate, so
+//! nothing here is ever waiting on the game - it is waiting on framebuffer
+//! binds, and every one removed is worth more than any amount of culling.
+//!
+//! Four things keep this cheap:
 //!   - **Static geometry is uploaded once.** Terrain, scenery and the road never
 //!     change, so they are not rebuilt or re-uploaded per frame.
 //!   - **Only live particles are drawn.** The ring buffer tracks its live window,
@@ -36,7 +43,12 @@ const MAX_PARTICLE_LIFE: f32 = 2.0;
 const BLOOM_DIV: u32 = 4;
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 /// Alpha 0 so the composite can paint the sky wherever nothing was drawn.
-const CLEAR: wgpu::Color = wgpu::Color { r: 0.0, g: 0.0, b: 0.0, a: 0.0 };
+const CLEAR: wgpu::Color = wgpu::Color {
+    r: 0.0,
+    g: 0.0,
+    b: 0.0,
+    a: 0.0,
+};
 
 /// Builds the scene shader for a quality preset.
 ///
@@ -58,7 +70,9 @@ fn make_solid_shader(device: &wgpu::Device, quality: Quality) -> wgpu::ShaderMod
 
 // ---------------------------------------------------------------- quality
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+/// Ordered cheapest to most expensive; auto-tuning compares presets directly,
+/// so the declaration order is load-bearing.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum Quality {
     Performance,
     Balanced,
@@ -84,46 +98,45 @@ impl Quality {
     /// Fraction of the viewport the 3D scene is rendered at.
     pub fn render_scale(self) -> f32 {
         match self {
-            Quality::Performance => 0.52,
-            Quality::Balanced => 0.80,
+            Quality::Performance => 0.60,
+            Quality::Balanced => 0.85,
             Quality::Ultra => 1.0,
         }
     }
     pub fn msaa(self) -> u32 {
         match self {
-            Quality::Performance => 1,
-            Quality::Balanced => 2,
             Quality::Ultra => 4,
+            _ => 1,
         }
     }
     pub fn shadow_size(self) -> u32 {
         match self {
-            Quality::Performance => 768,
-            Quality::Balanced => 1536,
+            Quality::Performance => 0,
+            Quality::Balanced => 1024,
             Quality::Ultra => 2048,
         }
     }
-    /// How much of the viewport the additive effects buffer uses. Glows are soft
-    /// blobs, so a quarter of the linear resolution is invisible in motion and
-    /// sixteen times cheaper to blend.
-    pub fn fx_div(self) -> u32 {
-        match self {
-            Quality::Performance => 4,
-            Quality::Balanced => 3,
-            Quality::Ultra => 2,
-        }
-    }
     pub fn bloom(self) -> bool {
-        self != Quality::Performance
+        self == Quality::Ultra
     }
-    /// Shadow filter taps. Four is a soft edge; one is a hard edge that costs a
-    /// quarter as much, which on a weak GPU is the difference between playable
-    /// and not.
+    /// Shadow filter taps. Zero means the shadow pass does not run at all and
+    /// the lighting branch folds away at shader-build time.
     pub fn shadow_taps(self) -> u32 {
         match self {
-            Quality::Performance => 1,
-            _ => 4,
+            Quality::Performance => 0,
+            Quality::Balanced => 1,
+            Quality::Ultra => 4,
         }
+    }
+    pub fn shadows(self) -> bool {
+        self.shadow_taps() > 0
+    }
+    /// How many render passes a frame costs at this tier. Named here because it
+    /// is the number that actually decides whether the game runs in a browser,
+    /// and it is easy to add one by accident.
+    pub fn passes(self) -> u32 {
+        // scene + composite, plus shadow, plus the three-blit bloom chain.
+        2 + u32::from(self.shadows()) + if self.bloom() { 3 } else { 0 }
     }
     pub fn lower(self) -> Option<Quality> {
         match self {
@@ -190,8 +203,6 @@ struct Targets {
     depth: wgpu::TextureView,
     bloom_a: wgpu::TextureView,
     bloom_b: wgpu::TextureView,
-    /// Additive glows and particles, rendered small and added back at the end.
-    fx: wgpu::TextureView,
     bg_bright: wgpu::BindGroup,
     bg_blur_h: wgpu::BindGroup,
     bg_blur_v: wgpu::BindGroup,
@@ -267,8 +278,6 @@ pub struct Renderer {
 
     /// Tunables the UI can change at runtime.
     pub quality: Quality,
-    /// Whether the effects buffer still holds anything from a previous frame.
-    fx_dirty: bool,
     /// The prefix of each static shape range that casts a shadow.
     static_shadow: [(u32, u32); SHAPE_COUNT],
     pub bloom_strength: f32,
@@ -492,16 +501,6 @@ impl Renderer {
                     },
                     count: None,
                 },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 4,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
             ],
         });
 
@@ -536,7 +535,11 @@ impl Renderer {
                 ..Default::default()
             },
             depth_stencil: Some(wgpu::DepthStencilState {
-                bias: wgpu::DepthBiasState { constant: 2, slope_scale: 2.5, clamp: 0.0 },
+                bias: wgpu::DepthBiasState {
+                    constant: 2,
+                    slope_scale: 2.5,
+                    clamp: 0.0,
+                },
                 ..depth_state(true)
             }),
             multisample: wgpu::MultisampleState::default(),
@@ -546,7 +549,12 @@ impl Renderer {
 
         let samples = resolve_samples(quality.msaa(), can_msaa2, can_msaa4);
         let pipes = Self::build_scene_pipes(
-            device, &solid_src, &bb_src, &scene_layout, hdr_format, samples,
+            device,
+            &solid_src,
+            &bb_src,
+            &scene_layout,
+            hdr_format,
+            samples,
         );
 
         let make_post = |label: &str, entry: &str, format: wgpu::TextureFormat| {
@@ -596,11 +604,15 @@ impl Renderer {
             ..Default::default()
         });
 
-        let scene_bg = Self::make_scene_bg(device, &scene_bgl, &uniform, &shadow_view, &shadow_sampler);
+        let scene_bg =
+            Self::make_scene_bg(device, &scene_bgl, &uniform, &shadow_view, &shadow_sampler);
         let shadow_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("shadow bg"),
             layout: &shadow_bgl,
-            entries: &[wgpu::BindGroupEntry { binding: 0, resource: uniform.as_entire_binding() }],
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: uniform.as_entire_binding(),
+            }],
         });
 
         let lib = mesh::build();
@@ -650,7 +662,6 @@ impl Renderer {
         });
 
         Self {
-            fx_dirty: false,
             static_shadow: [(0, 0); SHAPE_COUNT],
             solid_src,
             bb_src,
@@ -715,7 +726,10 @@ impl Renderer {
         hdr_format: wgpu::TextureFormat,
         samples: u32,
     ) -> ScenePipes {
-        let ms = wgpu::MultisampleState { count: samples, ..Default::default() };
+        let ms = wgpu::MultisampleState {
+            count: samples,
+            ..Default::default()
+        };
         let solid = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("solid"),
             layout: Some(layout),
@@ -747,7 +761,10 @@ impl Renderer {
             cache: None,
         });
 
-        // Effects render into their own small, single-sampled, depth-free target.
+        // Effects render into the scene target alongside the solids, so they
+        // match its sample count and share its depth buffer - tested, so a glow
+        // inside a tower is hidden by it, but not written, so two overlapping
+        // glows still add.
         let make_billboard = |label: &str, vs: &str, fs: &str, stride: u64| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(label),
@@ -773,8 +790,8 @@ impl Renderer {
                     cull_mode: None,
                     ..Default::default()
                 },
-                depth_stencil: None,
-                multisample: wgpu::MultisampleState::default(),
+                depth_stencil: Some(depth_state(false)),
+                multisample: ms,
                 multiview_mask: None,
                 cache: None,
             })
@@ -798,16 +815,25 @@ impl Renderer {
         }
     }
 
+    /// The scene bind group always needs a shadow map to point at, even at the
+    /// preset that never renders into one, so a disabled shadow becomes a 64px
+    /// stub rather than an absent binding.
     fn make_shadow_texture(device: &wgpu::Device, size: u32) -> wgpu::TextureView {
+        let size = size.max(64);
         device
             .create_texture(&wgpu::TextureDescriptor {
                 label: Some("shadow map"),
-                size: wgpu::Extent3d { width: size, height: size, depth_or_array_layers: 1 },
+                size: wgpu::Extent3d {
+                    width: size,
+                    height: size,
+                    depth_or_array_layers: 1,
+                },
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 format: DEPTH_FORMAT,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING,
                 view_formats: &[],
             })
             .create_view(&wgpu::TextureViewDescriptor::default())
@@ -824,9 +850,18 @@ impl Renderer {
             label: Some("scene bg"),
             layout,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: uniform.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(shadow) },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(cmp) },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: uniform.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(shadow),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(cmp),
+                },
             ],
         })
     }
@@ -965,8 +1000,14 @@ impl Renderer {
                 return;
             }
         }
-        let bw = (w / BLOOM_DIV).max(4);
-        let bh = (h / BLOOM_DIV).max(4);
+        // The bloom chain only has a resolution worth having when it runs.
+        // Off, they stay 4x4 and read back as the zeroes a fresh texture is
+        // specified to hold, so the composite adds nothing without a branch.
+        let (bw, bh) = if self.quality.bloom() {
+            ((w / BLOOM_DIV).max(4), (h / BLOOM_DIV).max(4))
+        } else {
+            (4, 4)
+        };
 
         let mk = |label: &str,
                   w: u32,
@@ -977,7 +1018,11 @@ impl Renderer {
             device
                 .create_texture(&wgpu::TextureDescriptor {
                     label: Some(label),
-                    size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+                    size: wgpu::Extent3d {
+                        width: w,
+                        height: h,
+                        depth_or_array_layers: 1,
+                    },
                     mip_level_count: 1,
                     sample_count: samples,
                     dimension: wgpu::TextureDimension::D2,
@@ -998,32 +1043,38 @@ impl Renderer {
         let depth = mk("depth", w, h, DEPTH_FORMAT, samples);
         let bloom_a = mk("bloom a", bw, bh, self.hdr_format, 1);
         let bloom_b = mk("bloom b", bw, bh, self.hdr_format, 1);
-        let fd = self.quality.fx_div();
-        let fx = mk("fx", (w / fd).max(4), (h / fd).max(4), self.hdr_format, 1);
+        let mk_bg =
+            |label: &str, t0: &wgpu::TextureView, t1: &wgpu::TextureView, u: &wgpu::Buffer| {
+                device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some(label),
+                    layout: &self.post_bgl,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::Sampler(&self.sampler),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(t0),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::TextureView(t1),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: u.as_entire_binding(),
+                        },
+                    ],
+                })
+            };
 
-        let mk_bg = |label: &str,
-                     t0: &wgpu::TextureView,
-                     t1: &wgpu::TextureView,
-                     t2: &wgpu::TextureView,
-                     u: &wgpu::Buffer| {
-            device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some(label),
-                layout: &self.post_bgl,
-                entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::Sampler(&self.sampler) },
-                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(t0) },
-                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(t1) },
-                    wgpu::BindGroupEntry { binding: 3, resource: u.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(t2) },
-                ],
-            })
-        };
-
-        // The bright pass folds the effects buffer in, so glows bloom too.
-        let bg_bright = mk_bg("bg bright", &scene, &fx, &fx, &self.post_bright);
-        let bg_blur_h = mk_bg("bg blur h", &bloom_a, &bloom_a, &fx, &self.post_blur_h);
-        let bg_blur_v = mk_bg("bg blur v", &bloom_b, &bloom_b, &fx, &self.post_blur_v);
-        let bg_composite = mk_bg("bg composite", &scene, &bloom_a, &fx, &self.post_comp);
+        // Glows are already in the scene buffer at values above one, so the
+        // bright pass picks them up for free.
+        let bg_bright = mk_bg("bg bright", &scene, &scene, &self.post_bright);
+        let bg_blur_h = mk_bg("bg blur h", &bloom_a, &bloom_a, &self.post_blur_h);
+        let bg_blur_v = mk_bg("bg blur v", &bloom_b, &bloom_b, &self.post_blur_v);
+        let bg_composite = mk_bg("bg composite", &scene, &bloom_a, &self.post_comp);
 
         self.targets = Some(Targets {
             w,
@@ -1034,7 +1085,6 @@ impl Renderer {
             depth,
             bloom_a,
             bloom_b,
-            fx,
             bg_bright,
             bg_blur_h,
             bg_blur_v,
@@ -1044,7 +1094,11 @@ impl Renderer {
 
     fn write_post_uniforms(&self, queue: &wgpu::Queue, bw: f32, bh: f32) {
         let srgb = if self.srgb_encode { 1.0 } else { 0.0 };
-        let strength = if self.quality.bloom() { self.bloom_strength } else { 0.0 };
+        let strength = if self.quality.bloom() {
+            self.bloom_strength
+        } else {
+            0.0
+        };
         let common = [self.bloom_threshold, strength, srgb, 0.0];
         let texel = [1.0 / bw, 1.0 / bh];
         for (buf, dir) in [
@@ -1053,7 +1107,15 @@ impl Renderer {
             (&self.post_blur_v, [0.0, 1.0 / bh]),
             (&self.post_comp, [0.0, 0.0]),
         ] {
-            queue.write_buffer(buf, 0, bytemuck::bytes_of(&PostU { dir, texel, params: common }));
+            queue.write_buffer(
+                buf,
+                0,
+                bytemuck::bytes_of(&PostU {
+                    dir,
+                    texel,
+                    params: common,
+                }),
+            );
         }
     }
 
@@ -1130,8 +1192,10 @@ impl Renderer {
         // Every mutation is done; from here on we only read.
         let Some(targets) = &self.targets else { return };
 
-        // --- shadow map
-        {
+        // --- shadow map. Skipped outright at Performance: the pass is a full
+        // depth-only redraw of every caster on the board, and it is the single
+        // most expensive thing a weak GPU is asked to do here.
+        if self.quality.shadows() {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("shadow"),
                 color_attachments: &[],
@@ -1201,34 +1265,14 @@ impl Renderer {
                 pass.set_vertex_buffer(1, self.instances.slice(..));
                 Self::draw_shapes(&mut pass, &self.spans, &self.dynamic_batches);
             }
-        }
 
-        // --- effects, at a fraction of the resolution.
-        // Skipped entirely when there is nothing additive on screen: the clear
-        // alone is a full pass over the buffer, and between waves there is
-        // frequently not a single glow to draw.
-        let any_fx = self.glow_count > 0 || self.live_particles > 0;
-        if any_fx || self.fx_dirty {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("fx"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &targets.fx,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            pass.set_bind_group(0, &self.scene_bg, &[]);
-            // One clear-only pass drains the last frame's glows, then the pass
-            // stops running until something additive is on screen again.
-            self.fx_dirty = any_fx;
+            // Glows and particles ride in the same pass as the solids, blended
+            // additively and depth-tested without writing. They used to own a
+            // separate low-resolution target that the composite added back over
+            // everything, which cost a whole render pass, a whole texture, and
+            // a texture fetch in three post shaders - and looked worse, because
+            // a glow with no depth test shines straight through the tower it is
+            // supposed to be inside.
             if self.glow_count > 0 {
                 pass.set_pipeline(&self.pipes.glow);
                 pass.set_vertex_buffer(0, self.glows.slice(..));
@@ -1253,9 +1297,27 @@ impl Renderer {
         if !self.quality.bloom() {
             return;
         }
-        self.blit(encoder, &self.bright_pipe, &targets.bg_bright, &targets.bloom_a, "bloom bright");
-        self.blit(encoder, &self.blur_pipe, &targets.bg_blur_h, &targets.bloom_b, "bloom blur h");
-        self.blit(encoder, &self.blur_pipe, &targets.bg_blur_v, &targets.bloom_a, "bloom blur v");
+        self.blit(
+            encoder,
+            &self.bright_pipe,
+            &targets.bg_bright,
+            &targets.bloom_a,
+            "bloom bright",
+        );
+        self.blit(
+            encoder,
+            &self.blur_pipe,
+            &targets.bg_blur_h,
+            &targets.bloom_b,
+            "bloom blur h",
+        );
+        self.blit(
+            encoder,
+            &self.blur_pipe,
+            &targets.bg_blur_v,
+            &targets.bloom_a,
+            "bloom blur v",
+        );
     }
 
     fn blit(
@@ -1291,13 +1353,14 @@ impl Renderer {
         if !spawns.is_empty() {
             let n = spawns.len().min(PARTICLE_CAP);
             self.part_scratch.clear();
-            self.part_scratch.extend(spawns[..n].iter().map(|s| GpuParticle {
-                p0: s.pos,
-                vel: s.vel,
-                t0_life: [self.time, s.life],
-                size: s.size,
-                color: s.color,
-            }));
+            self.part_scratch
+                .extend(spawns[..n].iter().map(|s| GpuParticle {
+                    p0: s.pos,
+                    vel: s.vel,
+                    t0_life: [self.time, s.life],
+                    size: s.size,
+                    color: s.color,
+                }));
 
             let stride = std::mem::size_of::<GpuParticle>() as u64;
             let head = self.part_head as usize;
@@ -1308,7 +1371,11 @@ impl Renderer {
                 bytemuck::cast_slice(&self.part_scratch[..first]),
             );
             if n > first {
-                queue.write_buffer(&self.particles, 0, bytemuck::cast_slice(&self.part_scratch[first..n]));
+                queue.write_buffer(
+                    &self.particles,
+                    0,
+                    bytemuck::cast_slice(&self.part_scratch[first..n]),
+                );
             }
             self.part_head = ((head + n) % PARTICLE_CAP) as u32;
             self.part_marks.push_back((self.time, self.part_head));

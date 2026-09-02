@@ -39,7 +39,7 @@ scatters towers, for quick playtesting.
 
 | Input | Action |
 | --- | --- |
-| `1`–`8` | pick a tower from the build palette |
+| `1`–`9` | pick a tower from the build palette |
 | Click a pad | build there |
 | Click a tower | select it — stats and commands appear in the bottom bar |
 | `Shift`+click | build and keep the tower selected |
@@ -50,15 +50,24 @@ scatters towers, for quick playtesting.
 
 ## How it plays
 
-- **The road never changes.** Placement is about coverage and overlap, not mazing.
-- **Armour beats damage type.** Physical bounces off Heavy plate but shreds Warded
-  casters; Magic is the mirror; Poison is never resisted and ignores shields. The
-  wave preview tells you what is coming one wave ahead.
-- **Tier 3 is a fork.** The last upgrade is a choice between two specialisations
-  that play differently — Marksman or Repeater, Inferno or Furnace, and so on.
-- **Interest.** You earn 5% of the gold in hand every wave, so holding money is a
-  real strategy against building immediately.
-- **Beacons multiply.** A support tower buffs everything in range, which makes
+- **You draft elements, not towers.** Twenty times over the campaign you pick one
+  of six elements from three offered. Each element unlocks its own tower, and
+  each *pair* of elements you hold unlocks the tower between them — six pure
+  towers and fifteen duals, twenty-one in all. No two runs get the same roster.
+- **Depth or breadth, never both.** Every essence of an element raises the level
+  ceiling of every tower using it by one, and a dual tower reads whichever of its
+  two elements you hold fewer of. Six of one element maxes its pure tower; six of
+  each of two maxes the dual between them. Twenty essences do not stretch far.
+- **Armour beats damage type.** Physical bounces off Plated but shreds Warded;
+  Magic is the mirror and the only real answer to Ethereal; Fire loves an
+  unarmoured crowd and barely warms a ghost; Toxic is never resisted and ignores
+  shields. The wave preview tells you what is coming one wave ahead.
+- **Five towers cannot shoot upwards.** Something on your board has to answer the
+  air, and from wave 45 every escorted wave crosses the layers.
+- **Interest, and calling early.** You earn 5% of the gold in hand every wave, and
+  sending a wave early pays 2 gold a second — the only speed control that is also
+  a decision.
+- **Groves multiply.** A support tower buffs everything in range, which makes
   tight clusters worth more than the same towers spread thin.
 
 ## How it's built
@@ -68,13 +77,14 @@ src/
   main.rs          app shell, input, the egui↔wgpu render callback
   math.rs          Vec3/Mat4, the diorama camera, ray picking, shadow matrix
   game/
-    defs.rs        all balance data: damage types, 8 towers, 9 monsters, 50 waves
+    defs.rs        all balance data: elements, 21 towers, 14 monsters, 80 waves
     board.rs       the fixed road and the build pads beside it
     mod.rs         entities, wave loop, economy, player actions
     combat.rs      targeting, firing, chains, armour and damage resolution
     fx.rs          particle spawn queue
   gfx/
     mod.rs         pipelines, shadow pass, MSAA, bloom chain, buffers
+                   (two render passes at the cheap preset, six at Ultra)
     draw.rs        the drawing vocabulary (cubes, bars, glows, rings)
     shaders/*.wgsl solid / shadow / billboard / post
   decor.rs         static set dressing: trees, rocks, fences, lamps, cliffs
@@ -105,10 +115,19 @@ src/
 cargo test
 ```
 
-Fourteen tests covering the risky parts: index bookkeeping when monsters die
-mid-iteration, splash into a 300-strong pack, shields versus poison, beacon auras
-appearing and disappearing, and design invariants (every tower has a distinct
-role; both tier-3 forks are genuinely different).
+Sixty-three tests covering the risky parts: index bookkeeping when monsters die
+mid-iteration, splash into a 300-strong pack, shields versus toxic damage, auras
+appearing and disappearing, saves that must never rebuild a board the game would
+refuse, HUD layout at every window size, and design invariants (every tower has a
+distinct role; every element pair maps to exactly one tower; no wave can be
+pinned in place forever).
+
+The balance is a test too: `a_sensible_build_clears_the_campaign` plays a whole
+eighty-wave run with a deliberately unsophisticated bot and checks it wins with
+lives in single figures, while `two_elements_are_not_enough_however_deep_they_go`
+and `ignoring_the_air_loses_the_run` check that the builds which *should* lose
+actually do - the latter by scoring every wave and asserting the lives were taken
+by flying ones.
 
 See [`docs/EXTENDING.md`](docs/EXTENDING.md) for how to add towers, monsters and
 visual props.

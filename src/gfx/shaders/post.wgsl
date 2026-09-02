@@ -12,7 +12,6 @@ struct PostU {
 @group(0) @binding(1) var tex0: texture_2d<f32>;
 @group(0) @binding(2) var tex1: texture_2d<f32>;
 @group(0) @binding(3) var<uniform> P: PostU;
-@group(0) @binding(4) var fx_tex: texture_2d<f32>;
 
 struct VsOut {
     @builtin(position) clip: vec4<f32>,
@@ -38,10 +37,9 @@ fn fs_bright(o: VsOut) -> @location(0) vec4<f32> {
     let c = textureSample(tex0, samp, o.uv).rgb;
     let l = max(max(c.r, c.g), c.b);
     let k = max(l - P.params.x, 0.0) / max(l, 1e-4);
-    // Effects are already the brightest thing on screen, so they go straight in
-    // rather than through the threshold.
-    let fx = textureSample(fx_tex, samp, o.uv).rgb;
-    return vec4<f32>(c * k + fx, 1.0);
+    // Glows and particles are drawn into this same buffer above 1.0, so they
+    // clear the threshold on their own and need no second texture.
+    return vec4<f32>(c * k, 1.0);
 }
 
 @fragment
@@ -89,8 +87,6 @@ fn fs_composite(o: VsOut) -> @location(0) vec4<f32> {
     let scene = textureSample(tex0, samp, o.uv);
     // Anything the scene pass did not cover shows the sky.
     var c = mix(sky(o.uv), scene.rgb, clamp(scene.a, 0.0, 1.0));
-    // Glows and particles were rendered small; add them back over everything.
-    c = c + textureSample(fx_tex, samp, o.uv).rgb;
     let b = textureSample(tex1, samp, o.uv).rgb;
     c = c + b * P.params.y;
 

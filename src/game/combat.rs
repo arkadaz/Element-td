@@ -2,7 +2,8 @@
 
 use super::defs::*;
 use super::{
-    Beam, FloatText, Game, Proj, ProjKind, KNOCKBACK_CD, STUN_DR_MAX, STUN_DR_STEP, TargetMode, TextKind, Zone,
+    Beam, FloatText, Game, KNOCKBACK_CD, Proj, ProjKind, STUN_DR_MAX, STUN_DR_STEP, SUPPRESS_TIME,
+    TargetMode, TextKind, Zone,
 };
 
 // ---------------------------------------------------------------- towers
@@ -43,7 +44,15 @@ pub fn step_towers(g: &mut Game, dt: f32) {
                         t: 1.0,
                         width: 0.0,
                     });
-                    g.fx.burst(&mut g.rng, pos, 30, range * 2.0, [col[0], col[1], col[2], 1.0], 0.35, 0.22);
+                    g.fx.burst(
+                        &mut g.rng,
+                        pos,
+                        30,
+                        range * 2.0,
+                        [col[0], col[1], col[2], 1.0],
+                        0.35,
+                        0.22,
+                    );
                     let dmg = g.towers[ti].dmg();
                     let mut list = scratch.clone();
                     list.sort_unstable_by(|a, b| b.cmp(a));
@@ -110,9 +119,9 @@ fn live_target(g: &Game, ti: usize) -> Option<usize> {
     let r = g.towers[ti].range();
     let pos = g.towers[ti].pos;
     let targets = g.towers[ti].def().targets;
-    g.creeps.iter().position(|c| {
-        c.uid == uid && targets.can_hit(c.kind.layer()) && dist2(c.pos, pos) <= r * r
-    })
+    g.creeps
+        .iter()
+        .position(|c| c.uid == uid && targets.can_hit(c.kind.layer()) && dist2(c.pos, pos) <= r * r)
 }
 
 fn acquire(g: &Game, ti: usize, scratch: &mut Vec<usize>) -> Option<usize> {
@@ -274,7 +283,11 @@ fn fire(g: &mut Game, ti: usize, ci: usize) {
             on_hit_specials(g, ti, ci, crit);
             damage_creep(g, ci, dmg, ti, crit);
             if pierce > 0 {
-                let primary_uid = if ci < g.creeps.len() { g.creeps[ci].uid } else { 0 };
+                let primary_uid = if ci < g.creeps.len() {
+                    g.creeps[ci].uid
+                } else {
+                    0
+                };
                 let mut list: Vec<usize> = Vec::new();
                 for (i, c) in g.creeps.iter().enumerate() {
                     if c.uid != primary_uid
@@ -298,8 +311,23 @@ fn fire(g: &mut Game, ti: usize, ci: usize) {
                 }
             }
         }
-        Delivery::Chain { bounces, falloff, hop } => {
-            chain(g, ti, ci, dmg, bounces, falloff, hop, crit, [muzzle[0], muzzle[1], mz], col);
+        Delivery::Chain {
+            bounces,
+            falloff,
+            hop,
+        } => {
+            chain(
+                g,
+                ti,
+                ci,
+                dmg,
+                bounces,
+                falloff,
+                hop,
+                crit,
+                [muzzle[0], muzzle[1], mz],
+                col,
+            );
         }
         Delivery::Nova | Delivery::Aura => {}
     }
@@ -330,7 +358,11 @@ fn chain(
             break;
         }
         let uid = g.creeps[cur].uid;
-        let to = [g.creeps[cur].pos[0], g.creeps[cur].pos[1], g.creeps[cur].height()];
+        let to = [
+            g.creeps[cur].pos[0],
+            g.creeps[cur].pos[1],
+            g.creeps[cur].height(),
+        ];
         hit_uids.push(uid);
 
         g.beams.push(Beam {
@@ -404,7 +436,11 @@ pub fn step_projectiles(g: &mut Game, dt: f32) {
             let uid = g.projs[i].target_uid;
             let ti = g.projs[i].target_idx;
             let valid = ti < g.creeps.len() && g.creeps[ti].uid == uid;
-            let found = if valid { Some(ti) } else { g.creeps.iter().position(|c| c.uid == uid) };
+            let found = if valid {
+                Some(ti)
+            } else {
+                g.creeps.iter().position(|c| c.uid == uid)
+            };
             if let Some(ci) = found {
                 g.projs[i].target_idx = ci;
                 let tp = g.creeps[ci].pos;
@@ -511,9 +547,25 @@ fn detonate(g: &mut Game, d: &Detonation) {
     };
     let col = tower_color(&TOWERS[def]);
     if splash > 0.0 {
-        g.fx.burst_at(&mut g.rng, at, 18, splash * 3.0, [col[0], col[1], col[2], 1.0], 0.32, splash * 0.40);
+        g.fx.burst_at(
+            &mut g.rng,
+            at,
+            18,
+            splash * 3.0,
+            [col[0], col[1], col[2], 1.0],
+            0.32,
+            splash * 0.40,
+        );
     } else {
-        g.fx.burst_at(&mut g.rng, at, 7, 2.4, [col[0], col[1], col[2], 1.0], 0.24, 0.13);
+        g.fx.burst_at(
+            &mut g.rng,
+            at,
+            7,
+            2.4,
+            [col[0], col[1], col[2], 1.0],
+            0.24,
+            0.13,
+        );
     }
 
     if let Some(ci) = primary {
@@ -565,7 +617,8 @@ pub fn on_hit_specials(g: &mut Game, ti: usize, ci: usize, _crit: bool) {
             }
             Special::Poison { dps, dur } => {
                 let c = &mut g.creeps[ci];
-                // Venom stacks instead of refreshing - that is its whole identity.
+                // Venom stacks instead of refreshing - that is Bramble and Blight's
+                // whole identity, and the reason they scale on one big target.
                 c.poison.amt = (c.poison.amt + dps * k).min(dps * k * 12.0);
                 c.poison.t = c.poison.t.max(dur);
             }
@@ -573,10 +626,12 @@ pub fn on_hit_specials(g: &mut Game, ti: usize, ci: usize, _crit: bool) {
                 g.creeps[ci].slow.apply(amt, dur);
             }
             Special::Stun { chance, dur } => {
-                // Bosses are immune to hard control by design.
-                if g.creeps[ci].armor != Armor::Boss && g.rng.chance(chance) {
+                // Bosses are immune to hard control by design, and nothing can
+                // be stunned again inside its post-stun window.
+                let locked = g.creeps[ci].stun > 0.0 || g.creeps[ci].stun_immune > 0.0;
+                if g.creeps[ci].armor != Armor::Boss && !locked && g.rng.chance(chance) {
                     let c = &mut g.creeps[ci];
-                    // Diminishing returns. Without them, enough Frost towers
+                    // Diminishing returns. Without them, enough Eclipse towers
                     // freeze a wave permanently: nothing dies, nothing leaks,
                     // and the wave simply never ends. A full campaign got stuck
                     // on wave 76 that way. Each stun in quick succession lands
@@ -592,20 +647,38 @@ pub fn on_hit_specials(g: &mut Game, ti: usize, ci: usize, _crit: bool) {
             Special::Shred { amt, dur } => {
                 g.creeps[ci].shred.apply(amt, dur);
             }
-            Special::Knockback { dist } => {
-                let c = &mut g.creeps[ci];
-                // One shove per target per cooldown. A wall of Grapeshot fires
-                // faster than a monster walks, so uncapped knockback pins a
-                // wave in place forever - nothing dies, nothing leaks, and the
-                // wave never ends. Hard control has to be strong and finite.
-                if c.armor != Armor::Boss && c.kb_cd <= 0.0 {
-                    c.dist = (c.dist - dist).max(0.0);
-                    c.kb_cd = KNOCKBACK_CD;
-                }
+            // Thornwall shoves, Abyss drags. Both spend from the same
+            // per-monster budget and share one cooldown, because two towers
+            // that each move a monster backwards faster than it walks forwards
+            // is a wave that never arrives.
+            //
+            // Neither scales with the tower's level. Displacement is measured
+            // in tiles of road, and the road does not get longer as a tower
+            // gets stronger - Pull briefly scaled with the damage curve, which
+            // at level eight dragged a monster six tiles per hit and stalled
+            // the game outright.
+            Special::Knockback { dist } => push_back(&mut g.creeps[ci], dist),
+            Special::Pull { dist } => push_back(&mut g.creeps[ci], dist),
+            Special::Suppress => {
+                // Mire. Regeneration and Mender healing both stop while this
+                // holds, which is the only counter in the game to a wave that
+                // out-heals a board rather than out-tanking it.
+                g.creeps[ci].suppress = g.creeps[ci].suppress.max(SUPPRESS_TIME);
             }
             _ => {}
         }
     }
+}
+
+/// Moves one monster back down the road, within its cooldown and its budget.
+fn push_back(c: &mut crate::game::Creep, dist: f32) {
+    if c.armor == Armor::Boss || c.kb_cd > 0.0 || c.push_left <= 0.0 {
+        return;
+    }
+    let moved = dist.min(c.push_left);
+    c.dist = (c.dist - moved).max(0.0);
+    c.push_left -= moved;
+    c.kb_cd = KNOCKBACK_CD;
 }
 
 /// Deals `base` damage (before armour) and cleans up if the monster dies.
@@ -613,14 +686,37 @@ pub fn damage_creep(g: &mut Game, ci: usize, base: f32, ti: usize, crit: bool) -
     if ci >= g.creeps.len() {
         return false;
     }
-    let dtype = if ti < g.towers.len() { g.towers[ti].dtype() } else { Damage::Physical };
+    let dtype = if ti < g.towers.len() {
+        g.towers[ti].dtype()
+    } else {
+        Damage::Physical
+    };
     let mult = armor_mult(dtype, g.creeps[ci].armor);
-    let shred = if g.creeps[ci].shred.active() { g.creeps[ci].shred.amt } else { 0.0 };
-    let mut dealt = base * mult * (1.0 + shred);
+    let shred = if g.creeps[ci].shred.active() {
+        g.creeps[ci].shred.amt
+    } else {
+        0.0
+    };
+    // Hellfire: the multiplier is read from the health bar at the moment of the
+    // hit, so a board that chips a target down hands it a finisher.
+    let execute = if ti < g.towers.len() {
+        let frac = g.creeps[ci].hp_frac();
+        g.towers[ti]
+            .specials()
+            .iter()
+            .find_map(|s| match *s {
+                Special::Execute { below, mult } if frac <= below => Some(mult),
+                _ => None,
+            })
+            .unwrap_or(1.0)
+    } else {
+        1.0
+    };
+    let mut dealt = base * mult * (1.0 + shred) * execute;
 
     let c = &mut g.creeps[ci];
-    // Shields soak everything except poison, which is the point of poison.
-    if c.shield > 0.0 && dtype != Damage::Poison {
+    // Shields soak everything except Toxic, which is the point of Toxic.
+    if c.shield > 0.0 && dtype != Damage::Toxic {
         let absorbed = dealt.min(c.shield);
         c.shield -= absorbed;
         dealt -= absorbed;
@@ -641,7 +737,11 @@ pub fn damage_creep(g: &mut Game, ci: usize, base: f32, ti: usize, crit: bool) -
         g.texts.push(FloatText {
             pos: [pos[0], pos[1], z + 0.35],
             value: dealt,
-            kind: if crit { TextKind::Crit } else { TextKind::Damage },
+            kind: if crit {
+                TextKind::Crit
+            } else {
+                TextKind::Damage
+            },
             t: 0.9,
         });
     }
@@ -655,8 +755,8 @@ pub fn damage_creep(g: &mut Game, ci: usize, base: f32, ti: usize, crit: bool) -
     dead
 }
 
-/// Inferno and Plague: the damage-over-time jumps to whatever is standing near
-/// the corpse. This is what makes those forks feel different, not just bigger.
+/// Blight: the damage-over-time jumps to whatever is standing near the corpse,
+/// which is what turns one kill in a packed lane into a chain of them.
 fn contagion(g: &mut Game, ci: usize, ti: usize) {
     if ti >= g.towers.len() || ci >= g.creeps.len() {
         return;

@@ -1,15 +1,24 @@
 //! Tower models.
 //!
-//! Each one is built from the shape library, and identity comes from
-//! **silhouette**: a ballista's wide bow limb, a cannon's round barrel between
-//! two wheels, frost's cluster of leaning shards, a beacon's bare obelisk. You
-//! should be able to name any tower from its outline alone, at any level.
+//! Twenty-one towers is too many to hand-sculpt without them drifting apart, so
+//! every one is assembled from three interchangeable pieces:
+//!
+//!   - a **base**, chosen by the tower's primary element - the stance,
+//!   - a **mast**, chosen by its delivery - the role, and therefore the
+//!     silhouette,
+//!   - a **crown**, chosen by its secondary element - the emitter.
+//!
+//! A pure tower takes its own element for both base and crown, so it reads as a
+//! matched set; a dual tower is visibly the marriage of two, which is exactly
+//! what it is. The mast carries the role, so every zone tower is a squat
+//! cauldron and every chain tower is a lattice pylon whatever elements built it.
+//! You should be able to name any tower from its outline alone, at any level.
 
 use super::PLOT_TOP;
 use super::theme;
 use crate::game::Tower;
 use crate::game::defs::*;
-use crate::gfx::draw::{DrawList, Material, Shape, boost, mix, rgba};
+use crate::gfx::draw::{Color, DrawList, Material, Shape, boost, mix, rgba};
 
 /// Top of the stone plinth every tower stands on.
 const DECK: f32 = PLOT_TOP + 0.20;
@@ -20,39 +29,90 @@ fn local(p: [f32; 2], yaw: f32, fwd: f32, right: f32) -> [f32; 2] {
     [p[0] + c * fwd - s * right, p[1] + s * fwd + c * right]
 }
 
-pub fn draw(d: &mut DrawList, tw: &Tower, selected: bool, now: f32) {
-    let def = tw.def();
-    let col = tower_color(def);
-    let p = tw.pos;
-    let grow = (((now - tw.built_at) * 4.0).min(1.0)).max(0.05);
+/// Everything the three builders need, gathered once so they do not each have
+/// to re-derive it from the Tower.
+struct Build {
+    p: [f32; 2],
+    yaw: f32,
+    tier: u32,
+    /// 0 at the moment of placing, 1 once the tower has finished rising.
+    grow: f32,
+    /// Animation clock, shared so a tower's parts pulse together.
+    now: f32,
+    flash: f32,
+    /// Base colour of the primary element, and of the secondary.
+    a: [f32; 3],
+    b: [f32; 3],
+    /// Height of the mast top above [`DECK`]. The crown sits here.
+    top: f32,
+}
 
-    plinth(d, p, col, tw.tier);
-
-    match def.id {
-        "ballista" => ballista(d, tw, col, grow),
-        "cannon" => cannon(d, tw, col, grow),
-        "frost" => frost(d, tw, col, grow, now),
-        "pyre" => pyre(d, tw, col, grow, now),
-        "tesla" => tesla(d, tw, col, grow, now),
-        "venom" => venom(d, tw, col, grow, now),
-        "beacon" => beacon(d, tw, col, grow, now),
-        "mint" => mint(d, tw, col, grow, now),
-        _ => {
-            d.cylinder([p[0], p[1], DECK + 0.3], 0.5, 0.6 * grow, 0.0, rgba(col, 1.0), Material::STONE);
-        }
+impl Build {
+    fn attuned(&self) -> bool {
+        self.tier >= ATTUNE_TIER
     }
-
-    if selected {
-        d.ground_ring(p, tw.range(), 0.11, rgba(col, 0.85), 80);
-        d.glow([p[0], p[1], 0.55], 1.2, 2.2, rgba(col, 0.16));
+    fn ascended(&self) -> bool {
+        self.tier >= ASCEND_TIER
+    }
+    /// World position of the crown.
+    fn head(&self) -> [f32; 3] {
+        [self.p[0], self.p[1], DECK + self.top]
     }
 }
 
-/// A turned stone drum on a square footing. Courses are added as it levels, so
-/// investment reads from across the board.
-fn plinth(d: &mut DrawList, p: [f32; 2], col: [f32; 3], tier: u32) {
-    let dark = mix(theme::STONE_DARK, col, 0.10);
-    d.slab_mat(p, [0.86, 0.86], PLOT_TOP + 0.04, 0.16, rgba(dark, 1.0), Material::STONE);
+pub fn draw(d: &mut DrawList, tw: &Tower, selected: bool, now: f32) {
+    let def = tw.def();
+    let (ea, eb) = (def.elem.0, def.elem.1.unwrap_or(def.elem.0));
+    let grow = (((now - tw.built_at) * 4.0).min(1.0)).max(0.05);
+    // Support towers stand tall and bare; everything else grows a mast that
+    // scales with its level, so investment reads from across the board.
+    let base_h = if matches!(def.delivery, Delivery::Aura) {
+        0.62
+    } else {
+        0.34
+    };
+    let b = Build {
+        p: tw.pos,
+        yaw: tw.angle,
+        tier: tw.tier,
+        grow,
+        now,
+        flash: tw.flash,
+        a: ea.color(),
+        b: eb.color(),
+        top: (base_h + 0.055 * tw.tier as f32) * grow,
+    };
+
+    plinth(d, &b, ea, def.is_dual());
+    mast(d, &b, def.delivery);
+    crown(d, &b, eb, def.delivery);
+    if b.ascended() {
+        halo(d, &b);
+    }
+
+    if selected {
+        let col = tower_color(def);
+        d.ground_ring(tw.pos, tw.range(), 0.11, rgba(col, 0.85), 80);
+        d.glow([tw.pos[0], tw.pos[1], 0.55], 1.2, 2.2, rgba(col, 0.16));
+    }
+}
+
+// ---------------------------------------------------------------- the base
+
+/// A turned stone footing, dressed in the primary element's manner. A dual
+/// tower gets a second ring of markers in its secondary colour, so pure and
+/// dual are distinguishable at a glance without reading anything.
+fn plinth(d: &mut DrawList, b: &Build, e: Element, dual: bool) {
+    let p = b.p;
+    let dark = mix(theme::STONE_DARK, b.a, 0.12);
+    d.slab_mat(
+        p,
+        [0.86, 0.86],
+        PLOT_TOP + 0.04,
+        0.16,
+        rgba(dark, 1.0),
+        Material::STONE,
+    );
     d.cylinder(
         [p[0], p[1], PLOT_TOP + 0.12],
         0.76,
@@ -61,568 +121,560 @@ fn plinth(d: &mut DrawList, p: [f32; 2], col: [f32; 3], tier: u32) {
         rgba(theme::STONE, 1.0),
         Material::STONE,
     );
-    d.cylinder([p[0], p[1], DECK - 0.04], 0.68, 0.10, 0.0, rgba(dark, 1.0), Material::STONE);
 
-    if tier >= 3 {
-        for k in 0..6 {
-            let a = k as f32 * 1.047;
+    match e {
+        // Roots that have grown around and through the stone.
+        Element::Nature => {
+            for k in 0..7 {
+                let a = k as f32 * 0.897;
+                let q = [p[0] + a.cos() * 0.36, p[1] + a.sin() * 0.36];
+                d.link(
+                    Shape::Capsule,
+                    [q[0], q[1], PLOT_TOP + 0.14],
+                    [p[0] + a.cos() * 0.14, p[1] + a.sin() * 0.14, DECK + 0.08],
+                    0.075,
+                    rgba(mix([0.24, 0.18, 0.12], b.a, 0.35), 1.0),
+                    Material::WOOD,
+                    0.0,
+                );
+            }
+        }
+        // A stepped hexagonal hearth with vents glowing between the courses.
+        Element::Fire => {
+            d.prism(
+                [p[0], p[1], DECK - 0.06],
+                0.70,
+                0.18,
+                0.4,
+                rgba(mix([0.10, 0.08, 0.09], b.a, 0.12), 1.0),
+                Material::STONE,
+            );
+            for k in 0..4 {
+                let a = k as f32 * 1.571 + 0.4;
+                d.cylinder(
+                    [p[0] + a.cos() * 0.30, p[1] + a.sin() * 0.30, DECK - 0.06],
+                    0.11,
+                    0.10,
+                    0.0,
+                    rgba(boost3(b.a, 1.5), 1.0),
+                    Material::METAL,
+                );
+            }
+        }
+        // A shallow basin with a still surface in it.
+        Element::Water => {
             d.cylinder(
-                [p[0] + a.cos() * 0.34, p[1] + a.sin() * 0.34, DECK + 0.05],
-                0.13,
-                0.14,
+                [p[0], p[1], DECK - 0.08],
+                0.70,
+                0.12,
                 0.0,
                 rgba(dark, 1.0),
                 Material::STONE,
             );
-        }
-    }
-    if tier >= 5 {
-        for k in 0..3 {
-            let a = k as f32 * 2.094 + 0.5;
-            d.sphere_lit(
-                [p[0] + a.cos() * 0.40, p[1] + a.sin() * 0.40, DECK + 0.16],
-                0.13,
-                rgba(col, 1.0),
-                0.9,
-            );
-        }
-    }
-}
-
-// ---------------------------------------------------------------- the eight
-
-/// Timber frame carrying a wide bow limb. The crossbar is the silhouette.
-fn ballista(d: &mut DrawList, tw: &Tower, col: [f32; 3], grow: f32) {
-    let p = tw.pos;
-    let yaw = tw.angle;
-    let wood = mix([0.30, 0.21, 0.13], col, 0.22);
-    let t = tw.tier as f32;
-
-    let h = (0.36 + 0.05 * t) * grow;
-    for r in [-0.19f32, 0.19] {
-        let q = local(p, yaw, 0.0, r);
-        d.cylinder([q[0], q[1], DECK + h * 0.5], 0.13, h, 0.0, rgba(wood, 1.0), Material::WOOD);
-    }
-    let top = DECK + h;
-    let a = local(p, yaw, 0.0, -0.19);
-    let b = local(p, yaw, 0.0, 0.19);
-    d.link(Shape::Cylinder, [a[0], a[1], top], [b[0], b[1], top], 0.11, rgba(wood, 1.0), Material::WOOD, 0.0);
-
-    // The bow: two swept limbs from a central hub, with a string across them.
-    let limb = (if tw.fork == Some(0) { 1.35 } else { 1.05 }) + 0.04 * t;
-    let recoil = tw.flash * 0.10;
-    let bz = top + 0.14;
-    let hub = local(p, yaw, 0.0, 0.0);
-    for s in [-1.0f32, 1.0] {
-        let tip = local(p, yaw, -0.16, s * limb * 0.5);
-        d.link(
-            Shape::Capsule,
-            [hub[0], hub[1], bz],
-            [tip[0], tip[1], bz],
-            0.13,
-            rgba(wood, 1.0),
-            Material::WOOD,
-            0.0,
-        );
-        d.sphere([tip[0], tip[1], bz], 0.14, rgba(mix(wood, col, 0.55), 1.0), Material::METAL);
-    }
-    let l = local(p, yaw, -0.16, -limb * 0.5);
-    let r = local(p, yaw, -0.16, limb * 0.5);
-    d.link(
-        Shape::Cylinder,
-        [l[0], l[1], bz],
-        [r[0], r[1], bz],
-        0.022,
-        rgba([0.75, 0.72, 0.62], 1.0),
-        Material::WOOD,
-        0.0,
-    );
-
-    // Bolts: a shaft with a real conical head.
-    let n = if tw.fork == Some(1) { 3 } else { 1 };
-    for i in 0..n {
-        let off = (i as f32 - (n as f32 - 1.0) * 0.5) * 0.17;
-        let back = local(p, yaw, -0.10 - recoil, off);
-        let fwd = local(p, yaw, 0.34 - recoil, off);
-        d.link(
-            Shape::Cylinder,
-            [back[0], back[1], bz + 0.07],
-            [fwd[0], fwd[1], bz + 0.07],
-            0.055,
-            rgba([0.42, 0.34, 0.24], 1.0),
-            Material::WOOD,
-            0.0,
-        );
-        d.shape(
-            Shape::Cone,
-            [fwd[0], fwd[1], bz + 0.07],
-            [0.13, 0.13, 0.22],
-            yaw,
-            std::f32::consts::FRAC_PI_2,
-            rgba(col, 1.0),
-            Material::METAL,
-            0.35,
-        );
-    }
-    if tw.fork == Some(0) {
-        let q = local(p, yaw, -0.20, 0.0);
-        d.cylinder([q[0], q[1], bz + 0.24], 0.09, 0.22, 0.0, rgba(mix(wood, col, 0.5), 1.0), Material::METAL);
-        d.sphere_lit([q[0], q[1], bz + 0.36], 0.10, rgba(col, 1.0), 1.0);
-    }
-    if tw.flash > 0.0 {
-        let m = local(p, yaw, 0.6, 0.0);
-        d.glow([m[0], m[1], bz + 0.07], 0.44 * tw.flash, 1.6, boost(rgba(col, tw.flash), 2.2));
-    }
-}
-
-/// Round barrel between two wheels on a low carriage. Reads as artillery.
-fn cannon(d: &mut DrawList, tw: &Tower, col: [f32; 3], grow: f32) {
-    let p = tw.pos;
-    let yaw = tw.angle;
-    let iron = mix([0.19, 0.20, 0.23], col, 0.16);
-    let t = tw.tier as f32;
-
-    let h = (0.22 + 0.025 * t) * grow;
-    d.cube_mat(
-        [p[0], p[1], DECK + h * 0.5],
-        [0.62, 0.5, h],
-        yaw,
-        rgba([0.26, 0.19, 0.13], 1.0),
-        Material::WOOD,
-    );
-    let top = DECK + h;
-
-    // Wheels: cylinders lying on their sides, with iron hubs.
-    for s in [-1.0f32, 1.0] {
-        let q = local(p, yaw, -0.04, s * 0.34);
-        d.shape(
-            Shape::Cylinder,
-            [q[0], q[1], DECK + 0.20],
-            [0.40, 0.40, 0.10],
-            yaw,
-            std::f32::consts::FRAC_PI_2,
-            rgba([0.24, 0.18, 0.12], 1.0),
-            Material::WOOD,
-            0.0,
-        );
-        d.shape(
-            Shape::Cylinder,
-            [q[0], q[1], DECK + 0.20],
-            [0.15, 0.15, 0.16],
-            yaw,
-            std::f32::consts::FRAC_PI_2,
-            rgba(iron, 1.0),
-            Material::METAL,
-            0.0,
-        );
-    }
-
-    let recoil = tw.flash * 0.16;
-    let len = (if tw.fork == Some(0) { 0.98 } else { 0.58 }) + 0.03 * t;
-    let girth = if tw.fork == Some(1) { 0.34 } else { 0.26 };
-    let pitch = if tw.fork == Some(0) { 0.44 } else { 0.16 };
-    let base = local(p, yaw, -0.14 - recoil, 0.0);
-    let tip = local(p, yaw, len - recoil, 0.0);
-    d.link(
-        Shape::Cylinder,
-        [base[0], base[1], top + 0.12],
-        [tip[0], tip[1], top + 0.12 + len * pitch],
-        girth,
-        rgba(iron, 1.0),
-        Material::DARK_METAL,
-        0.0,
-    );
-    d.sphere([base[0], base[1], top + 0.12], girth * 1.25, rgba(iron, 1.0), Material::DARK_METAL);
-    d.shape(
-        Shape::Cylinder,
-        [tip[0], tip[1], top + 0.12 + len * pitch],
-        [girth * 1.3, girth * 1.3, 0.10],
-        yaw,
-        pitch.atan() + std::f32::consts::FRAC_PI_2,
-        rgba(col, 1.0),
-        Material::METAL,
-        0.35 + tw.flash * 0.5,
-    );
-    if tw.fork == Some(1) {
-        for s in [-1.0f32, 1.0] {
-            let q = local(p, yaw, len * 0.72 - recoil, s * 0.17);
-            d.link(
-                Shape::Cylinder,
-                [q[0], q[1], top + 0.12],
-                [q[0] + yaw.cos() * 0.26, q[1] + yaw.sin() * 0.26, top + 0.16],
-                0.10,
-                rgba(iron, 1.0),
-                Material::DARK_METAL,
+            d.cylinder(
+                [p[0], p[1], DECK - 0.015],
+                0.54,
+                0.03,
                 0.0,
+                rgba(b.a, 0.75),
+                Material::WATER,
             );
         }
+        // Three rough megaliths carrying the weight.
+        Element::Earth => {
+            for k in 0..3 {
+                let a = k as f32 * 2.094 + 0.6;
+                d.prism(
+                    [p[0] + a.cos() * 0.30, p[1] + a.sin() * 0.30, DECK - 0.05],
+                    0.30,
+                    0.22,
+                    a,
+                    rgba(mix(theme::STONE, b.a, 0.30), 1.0),
+                    Material::STONE,
+                );
+            }
+        }
+        // Fluted columns, pale and even.
+        Element::Light => {
+            for k in 0..6 {
+                let a = k as f32 * 1.047;
+                d.cylinder(
+                    [p[0] + a.cos() * 0.33, p[1] + a.sin() * 0.33, DECK - 0.03],
+                    0.11,
+                    0.24,
+                    0.0,
+                    rgba(mix([0.72, 0.70, 0.64], b.a, 0.30), 1.0),
+                    Material::STONE,
+                );
+            }
+        }
+        // A collar of thorns leaning outward.
+        Element::Dark => {
+            for k in 0..8 {
+                let a = k as f32 * 0.785;
+                d.cone(
+                    [p[0] + a.cos() * 0.32, p[1] + a.sin() * 0.32, DECK - 0.06],
+                    0.13,
+                    0.22,
+                    0.0,
+                    rgba(mix([0.10, 0.09, 0.14], b.a, 0.40), 1.0),
+                    Material::DARK_METAL,
+                );
+            }
+        }
     }
-    if tw.flash > 0.0 {
-        d.glow(
-            [tip[0], tip[1], top + 0.16 + len * pitch],
-            0.55 * tw.flash,
-            1.5,
-            boost(rgba(col, tw.flash), 2.4),
-        );
-    }
-}
-
-/// A cluster of leaning crystal shards growing out of a frozen base.
-fn frost(d: &mut DrawList, tw: &Tower, col: [f32; 3], grow: f32, now: f32) {
-    let p = tw.pos;
-    let ice = mix(col, [1.0, 1.0, 1.0], 0.18);
-    let t = tw.tier as f32;
-    let n = 3 + (tw.tier.min(6) / 2) as usize;
 
     d.cylinder(
-        [p[0], p[1], DECK + 0.05],
-        0.70,
+        [p[0], p[1], DECK - 0.02],
+        0.62,
         0.10,
         0.0,
-        rgba(mix(ice, [0.08, 0.10, 0.16], 0.62), 1.0),
-        Material::GEM,
+        rgba(dark, 1.0),
+        Material::STONE,
     );
 
-    for i in 0..n {
-        let a = i as f32 * 2.399 + 0.4;
-        let r = if i == 0 { 0.0 } else { 0.17 + 0.05 * (i % 3) as f32 };
-        let q = [p[0] + a.cos() * r, p[1] + a.sin() * r];
-        let h = (if i == 0 { 0.70 } else { 0.34 + 0.12 * ((i * 7) % 4) as f32 })
-            * (0.8 + 0.06 * t)
-            * grow;
-        let w = 0.24 - 0.02 * i as f32;
-        let lean = if i == 0 { 0.0 } else { 0.20 + 0.05 * (i % 3) as f32 };
-        let sway = (now * 0.8 + i as f32).sin() * 0.02;
-        d.shape(
-            Shape::Cone,
-            [q[0], q[1], DECK + 0.10 + h * 0.5],
-            [w, w, h],
-            a + sway,
-            lean,
-            rgba(ice, 0.95),
-            Material::GEM,
-            0.12,
-        );
-        d.sphere_lit(
-            [
-                q[0] + a.cos() * lean * h * 0.5,
-                q[1] + a.sin() * lean * h * 0.5,
-                DECK + 0.10 + h,
-            ],
-            w * 0.5,
-            rgba(col, 1.0),
-            0.8 + tw.flash * 0.2,
-        );
-    }
-
-    match tw.fork {
-        Some(0) => d.glow([p[0], p[1], DECK + 0.3], 1.0, 2.2, rgba(col, 0.30 + tw.flash * 0.3)),
-        Some(1) => d.ground_ring(p, 0.66, 0.07, rgba(col, 0.55), 20),
-        _ => d.glow([p[0], p[1], DECK + 0.4], 0.72, 2.4, rgba(col, 0.18 + tw.flash * 0.35)),
-    }
-}
-
-/// An iron brazier on a turned pedestal, with fire licking out of the bowl.
-fn pyre(d: &mut DrawList, tw: &Tower, col: [f32; 3], grow: f32, now: f32) {
-    let p = tw.pos;
-    let iron = rgba([0.16, 0.14, 0.15], 1.0);
-    let t = tw.tier as f32;
-
-    let h = (0.28 + 0.04 * t) * grow;
-    d.cylinder([p[0], p[1], DECK + h * 0.5], 0.24, h, 0.0, iron, Material::DARK_METAL);
-    let top = DECK + h;
-    // An inverted cone makes a vessel; a rim finishes it.
-    let bowl = 0.62 + 0.02 * t;
-    d.shape(
-        Shape::Cone,
-        [p[0], p[1], top + 0.13],
-        [bowl, bowl, 0.30],
-        0.0,
-        std::f32::consts::PI,
-        iron,
-        Material::DARK_METAL,
-        0.0,
-    );
-    d.cylinder([p[0], p[1], top + 0.27], bowl, 0.07, 0.0, iron, Material::METAL);
-    d.cylinder([p[0], p[1], top + 0.25], bowl * 0.82, 0.05, 0.0, rgba(col, 1.0), Material::GEM);
-
-    let flames = if tw.fork == Some(0) { 5 } else { 3 };
-    for i in 0..flames {
-        let a = i as f32 * 2.1;
-        let r = 0.11 + 0.05 * (i % 2) as f32;
-        let wob = (now * 6.0 + i as f32 * 1.7).sin();
-        let fh = 0.24 + 0.12 * (wob * 0.5 + 0.5) + 0.02 * t;
-        d.shape(
-            Shape::Cone,
-            [p[0] + a.cos() * r, p[1] + a.sin() * r, top + 0.28 + fh * 0.5],
-            [0.17, 0.17, fh],
-            a,
-            wob * 0.12,
-            rgba(mix(col, [1.0, 0.94, 0.55], 0.35), 1.0),
-            Material::GEM,
-            1.0,
-        );
-    }
-    d.glow([p[0], p[1], top + 0.5], 1.0 + tw.flash * 0.3, 1.9, rgba(col, 0.42));
-    if tw.fork == Some(1) && tw.ramp > 0.0 {
-        d.glow([p[0], p[1], top + 0.45], 0.85 + tw.ramp * 0.5, 2.0, rgba([1.0, 0.85, 0.4], 0.35));
-    }
-}
-
-/// A coil: stacked ring plates up a column, with a charged orb on top.
-fn tesla(d: &mut DrawList, tw: &Tower, col: [f32; 3], grow: f32, now: f32) {
-    let p = tw.pos;
-    let metal = rgba([0.21, 0.23, 0.27], 1.0);
-    let t = tw.tier as f32;
-    let h = (0.64 + 0.07 * t) * grow;
-
-    d.cylinder([p[0], p[1], DECK + h * 0.5], 0.17, h, 0.0, metal, Material::DARK_METAL);
-
-    let rings = 2 + (tw.tier.min(6) / 2) as usize;
-    for i in 0..rings {
-        let f = 1.0 - i as f32 * 0.17;
-        let z = DECK + h * (0.28 + 0.22 * i as f32).min(0.93);
-        let spin = now * (0.5 + 0.2 * i as f32) * if i % 2 == 0 { 1.0 } else { -1.0 };
-        d.cylinder([p[0], p[1], z], 0.60 * f, 0.055, spin, metal, Material::METAL);
-        for k in 0..6 {
-            let a = spin + k as f32 * 1.047;
+    // A dual tower carries three beads of its second element around the deck.
+    if dual {
+        for k in 0..3 {
+            let a = k as f32 * 2.094 + b.yaw;
             d.sphere_lit(
-                [p[0] + a.cos() * 0.30 * f, p[1] + a.sin() * 0.30 * f, z + 0.03],
-                0.09,
-                rgba(col, 1.0),
-                0.7,
+                [p[0] + a.cos() * 0.34, p[1] + a.sin() * 0.34, DECK + 0.07],
+                0.11,
+                rgba(b.b, 1.0),
+                0.8,
             );
         }
     }
+}
 
-    let charge = (1.0 - tw.cooldown.max(0.0) * tw.rate().max(0.1)).clamp(0.0, 1.0);
-    let orb = 0.30 + 0.08 * charge;
-    d.sphere_lit([p[0], p[1], DECK + h + orb * 0.5], orb, rgba(col, 1.0), 0.6 + charge * 0.4);
-    d.glow(
-        [p[0], p[1], DECK + h + orb * 0.5],
-        0.6 + charge * 0.35 + tw.flash * 0.4,
-        2.0,
-        rgba(col, 0.25 + charge * 0.25),
-    );
-    if tw.fork == Some(0) {
-        for s in [-1.0f32, 1.0] {
-            let q = local(p, now * 0.8, 0.0, s * 0.32);
+// ---------------------------------------------------------------- the mast
+
+/// The role, in one shape. This is what the eye actually reads at a distance,
+/// so each delivery gets an outline nothing else uses.
+fn mast(d: &mut DrawList, b: &Build, delivery: Delivery) {
+    let p = b.p;
+    let yaw = b.yaw;
+    let h = b.top;
+    let steel = mix([0.22, 0.23, 0.28], b.a, 0.25);
+    let mid = DECK + h * 0.5;
+
+    match delivery {
+        // A tapered pillar under a yoke that swings to face the target.
+        Delivery::Shot { .. } => {
+            d.cylinder(
+                [p[0], p[1], mid],
+                0.30,
+                h,
+                0.0,
+                rgba(steel, 1.0),
+                Material::STONE,
+            );
+            let recoil = b.flash * 0.09;
+            for s in [-1.0f32, 1.0] {
+                let q = local(p, yaw, -recoil, s * 0.20);
+                let f = local(p, yaw, 0.22 - recoil, s * 0.20);
+                d.link(
+                    Shape::Capsule,
+                    [q[0], q[1], DECK + h - 0.06],
+                    [f[0], f[1], DECK + h - 0.06],
+                    0.09,
+                    rgba(mix(steel, b.b, 0.35), 1.0),
+                    Material::METAL,
+                    0.0,
+                );
+            }
+        }
+        // A narrow spire with a focusing collar: everything about it points up.
+        Delivery::Beam { .. } => {
+            d.cylinder(
+                [p[0], p[1], mid],
+                0.22,
+                h,
+                0.0,
+                rgba(steel, 1.0),
+                Material::DARK_METAL,
+            );
+            for k in 0..3 {
+                let z = DECK + h * (0.35 + 0.22 * k as f32);
+                d.cylinder(
+                    [p[0], p[1], z],
+                    0.36 - 0.05 * k as f32,
+                    0.05,
+                    0.0,
+                    rgba(mix(steel, b.b, 0.5), 1.0),
+                    Material::METAL,
+                );
+            }
+        }
+        // A long barrel on a pivot, laid along the firing line.
+        Delivery::Lance { .. } => {
+            d.cylinder(
+                [p[0], p[1], mid],
+                0.26,
+                h * 0.8,
+                0.0,
+                rgba(steel, 1.0),
+                Material::METAL,
+            );
+            let recoil = b.flash * 0.16;
+            let back = local(p, yaw, -0.30 - recoil, 0.0);
+            let fore = local(p, yaw, 0.52 - recoil, 0.0);
+            let z = DECK + h;
             d.link(
-                Shape::Cylinder,
-                [q[0], q[1], DECK + h * 0.72],
-                [q[0], q[1], DECK + h * 1.02],
-                0.06,
-                metal,
+                Shape::Capsule,
+                [back[0], back[1], z],
+                [fore[0], fore[1], z],
+                0.15,
+                rgba(mix(steel, b.b, 0.30), 1.0),
                 Material::METAL,
                 0.0,
             );
-            d.sphere_lit([q[0], q[1], DECK + h * 1.02], 0.13, rgba(col, 1.0), 1.0);
         }
-    }
-}
-
-/// A bellied cauldron of venom with spouts out of the front.
-fn venom(d: &mut DrawList, tw: &Tower, col: [f32; 3], grow: f32, now: f32) {
-    let p = tw.pos;
-    let brass = rgba(mix([0.28, 0.24, 0.16], col, 0.16), 1.0);
-    let t = tw.tier as f32;
-
-    let h = (0.44 + 0.035 * t) * grow;
-    d.shape(
-        Shape::Sphere,
-        [p[0], p[1], DECK + h * 0.55],
-        [0.76, 0.76, h * 1.25],
-        0.0,
-        0.0,
-        brass,
-        Material::METAL,
-        0.0,
-    );
-    let top = DECK + h * 1.05;
-    d.cylinder([p[0], p[1], top], 0.62, 0.08, 0.0, brass, Material::METAL);
-    d.cylinder([p[0], p[1], top + 0.03], 0.54, 0.04, 0.0, rgba(col, 1.0), Material::WATER);
-
-    for i in 0..3 {
-        let ph = (now * (0.8 + 0.2 * i as f32) + i as f32 * 2.0).rem_euclid(1.0);
-        let a = i as f32 * 2.3;
-        let s = 0.16 * (1.0 - ph);
-        if s > 0.02 {
-            d.sphere_lit(
-                [p[0] + a.cos() * 0.16, p[1] + a.sin() * 0.16, top + 0.04 + ph * 0.22],
-                s,
-                rgba(mix(col, [1.0, 1.0, 1.0], 0.3), 1.0),
-                0.9,
-            );
+        // A lattice pylon with cross-arms - it looks like it conducts.
+        Delivery::Chain { .. } => {
+            for s in [-1.0f32, 1.0] {
+                for f in [-1.0f32, 1.0] {
+                    let foot = local(p, yaw, f * 0.20, s * 0.20);
+                    d.link(
+                        Shape::Capsule,
+                        [foot[0], foot[1], DECK],
+                        [p[0], p[1], DECK + h],
+                        0.055,
+                        rgba(steel, 1.0),
+                        Material::DARK_METAL,
+                        0.0,
+                    );
+                }
+            }
+            for k in 0..2 {
+                let z = DECK + h * (0.42 + 0.30 * k as f32);
+                let w = 0.30 - 0.09 * k as f32;
+                let l = local(p, yaw, 0.0, -w);
+                let r = local(p, yaw, 0.0, w);
+                d.link(
+                    Shape::Cylinder,
+                    [l[0], l[1], z],
+                    [r[0], r[1], z],
+                    0.04,
+                    rgba(mix(steel, b.b, 0.4), 1.0),
+                    Material::METAL,
+                    0.0,
+                );
+            }
         }
-    }
-
-    let yaw = tw.angle;
-    let n = if tw.fork == Some(0) { 3 } else { 2 };
-    for i in 0..n {
-        let off = (i as f32 - (n as f32 - 1.0) * 0.5) * 0.22;
-        let a = local(p, yaw, 0.20, off);
-        let b = local(p, yaw, 0.58, off * 1.35);
-        d.link(
-            Shape::Cylinder,
-            [a[0], a[1], top - 0.04],
-            [b[0], b[1], top + 0.16],
-            0.10,
-            brass,
-            Material::METAL,
-            0.0,
-        );
-        d.sphere_lit([b[0], b[1], top + 0.16], 0.11, rgba(col, 1.0), 0.9);
-    }
-    d.glow([p[0], p[1], top + 0.12], 0.72, 2.2, rgba(col, 0.22 + tw.flash * 0.3));
-}
-
-/// A bare tapered obelisk with a ring of stones orbiting it. Never shoots.
-fn beacon(d: &mut DrawList, tw: &Tower, col: [f32; 3], grow: f32, now: f32) {
-    let p = tw.pos;
-    let stone = rgba(mix(theme::STONE, col, 0.22), 1.0);
-    let t = tw.tier as f32;
-    let h = (1.00 + 0.10 * t) * grow;
-
-    d.shape(
-        Shape::Cone,
-        [p[0], p[1], DECK + h * 0.5],
-        [0.44, 0.44, h * 1.35],
-        0.0,
-        0.0,
-        stone,
-        Material::STONE,
-        0.0,
-    );
-    let z = DECK + h;
-    d.shape(
-        Shape::Prism,
-        [p[0], p[1], z + 0.16],
-        [0.30, 0.30, 0.34],
-        now * 0.9,
-        0.0,
-        rgba(col, 1.0),
-        Material::GEM,
-        1.0,
-    );
-
-    let orbit = 0.46 + 0.02 * t;
-    for i in 0..4 {
-        let a = now * 1.1 + i as f32 * std::f32::consts::FRAC_PI_2;
-        let bob = (now * 1.6 + i as f32).sin() * 0.06;
-        d.shape(
-            Shape::Prism,
-            [p[0] + a.cos() * orbit, p[1] + a.sin() * orbit, z * 0.70 + bob],
-            [0.17, 0.17, 0.14],
-            a,
-            0.0,
-            rgba(col, 1.0),
-            Material::GEM,
-            0.9,
-        );
-    }
-    d.glow([p[0], p[1], z + 0.18], 0.9, 2.0, rgba(col, 0.35));
-}
-
-/// A round vault with a conical roof and coin stacks around the base.
-fn mint(d: &mut DrawList, tw: &Tower, col: [f32; 3], grow: f32, now: f32) {
-    let p = tw.pos;
-    let wall = rgba([0.26, 0.21, 0.15], 1.0);
-    let t = tw.tier as f32;
-
-    let h = (0.40 + 0.03 * t) * grow;
-    d.cylinder([p[0], p[1], DECK + h * 0.5], 0.66, h, 0.0, wall, Material::WOOD);
-    let top = DECK + h;
-    d.cylinder(
-        [p[0], p[1], top + 0.04],
-        0.74,
-        0.08,
-        0.0,
-        rgba(mix([0.26, 0.21, 0.15], col, 0.35), 1.0),
-        Material::METAL,
-    );
-    d.cone(
-        [p[0], p[1], top + 0.28],
-        0.78,
-        0.40,
-        0.0,
-        rgba(mix([0.22, 0.18, 0.13], col, 0.25), 1.0),
-        Material::WOOD,
-    );
-    d.sphere_lit([p[0], p[1], top + 0.52], 0.16, rgba(col, 1.0), 1.0);
-
-    // Vault door on the near face.
-    d.shape(
-        Shape::Cylinder,
-        [p[0], p[1] - 0.60, DECK + h * 0.55],
-        [0.30, 0.30, 0.10],
-        0.0,
-        std::f32::consts::FRAC_PI_2,
-        rgba(col, 1.0),
-        Material::METAL,
-        0.25,
-    );
-
-    let stacks = 2 + (tw.tier.min(6) / 2) as usize;
-    for i in 0..stacks {
-        let a = i as f32 * 1.9 + 0.6;
-        let c = [p[0] + a.cos() * 0.44, p[1] + a.sin() * 0.44];
-        let n = 2 + (i % 3);
-        for k in 0..n {
+        // A squat wide drum. It aims at nothing, so nothing about it points.
+        Delivery::Nova => {
             d.cylinder(
-                [c[0], c[1], DECK + 0.04 + k as f32 * 0.055],
+                [p[0], p[1], DECK + h * 0.42],
+                0.62,
+                h * 0.84,
+                0.0,
+                rgba(steel, 1.0),
+                Material::METAL,
+            );
+            // Pressure beads that pulse outward as it charges. Beads rather
+            // than a solid ring: a ring is forty flat segments, and this tower
+            // already has very little else in it.
+            let phase = (b.now * 1.4).fract();
+            let rad = 0.5 + phase * 1.6;
+            for k in 0..12 {
+                let a = k as f32 * std::f32::consts::FRAC_PI_6 + b.now * 0.3;
+                d.sphere_lit(
+                    [p[0] + a.cos() * rad, p[1] + a.sin() * rad, DECK + 0.06],
+                    0.09,
+                    rgba(b.b, (1.0 - phase) * 0.8),
+                    0.9,
+                );
+            }
+            // Vents around the drum, so the silhouette reads as pressure.
+            for k in 0..6 {
+                let a = k as f32 * 1.047;
+                d.cone(
+                    [
+                        p[0] + a.cos() * 0.32,
+                        p[1] + a.sin() * 0.32,
+                        DECK + h * 0.86,
+                    ],
+                    0.14,
+                    0.16,
+                    a,
+                    rgba(mix(steel, b.b, 0.5), 1.0),
+                    Material::METAL,
+                );
+            }
+        }
+        // A low tripod holding a cauldron over the road.
+        Delivery::Zone { .. } => {
+            for k in 0..3 {
+                let a = k as f32 * 2.094 + yaw;
+                let foot = [p[0] + a.cos() * 0.34, p[1] + a.sin() * 0.34];
+                d.link(
+                    Shape::Capsule,
+                    [foot[0], foot[1], DECK],
+                    [p[0], p[1], DECK + h * 0.9],
+                    0.07,
+                    rgba(steel, 1.0),
+                    Material::DARK_METAL,
+                    0.0,
+                );
+            }
+            d.cylinder(
+                [p[0], p[1], DECK + h],
+                0.56,
                 0.20,
-                0.05,
-                a,
-                rgba(col, 1.0),
+                0.0,
+                rgba(mix(steel, b.b, 0.25), 1.0),
                 Material::METAL,
             );
         }
+        // A bare obelisk. Nothing on it moves, because it never fires.
+        Delivery::Aura => {
+            d.prism(
+                [p[0], p[1], mid],
+                0.40,
+                h,
+                b.now * 0.25,
+                rgba(mix(steel, b.a, 0.35), 1.0),
+                Material::STONE,
+            );
+        }
     }
-    if tw.fork == Some(0) {
-        let bob = (now * 2.0).sin() * 0.06;
-        d.shape(
-            Shape::Cylinder,
-            [p[0], p[1], top + 0.78 + bob],
-            [0.26, 0.26, 0.05],
-            now * 2.2,
-            0.24,
-            rgba(col, 1.0),
-            Material::METAL,
-            0.8,
+}
+
+// ---------------------------------------------------------------- the crown
+
+/// The emitter, in the secondary element's manner. This is the part that moves
+/// and the part that glows, so it is where the tower's element is legible even
+/// in a crowd.
+fn crown(d: &mut DrawList, b: &Build, e: Element, delivery: Delivery) {
+    let c = b.head();
+    let col = b.b;
+    let hot = boost3(col, 1.6);
+    let pulse = 0.85 + 0.15 * (b.now * 2.2 + c[0]).sin();
+    // Attuned towers carry a visibly bigger emitter; that is the whole point of
+    // the milestone being at a level rather than at a purchase.
+    let k = if b.attuned() { 1.28 } else { 1.0 };
+
+    match e {
+        // A bloom of leaves around a seed pod.
+        Element::Nature => {
+            d.sphere_lit(
+                [c[0], c[1], c[2] + 0.10],
+                0.26 * k,
+                rgba(hot, 1.0),
+                0.55 * pulse,
+            );
+            for i in 0..5 {
+                let a = i as f32 * 1.257 + b.now * 0.4;
+                let tip = [
+                    c[0] + a.cos() * 0.30 * k,
+                    c[1] + a.sin() * 0.30 * k,
+                    c[2] + 0.06,
+                ];
+                d.link(
+                    Shape::Capsule,
+                    [c[0], c[1], c[2] + 0.08],
+                    tip,
+                    0.055,
+                    rgba(mix(col, [0.20, 0.36, 0.18], 0.35), 1.0),
+                    Material::FOLIAGE,
+                    0.0,
+                );
+            }
+        }
+        // A brazier bowl with a flame standing in it.
+        Element::Fire => {
+            d.cylinder(
+                [c[0], c[1], c[2] + 0.04],
+                0.34 * k,
+                0.12,
+                0.0,
+                rgba(mix([0.16, 0.13, 0.12], col, 0.35), 1.0),
+                Material::DARK_METAL,
+            );
+            for i in 0..3 {
+                let t = b.now * 3.0 + i as f32 * 2.1;
+                let lean = 0.05 * t.sin();
+                d.cone(
+                    [c[0] + lean, c[1] + 0.04 * (t * 0.7).cos(), c[2] + 0.16],
+                    0.22 * k,
+                    (0.26 + 0.06 * (t * 1.3).sin()) * k,
+                    0.0,
+                    rgba(hot, 0.9),
+                    Material::STONE,
+                );
+            }
+            d.glow(
+                [c[0], c[1], c[2] + 0.22],
+                0.85 * k,
+                2.4,
+                rgba(hot, 0.30 * pulse),
+            );
+        }
+        // Droplets orbiting a still core.
+        Element::Water => {
+            d.sphere_lit(
+                [c[0], c[1], c[2] + 0.10],
+                0.24 * k,
+                rgba(hot, 0.92),
+                0.6 * pulse,
+            );
+            for i in 0..3 {
+                let a = b.now * 1.6 + i as f32 * 2.094;
+                d.sphere_lit(
+                    [
+                        c[0] + a.cos() * 0.28 * k,
+                        c[1] + a.sin() * 0.28 * k,
+                        c[2] + 0.12 + 0.05 * (a * 2.0).sin(),
+                    ],
+                    0.11 * k,
+                    rgba(col, 0.95),
+                    0.7,
+                );
+            }
+        }
+        // An anvil-headed weight over a hexagonal collar. Heavy, blunt, unlit.
+        Element::Earth => {
+            d.cube_mat(
+                [c[0], c[1], c[2] + 0.12],
+                [0.46 * k, 0.34 * k, 0.22 * k],
+                b.yaw,
+                rgba(mix(theme::STONE, col, 0.45), 1.0),
+                Material::STONE,
+            );
+            d.prism(
+                [c[0], c[1], c[2] + 0.27 * k],
+                0.30 * k,
+                0.12,
+                b.yaw,
+                rgba(col, 1.0),
+                Material::METAL,
+            );
+            for s in [-1.0f32, 1.0] {
+                let q = local([c[0], c[1]], b.yaw, 0.0, s * 0.26 * k);
+                d.cone(
+                    [q[0], q[1], c[2] + 0.08],
+                    0.16 * k,
+                    0.18 * k,
+                    b.yaw,
+                    rgba(mix(theme::STONE, col, 0.6), 1.0),
+                    Material::STONE,
+                );
+            }
+        }
+        // A faceted gem that throws light down onto the deck.
+        Element::Light => {
+            d.prism(
+                [c[0], c[1], c[2] + 0.16],
+                0.30 * k,
+                0.30 * k,
+                b.now * 0.9,
+                rgba(hot, 0.95),
+                Material::GEM,
+            );
+            d.glow(
+                [c[0], c[1], c[2] + 0.16],
+                0.95 * k,
+                2.6,
+                rgba(hot, 0.26 * pulse),
+            );
+        }
+        // A void sphere inside a slowly turning ring.
+        Element::Dark => {
+            d.sphere(
+                [c[0], c[1], c[2] + 0.14],
+                0.26 * k,
+                rgba([0.04, 0.03, 0.07], 1.0),
+                Material::GEM,
+            );
+            for i in 0..10 {
+                let a = i as f32 * 0.628 + b.now * 0.7;
+                d.sphere_lit(
+                    [
+                        c[0] + a.cos() * 0.28 * k,
+                        c[1] + a.sin() * 0.28 * k,
+                        c[2] + 0.14,
+                    ],
+                    0.065,
+                    rgba(hot, 1.0),
+                    0.9,
+                );
+            }
+            d.glow(
+                [c[0], c[1], c[2] + 0.14],
+                0.80 * k,
+                2.2,
+                rgba(col, 0.22 * pulse),
+            );
+        }
+    }
+
+    // A zone tower spills its element over the lip of the cauldron, so it is
+    // obvious the thing pours onto the road rather than shooting at anything.
+    if let Delivery::Zone { .. } = delivery {
+        for i in 0..4 {
+            let a = i as f32 * 1.571 + b.now * 0.5;
+            d.sphere_lit(
+                [
+                    c[0] + a.cos() * 0.26,
+                    c[1] + a.sin() * 0.26,
+                    c[2] - 0.10 - 0.06 * ((b.now * 2.0 + i as f32).sin() * 0.5 + 0.5),
+                ],
+                0.09,
+                rgba(hot, 0.9),
+                0.8,
+            );
+        }
+    }
+}
+
+/// The ascendant milestone: a ring of shards orbiting the crown, in the primary
+/// element's colour so the two halves of a dual tower both show at level seven.
+fn halo(d: &mut DrawList, b: &Build) {
+    let c = b.head();
+    for i in 0..6 {
+        let a = i as f32 * 1.047 + b.now * 0.8;
+        let z = c[2] + 0.34 + 0.05 * (a * 2.0 + b.now).sin();
+        d.prism(
+            [c[0] + a.cos() * 0.42, c[1] + a.sin() * 0.42, z],
+            0.10,
+            0.16,
+            a,
+            rgba(boost3(b.a, 1.4), 0.95),
+            Material::GEM,
         );
     }
-    d.glow([p[0], p[1], top + 0.3], 0.64, 2.2, rgba(col, 0.22));
+    d.glow([c[0], c[1], c[2] + 0.34], 1.1, 2.0, rgba(b.a, 0.18));
+}
+
+/// Brightens a bare rgb triple. [`boost`] works on an rgba Color.
+fn boost3(c: [f32; 3], k: f32) -> [f32; 3] {
+    let out: Color = boost(rgba(c, 1.0), k);
+    [out[0], out[1], out[2]]
 }
 
 // ---------------------------------------------------------------- ghost
 
-/// Translucent preview of what is about to be built.
+/// The translucent preview shown while a tower is held over a pad.
 pub fn draw_ghost(d: &mut DrawList, def_i: usize, tier: u32, p: [f32; 2], now: f32) {
-    let def = &TOWERS[def_i];
-    let col = tower_color(def);
-
-    d.cylinder([p[0], p[1], PLOT_TOP + 0.08], 0.78, 0.14, 0.0, rgba(col, 0.28), Material::STONE);
-    let (h, shape) = match def.id {
-        "beacon" => (1.10, Shape::Cone),
-        "tesla" => (0.90, Shape::Cylinder),
-        "ballista" => (0.66, Shape::Box),
-        "cannon" => (0.40, Shape::Cylinder),
-        "mint" => (0.55, Shape::Cylinder),
-        "venom" => (0.52, Shape::Sphere),
-        "pyre" => (0.60, Shape::Cylinder),
-        _ => (0.62, Shape::Cylinder),
+    let Some(def) = TOWERS.get(def_i) else { return };
+    let (ea, eb) = (def.elem.0, def.elem.1.unwrap_or(def.elem.0));
+    let base_h = if matches!(def.delivery, Delivery::Aura) {
+        0.62
+    } else {
+        0.34
     };
-    d.shape(
-        shape,
-        [p[0], p[1], DECK + h * 0.5],
-        [0.56, 0.56, h],
-        0.0,
-        0.0,
-        rgba(col, 0.40),
-        Material::GEM,
-        0.25,
-    );
-    d.sphere_lit([p[0], p[1], DECK + h + 0.14], 0.28, rgba(col, 0.55), 0.9);
-    d.glow([p[0], p[1], DECK + h * 0.6], 1.0, 2.0, rgba(col, 0.22));
-    let _ = (tier, now);
+    let b = Build {
+        p,
+        yaw: now * 0.6,
+        tier: tier.max(1),
+        grow: 1.0,
+        now,
+        flash: 0.0,
+        a: ea.color(),
+        b: eb.color(),
+        top: base_h + 0.055 * tier.max(1) as f32,
+    };
+    mast(d, &b, def.delivery);
+    crown(d, &b, eb, def.delivery);
 }

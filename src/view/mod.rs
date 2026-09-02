@@ -141,7 +141,14 @@ fn terrain(g: &Game, d: &mut DrawList, tall: &mut DrawList) {
                 // a few tufts so the turf is not a flat plane of one colour.
                 let top = 0.09 + (h * 3.0).floor() * 0.024;
                 let base = mix(theme::GRASS_A, theme::GRASS_B, h);
-                d.slab_mat(p, [1.0, 1.0], top, top + 0.45, rgba(base, 1.0), Material::EARTH);
+                d.slab_mat(
+                    p,
+                    [1.0, 1.0],
+                    top,
+                    top + 0.45,
+                    rgba(base, 1.0),
+                    Material::EARTH,
+                );
                 if h > 0.80 {
                     let j = hash2(tx * 7 + 3, ty * 11 + 5);
                     tall.shape(
@@ -171,7 +178,13 @@ fn terrain(g: &Game, d: &mut DrawList, tall: &mut DrawList) {
         (w + 0.4, h * 0.5, 0.8, h + 1.6),
     ] {
         tall.cube_mat([cx, cy, 0.20], [sx, sy, 0.56], 0.0, wall, Material::STONE);
-        tall.cube_mat([cx, cy, 0.50], [sx * 0.99, sy * 0.99, 0.10], 0.0, cap, Material::STONE);
+        tall.cube_mat(
+            [cx, cy, 0.50],
+            [sx * 0.99, sy * 0.99, 0.10],
+            0.0,
+            cap,
+            Material::STONE,
+        );
         // Coping: a capsule laid along the wall gives it a rounded top edge.
         let along = sx > sy;
         let (ax, ay, bx, by) = if along {
@@ -191,10 +204,29 @@ fn terrain(g: &Game, d: &mut DrawList, tall: &mut DrawList) {
     }
     // Corner towers: a stone drum with a conical roof, so the board has corners
     // you can actually see rather than four more cubes.
-    for (cx, cy) in [(-0.4, -0.4), (w + 0.4, -0.4), (-0.4, h + 0.4), (w + 0.4, h + 0.4)] {
-        tall.cylinder([cx, cy, 0.45], 1.10, 1.10, 0.0, rgba(theme::STONE_DARK, 1.0), Material::STONE);
+    for (cx, cy) in [
+        (-0.4, -0.4),
+        (w + 0.4, -0.4),
+        (-0.4, h + 0.4),
+        (w + 0.4, h + 0.4),
+    ] {
+        tall.cylinder(
+            [cx, cy, 0.45],
+            1.10,
+            1.10,
+            0.0,
+            rgba(theme::STONE_DARK, 1.0),
+            Material::STONE,
+        );
         tall.cylinder([cx, cy, 1.03], 1.24, 0.14, 0.0, cap, Material::STONE);
-        tall.cone([cx, cy, 1.38], 1.30, 0.62, 0.0, rgba(theme::STONE_DARK, 1.0), Material::STONE);
+        tall.cone(
+            [cx, cy, 1.38],
+            1.30,
+            0.62,
+            0.0,
+            rgba(theme::STONE_DARK, 1.0),
+            Material::STONE,
+        );
         tall.sphere([cx, cy, 1.74], 0.24, cap, Material::METAL);
     }
     let _ = theme::GRASS_EDGE;
@@ -243,7 +275,10 @@ fn road(g: &Game, d: &mut DrawList) {
                 [0.34 + jitter * 0.1, 0.30, 0.20],
                 hd[1].atan2(hd[0]) + jitter,
                 0.0,
-                rgba(mix(theme::ROAD_EDGE, theme::STONE, 0.20 + jitter * 0.3), 1.0),
+                rgba(
+                    mix(theme::ROAD_EDGE, theme::STONE, 0.20 + jitter * 0.3),
+                    1.0,
+                ),
                 Material::STONE,
                 0.0,
             );
@@ -263,7 +298,14 @@ fn gates_static(g: &Game, d: &mut DrawList) {
             let px = p[0] + side[0] * s * (ROAD_HALF + 0.34);
             let py = p[1] + side[1] * s * (ROAD_HALF + 0.34);
             // Stepped plinth, tapered shaft, capital, finial.
-            d.cylinder([px, py, 0.22], 0.92, 0.30, yaw, rgba(theme::STONE_DARK, 1.0), Material::STONE);
+            d.cylinder(
+                [px, py, 0.22],
+                0.92,
+                0.30,
+                yaw,
+                rgba(theme::STONE_DARK, 1.0),
+                Material::STONE,
+            );
             d.shape(
                 Shape::Cone,
                 [px, py, 0.90],
@@ -274,7 +316,14 @@ fn gates_static(g: &Game, d: &mut DrawList) {
                 Material::STONE,
                 0.0,
             );
-            d.cylinder([px, py, 1.42], 0.60, 0.16, yaw, rgba(theme::STONE_DARK, 1.0), Material::STONE);
+            d.cylinder(
+                [px, py, 1.42],
+                0.60,
+                0.16,
+                yaw,
+                rgba(theme::STONE_DARK, 1.0),
+                Material::STONE,
+            );
             d.shape(
                 Shape::Prism,
                 [px, py, 1.62],
@@ -285,7 +334,14 @@ fn gates_static(g: &Game, d: &mut DrawList) {
                 Material::GEM,
                 1.0,
             );
-            d.cone([px, py, 1.86], 0.40, 0.26, yaw, rgba(theme::STONE, 1.0), Material::STONE);
+            d.cone(
+                [px, py, 1.86],
+                0.40,
+                0.26,
+                yaw,
+                rgba(theme::STONE, 1.0),
+                Material::STONE,
+            );
         }
         // Lintel spanning the road, with a runeband cut into its underside.
         let a = [
@@ -352,7 +408,12 @@ fn torches(decor: &Decor, d: &mut DrawList, t: f32) {
             Material::GEM,
             1.0,
         );
-        d.glow(tor.pos, 1.3 * flicker, 2.2, rgba([1.0, 0.58, 0.20], 0.42 * flicker));
+        d.glow(
+            tor.pos,
+            1.3 * flicker,
+            2.2,
+            rgba([1.0, 0.58, 0.20], 0.42 * flicker),
+        );
     }
 }
 
@@ -360,7 +421,12 @@ fn gate_glow(g: &Game, d: &mut DrawList, t: f32) {
     let pulse = 0.55 + 0.45 * (t * 2.0).sin();
     for (dist, col) in [(0.9f32, theme::SPAWN), (g.board.total - 0.9, theme::EXIT)] {
         let p = g.board.sample(dist);
-        d.glow([p[0], p[1], 1.45], 1.5 * pulse.max(0.6), 2.0, rgba(col, 0.45));
+        d.glow(
+            [p[0], p[1], 1.45],
+            1.5 * pulse.max(0.6),
+            2.0,
+            rgba(col, 0.45),
+        );
         d.glow([p[0], p[1], 0.45], 2.0, 2.4, rgba(col, 0.18 * pulse));
     }
 }
@@ -458,7 +524,12 @@ fn plots(g: &Game, d: &mut DrawList, t: f32) {
                 rgba(theme::GHOST_OK, 0.40),
                 1.0,
             );
-            d.glow([s.pos[0], s.pos[1], PLOT_TOP + 0.35], 0.85, 2.2, rgba(theme::GHOST_OK, 0.28));
+            d.glow(
+                [s.pos[0], s.pos[1], PLOT_TOP + 0.35],
+                0.85,
+                2.2,
+                rgba(theme::GHOST_OK, 0.28),
+            );
         }
     }
 }
@@ -485,7 +556,9 @@ fn build_ghost(g: &Game, d: &mut DrawList, t: f32) {
     let (Some((def_i, tier)), Some(slot)) = (g.build_choice, g.hover_slot) else {
         return;
     };
-    let Some(s) = g.board.slots.get(slot) else { return };
+    let Some(s) = g.board.slots.get(slot) else {
+        return;
+    };
     let def = &TOWERS[def_i];
     let ok = s.tower.is_none() && g.can_afford(def.cost_at(tier));
     let p = s.pos;
@@ -493,7 +566,13 @@ fn build_ghost(g: &Game, d: &mut DrawList, t: f32) {
 
     if ok {
         towers::draw_ghost(d, def_i, tier, p, t);
-        d.ground_ring(p, def.stats(tier, None).range, 0.10, rgba(tower_color(def), 0.55), 80);
+        d.ground_ring(
+            p,
+            def.stats(tier).range,
+            0.10,
+            rgba(tower_color(def), 0.55),
+            80,
+        );
     } else {
         for yaw in [0.7f32, -0.7] {
             d.cube_lit(
@@ -507,7 +586,7 @@ fn build_ghost(g: &Game, d: &mut DrawList, t: f32) {
     }
 }
 
-/// Burning road left by a Pyre.
+/// Ground claimed by a zone tower - Magma's fire, Mire's swamp.
 ///
 /// It has to read as *ground you do not want to walk on* from across the board,
 /// because its whole value is positional - so it gets a hard-edged scorch ring,
@@ -551,7 +630,11 @@ fn zones(g: &Game, d: &mut DrawList, t: f32) {
             }
             d.shape(
                 Shape::Cone,
-                [z.pos[0] + a.cos() * rr, z.pos[1] + a.sin() * rr, 0.22 + h * 0.5],
+                [
+                    z.pos[0] + a.cos() * rr,
+                    z.pos[1] + a.sin() * rr,
+                    0.22 + h * 0.5,
+                ],
                 [0.26, 0.26, h],
                 a,
                 wob * 0.16,
@@ -560,7 +643,12 @@ fn zones(g: &Game, d: &mut DrawList, t: f32) {
                 1.0,
             );
         }
-        d.glow([z.pos[0], z.pos[1], 0.45], z.radius * 2.2, 1.9, rgba(col, 0.30 * heat));
+        d.glow(
+            [z.pos[0], z.pos[1], 0.45],
+            z.radius * 2.2,
+            1.9,
+            rgba(col, 0.30 * heat),
+        );
     }
 }
 
@@ -606,7 +694,12 @@ fn shots(g: &Game, d: &mut DrawList) {
                 0.9,
             );
         }
-        d.glow([p.pos[0], p.pos[1], p.z], 0.36, 1.7, boost(rgba(col, 0.9), 1.5));
+        d.glow(
+            [p.pos[0], p.pos[1], p.z],
+            0.36,
+            1.7,
+            boost(rgba(col, 0.9), 1.5),
+        );
     }
 }
 
@@ -623,7 +716,12 @@ fn beams(g: &Game, d: &mut DrawList) {
                 boost(rgba(b.color, a * 0.9), 1.6),
                 40,
             );
-            d.glow([b.from[0], b.from[1], 0.3], r.max(0.1) * 1.2, 2.0, rgba(b.color, a * 0.28));
+            d.glow(
+                [b.from[0], b.from[1], 0.3],
+                r.max(0.1) * 1.2,
+                2.0,
+                rgba(b.color, a * 0.28),
+            );
         } else {
             let w = b.width * (0.5 + a * 0.5);
             d.bar(b.from, b.to, w, boost(rgba(b.color, a), 2.0), 1.0);
@@ -661,7 +759,10 @@ mod tests {
         let list = build_static(&g, &decor);
         let n = list.casters.solid_count() + list.flat.solid_count();
         assert!(n > 500, "board is suspiciously empty: {n} solids");
-        assert!(n <= STATIC_CAP, "static scene overflows: {n} > {STATIC_CAP}");
+        assert!(
+            n <= STATIC_CAP,
+            "static scene overflows: {n} > {STATIC_CAP}"
+        );
     }
 
     /// Every tower must be built from several kinds of primitive, and must not
@@ -678,6 +779,9 @@ mod tests {
                 .iter()
                 .position(|s| s.tower.is_none())
                 .expect("a free pad");
+            // Every tower has to be buildable for this to draw it at all.
+            g.essence = [(MAX_TIER - FREE_TIERS) as u8; 6];
+            g.pending_draft = None;
             // Tiers are 1-based; walk the whole ladder so every level is drawn.
             let tier = (i as u32 % MAX_TIER) + 1;
             g.build_choice = Some((i, tier));
@@ -695,13 +799,20 @@ mod tests {
             );
             let boxes = d.solid[Shape::Box as usize].len();
             let total = d.solid_count();
-            assert!(boxes * 2 <= total, "{} is {boxes}/{total} boxes", TOWERS[i].id);
+            assert!(
+                boxes * 2 <= total,
+                "{} is {boxes}/{total} boxes",
+                TOWERS[i].id
+            );
         }
         g.build_choice = None;
     }
 
     fn dummy(kind: Kind) -> Creep {
         Creep {
+            suppress: 0.0,
+            stun_immune: 0.0,
+            push_left: 0.0,
             uid: 1,
             dist: 6.0,
             lane: 0.0,
@@ -831,10 +942,18 @@ mod budget {
         d.clear();
         draw_scene(&g, &decor, &mut d, 3.0);
         let (an, at) = cost(&d);
-        println!("FRAME    {an:>6} inst  {at:>8} tris  + {} glows", d.glow.len());
+        println!(
+            "FRAME    {an:>6} inst  {at:>8} tris  + {} glows",
+            d.glow.len()
+        );
         println!("TOTAL    {:>6} inst  {:>8} tris", sn + an, st + at);
         for i in 0..SHAPE_COUNT {
-            println!("  shape {i}: {} tris/mesh, {} static, {} dyn", tris[i], stat.solid[i].len(), d.solid[i].len());
+            println!(
+                "  shape {i}: {} tris/mesh, {} static, {} dyn",
+                tris[i],
+                stat.solid[i].len(),
+                d.solid[i].len()
+            );
         }
     }
 

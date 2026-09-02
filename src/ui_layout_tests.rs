@@ -16,18 +16,32 @@ struct Layout {
     central: Rect,
     palette: Rect,
     cards: Vec<Rect>,
+    /// Which tower each laid-out card is for, so a paged palette can be checked
+    /// for covering the whole roster rather than only for fitting on screen.
+    hotkeys: Vec<usize>,
     stats: Vec<Rect>,
     controls_left: f32,
 }
 
 /// Runs one full HUD frame at `size` and reports where everything landed.
 fn lay_out(size: [f32; 2]) -> Layout {
+    lay_out_page(size, 0)
+}
+
+/// Runs one full HUD frame at `size`, showing page `page` of the build palette.
+fn lay_out_page(size: [f32; 2], page: usize) -> Layout {
     let ctx = Context::default();
     ui::install_style(&ctx);
 
     let mut game = Game::new();
+    // The palette only shows what the draft has unlocked, so a fresh game lays
+    // out zero cards. This test is about geometry, not about the draft, so it
+    // unlocks the lot - which is also the worst case for fitting them in.
+    game.essence = [6; 6];
+    game.pending_draft = None;
     let mut ust = UiState::default();
     ust.compact = ui::compact_for(size[0]);
+    ust.palette_page = page;
 
     let mut top = Rect::NOTHING;
     let mut bottom = Rect::NOTHING;
@@ -76,6 +90,7 @@ fn lay_out(size: [f32; 2]) -> Layout {
         central,
         palette: ust.palette_rect,
         cards: ust.card_rects.clone(),
+        hotkeys: ust.hotkeys.clone(),
         stats: ust.stat_rects.clone(),
         controls_left: ust.controls_left,
     }
@@ -113,7 +128,11 @@ fn the_resource_readouts_are_never_pushed_off_screen() {
                 r.right(),
                 l.controls_left
             );
-            assert!(r.width() > 20.0, "at {size:?} readout {i} collapsed to {}", r.width());
+            assert!(
+                r.width() > 20.0,
+                "at {size:?} readout {i} collapsed to {}",
+                r.width()
+            );
         }
         // And they must not overlap each other.
         for w in l.stats.windows(2) {
@@ -230,13 +249,35 @@ fn every_build_card_is_inside_its_panel() {
             !l.cards.is_empty(),
             "{size:?}: no build cards were laid out at all"
         );
+
+        // Twenty-one towers do not fit across a phone at a size worth tapping,
+        // so the palette pages. What must hold is that every tower is reachable
+        // on *some* page - a card that is merely dropped is a tower that cannot
+        // be built at all.
+        let total = crate::game::defs::TOWERS.len();
+        let mut reached: Vec<usize> = Vec::new();
+        for page in 0..total {
+            let l = lay_out_page(size, page);
+            if page > 0 && l.hotkeys.first() == reached.first() {
+                break; // wrapped around
+            }
+            for &i in &l.hotkeys {
+                if !reached.contains(&i) {
+                    reached.push(i);
+                }
+            }
+            if reached.len() == total {
+                break;
+            }
+        }
+        reached.sort_unstable();
         assert_eq!(
-            l.cards.len(),
-            crate::game::defs::TOWERS.len(),
-            "{size:?}: only {} of {} towers fit in the palette",
-            l.cards.len(),
-            crate::game::defs::TOWERS.len()
+            reached.len(),
+            total,
+            "{size:?}: only {} of {total} towers are reachable across every page",
+            reached.len()
         );
+
         for (i, c) in l.cards.iter().enumerate() {
             assert!(
                 l.palette.contains_rect(*c),
@@ -248,8 +289,16 @@ fn every_build_card_is_inside_its_panel() {
                 "{size:?}: card {i} at {c:?} escapes the command bar {:?}",
                 l.bottom
             );
-            assert!(c.height() >= 50.0, "{size:?}: card {i} squashed to {}", c.height());
-            assert!(c.width() >= 44.0, "{size:?}: card {i} too narrow to tap: {}", c.width());
+            assert!(
+                c.height() >= 50.0,
+                "{size:?}: card {i} squashed to {}",
+                c.height()
+            );
+            assert!(
+                c.width() >= 44.0,
+                "{size:?}: card {i} too narrow to tap: {}",
+                c.width()
+            );
         }
         // Cards must not overlap each other.
         for w in l.cards.windows(2) {
@@ -282,8 +331,7 @@ fn every_glyph_the_hud_prints_actually_exists() {
     // what keeps it that way.
     const MONOSPACE: &str = "";
 
-    let mut fonts =
-        epaint::text::Fonts::new(Default::default(), egui::FontDefinitions::default());
+    let mut fonts = epaint::text::Fonts::new(Default::default(), egui::FontDefinitions::default());
     for (text, font) in [
         (PROPORTIONAL, egui::FontId::proportional(12.0)),
         (MONOSPACE, egui::FontId::monospace(12.0)),
