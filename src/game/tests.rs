@@ -52,6 +52,24 @@ fn fill_pads(g: &mut Game, tier: u32) -> u32 {
     built
 }
 
+/// Stops the wave clock and empties the ring, so a test can put exactly what
+/// it wants on the circuit and measure only that.
+///
+/// The clock never stops on its own any more - there is no build phase to
+/// borrow. Without this, half the combat tests were quietly measuring the real
+/// wave arriving behind whatever they had spawned by hand, and one of them
+/// concluded that a ground-only tower had shot down five flyers.
+fn isolate(g: &mut Game) {
+    g.phase = Phase::Combat;
+    g.prep = false;
+    g.pending_draft = None;
+    g.creeps.clear();
+    g.spawn_left = 0;
+    g.escort_left = 0;
+    // Far enough out that no test runs long enough to reach it.
+    g.wave_timer = 1.0e6;
+}
+
 fn run_for(g: &mut Game, seconds: f32) {
     let dt = 1.0 / 60.0;
     for _ in 0..(seconds / dt) as u32 {
@@ -64,26 +82,62 @@ fn run_for(g: &mut Game, seconds: f32) {
 
 // ---------------------------------------------------------------- board
 
+/// The road is a closed circuit, and that is load-bearing: every rule about
+/// leaking, lives and losing follows from there being no exit.
 #[test]
-fn the_road_runs_from_one_side_to_the_other() {
+fn the_road_is_a_closed_circuit_with_no_exit() {
     let b = super::board::Board::new();
-    assert!(b.total > 30.0, "road is only {} tiles long", b.total);
-    let start = b.start();
-    let end = b.end();
-    assert!(start[0] < 0.0, "road should start off the left edge");
-    assert!(end[0] > board::BW, "road should leave the right edge");
+    assert!(b.total > 30.0, "circuit is only {} tiles round", b.total);
 
-    // Sampling is continuous and stays on the polyline.
-    let mut prev = b.sample(0.0);
+    // It closes: the far end of the polyline is the near end of it.
+    let a = b.sample(0.0);
+    let z = b.sample(b.total - 0.001);
+    let seam = ((a[0] - z[0]).powi(2) + (a[1] - z[1]).powi(2)).sqrt();
+    assert!(
+        seam < 0.25,
+        "the circuit does not close: {seam:.2} tiles apart"
+    );
+
+    // And it is entirely on the board, unlike a route that ran off both edges.
     let mut d = 0.0;
     while d < b.total {
         let p = b.sample(d);
-        let step = ((p[0] - prev[0]).powi(2) + (p[1] - prev[1]).powi(2)).sqrt();
-        assert!(step < 0.35, "road sampling jumped {step} tiles at {d}");
-        assert!(b.dist_to_road(p) < 0.05, "sample fell off the road at {d}");
-        prev = p;
-        d += 0.25;
+        assert!(
+            p[0] > 0.0 && p[0] < board::BW && p[1] > 0.0 && p[1] < board::BH,
+            "the circuit leaves the board at {d:.1}: {p:?}"
+        );
+        d += 0.5;
     }
+
+    // Distance wraps rather than clamping, in both directions, so a monster on
+    // its fourth lap and one on its first are the same code path.
+    for off in [0.0f32, 3.0, 17.5] {
+        let here = b.sample(off);
+        for laps in [1.0f32, 2.0, 7.0] {
+            let round = b.sample(off + b.total * laps);
+            let gap = ((here[0] - round[0]).powi(2) + (here[1] - round[1]).powi(2)).sqrt();
+            assert!(
+                gap < 0.01,
+                "wrapping {laps} laps moved the position by {gap:.3}"
+            );
+        }
+        let back = b.sample(off - b.total);
+        let gap = ((here[0] - back[0]).powi(2) + (here[1] - back[1]).powi(2)).sqrt();
+        assert!(
+            gap < 0.01,
+            "wrapping backwards moved the position by {gap:.3}"
+        );
+    }
+
+    // Heading is continuous across the seam. It used to clamp, which spun
+    // everything crossing that point to face down the wrong axis.
+    let before = b.heading(b.total - 0.05);
+    let after = b.heading(0.05);
+    let dot = before[0] * after[0] + before[1] * after[1];
+    assert!(
+        dot > 0.9,
+        "heading flips across the seam: {before:?} then {after:?}"
+    );
 }
 
 #[test]
@@ -136,20 +190,47 @@ fn selling_frees_the_pad_and_keeps_indices_straight() {
 
 // ---------------------------------------------------------------- combat
 
+/// With no towers, nothing dies, nothing leaks, and the ring fills until the
+/// run is lost. This is the whole loss condition, so it gets a direct test.
 #[test]
-fn monsters_that_are_not_stopped_reach_the_end() {
+fn an_undefended_ring_floods_and_the_run_is_lost() {
     let mut g = rich_game();
-    let before = g.lives;
-    run_for(&mut g, 120.0);
-    assert!(
-        g.lives < before,
-        "no tower on the board, yet nothing leaked"
+    g.build_choice = None;
+    run_for(&mut g, 600.0);
+    assert_eq!(
+        g.phase,
+        Phase::Defeat,
+        "an undefended circuit never flooded: {} circling after ten minutes",
+        g.creeps.len()
     );
-    assert!(g.stats.leaked > 0);
+    assert!(
+        g.creeps.len() > FLOOD_LIMIT,
+        "the run ended with only {} circling",
+        g.creeps.len()
+    );
+    // And nothing "leaked" on the way, because there is nowhere to leak to.
+    assert_eq!(g.stats.leaked, 0, "something leaked off a closed circuit");
 }
 
-/// A long run with every tower type firing into dense waves. Exercises splash
-/// lists, deaths during iteration, splits, leaks and beams.
+/// Monsters keep walking round rather than vanishing at an exit.
+#[test]
+fn monsters_go_round_and_round() {
+    let mut g = rich_game();
+    let w = g.wave_def(1);
+    isolate(&mut g);
+    g.spawn_creep(&w, 1.0e9, 1.0, 0.0);
+    let total = g.board.total;
+    run_for(&mut g, 200.0);
+    assert_eq!(g.creeps.len(), 1, "the monster left the circuit");
+    let c = &g.creeps[0];
+    assert!(c.laps >= 2, "only {} laps in 200 seconds", c.laps);
+    assert!(
+        c.dist >= 0.0 && c.dist < total,
+        "position {} is outside the circuit of {total}",
+        c.dist
+    );
+}
+
 #[test]
 fn long_run_does_not_panic() {
     let mut g = rich_game();
@@ -190,7 +271,6 @@ fn splash_into_a_dense_pack_is_safe() {
         hp: 40.0,
         speed: 0.6,
         bounty: 1,
-        gap: 0.0,
         shield: 0.0,
         heal: 0.0,
         phasing: false,
@@ -198,7 +278,7 @@ fn splash_into_a_dense_pack_is_safe() {
         split: true,
         escort: None,
     };
-    g.phase = Phase::Combat;
+    isolate(&mut g);
     let at = g.towers[0].pos;
     for i in 0..300 {
         g.spawn_creep(&w, w.hp, 1.0, 0.0);
@@ -252,7 +332,7 @@ fn knockback_pushes_monsters_backwards_never_past_the_start() {
     g.build_choice = None;
 
     let w = g.wave_def(1);
-    g.phase = Phase::Combat;
+    isolate(&mut g);
     g.spawn_creep(&w, 1.0e9, 1.0, 0.0);
     g.creeps[0].dist = 0.5;
     run_for(&mut g, 20.0);
@@ -517,14 +597,13 @@ fn a_wave_cannot_start_while_an_essence_is_owed() {
     let wave = g.wave;
     g.send_wave();
     assert_eq!(g.wave, wave, "a wave started with a draft pending");
-    assert_eq!(g.phase, Phase::Build);
 
-    // Nor may the build timer running out start one.
-    g.build_timer = 0.01;
+    // Nor may the wave clock running out start one.
+    g.wave_timer = 0.01;
     run_for(&mut g, 3.0);
     assert_eq!(
         g.wave, wave,
-        "the build timer started a wave with a draft pending"
+        "the wave clock started a wave with a draft pending"
     );
 
     assert!(g.take_essence(0));
@@ -540,14 +619,13 @@ fn a_wave_cannot_start_while_an_essence_is_owed() {
 #[test]
 fn shields_stop_everything_except_toxic() {
     let mut g = rich_game();
-    g.phase = Phase::Combat;
+    isolate(&mut g);
     let w = WaveDef {
         kind: Kind::Bulwark,
         count: 1,
         hp: 500.0,
         speed: 0.0,
         bounty: 1,
-        gap: 0.0,
         shield: 200.0,
         heal: 0.0,
         phasing: false,
@@ -749,31 +827,57 @@ fn the_run_tightens_from_start_to_finish() {
     }
 }
 
-/// A run has to be long enough to be a run. Eighty waves at roughly 45 seconds
-/// each is the hour the design asks for.
+/// A run has to be long enough to be a run.
+///
+/// The arithmetic is now trivial, which is itself the point: waves arrive on a
+/// fixed clock, so a campaign is exactly its wave count times its period. The
+/// old version had to guess how long each wave would take to walk a road and
+/// got it wrong by a factor of 1.7.
 #[test]
 fn a_full_run_is_about_an_hour() {
     assert_eq!(CAMPAIGN_WAVES, 80);
-    let road = Board::new().total;
-    let mut seconds = BUILD_TIME_FIRST;
-    for w in 1..=CAMPAIGN_WAVES {
-        let d = wave_at(w);
-        // Build phase, then however long the wave takes to walk the road.
-        //
-        // `WaveDef::speed` is already in tiles per second - it is the type's
-        // walking multiplier *times* WALK_SPEED. Dividing by WALK_SPEED again
-        // here understated every wave by a factor of 1.7 and reported an
-        // hour-long campaign as fifty-three minutes.
-        let walk = road / d.speed;
-        let spawn = d.gap * (d.count.saturating_sub(1)) as f32;
-        seconds += BUILD_TIME + walk + spawn;
-    }
+    let seconds = PREP_TIME + CAMPAIGN_WAVES as f32 * WAVE_PERIOD;
     let minutes = seconds / 60.0;
     println!("CAMPAIGN LENGTH: {minutes:.0} minutes");
     assert!(
-        (60.0..110.0).contains(&minutes),
-        "a full campaign takes {minutes:.0} minutes; the target is well over an hour"
+        (55.0..100.0).contains(&minutes),
+        "a full campaign takes {minutes:.0} minutes; the target is about an hour"
     );
+}
+
+/// Every wave's whole count arrives inside one period. If it did not, a wave
+/// with a big count would still be spawning when the next one started and the
+/// pressure would compound twice over.
+#[test]
+fn a_wave_finishes_arriving_within_its_period() {
+    for wave in [1u32, 5, 20, 40, 60, 80] {
+        let mut g = Game::new();
+        g.start_run(11);
+        while g.pending_draft.is_some() {
+            g.take_essence(0);
+        }
+        g.wave = wave - 1;
+        g.wave_timer = 0.0;
+        g.prep = false;
+        // Run one period and a whisker, without ever letting the next wave
+        // start, and check the stream drained.
+        let dt = 1.0 / 60.0;
+        let mut t = 0.0;
+        g.update(dt);
+        let expected = g.spawn_left + g.escort_left;
+        assert!(expected > 0, "wave {wave} spawns nothing");
+        while t < WAVE_PERIOD + 1.0 {
+            g.wave_timer = WAVE_PERIOD; // pin it: we are timing the stream, not the clock
+            g.update(dt);
+            t += dt;
+        }
+        assert_eq!(
+            g.spawn_left + g.escort_left,
+            0,
+            "wave {wave} still had {} of {expected} to spawn after a full period",
+            g.spawn_left + g.escort_left
+        );
+    }
 }
 
 #[test]
@@ -806,7 +910,7 @@ fn waves_keep_escalating_past_the_campaign() {
 fn clearing_the_campaign_wins_but_can_be_continued() {
     let mut g = rich_game();
     g.wave = CAMPAIGN_WAVES;
-    g.phase = Phase::Combat;
+    isolate(&mut g);
     g.spawn_left = 0;
     // Finish the last wave with an empty field.
     g.update(1.0 / 60.0);
@@ -814,18 +918,21 @@ fn clearing_the_campaign_wins_but_can_be_continued() {
 
     g.continue_endless();
     assert!(g.endless);
-    assert_eq!(g.phase, Phase::Build);
+    assert_eq!(g.phase, Phase::Combat);
 
-    // And now the run no longer stops at the campaign boundary.
+    // And now the run no longer stops at the campaign boundary: an empty ring
+    // past the last campaign wave is not a win any more, it is just quiet.
     g.wave = CAMPAIGN_WAVES + 3;
-    g.phase = Phase::Combat;
-    g.spawn_left = 0;
-    g.update(1.0 / 60.0);
+    isolate(&mut g);
+    g.wave_timer = 0.01;
+    let before = g.wave;
+    run_for(&mut g, 1.0);
     assert_eq!(
         g.phase,
-        Phase::Build,
-        "endless should roll straight into the next wave"
+        Phase::Combat,
+        "endless stopped at the campaign boundary"
     );
+    assert!(g.wave > before, "endless did not send another wave");
 }
 
 // ---------------------------------------------------------------- the roster
@@ -861,6 +968,8 @@ fn every_tower_owns_a_verb_nothing_else_has() {
                 Special::Shred { .. } => "shred",
                 Special::Ramp { .. } => "ramp",
                 Special::Knockback { .. } => "knockback",
+                Special::Multishot { .. } => "multishot",
+                Special::Instakill { .. } => "instakill",
                 Special::Pull { .. } => "pull",
                 Special::Execute { .. } => "execute",
                 Special::Suppress => "suppress",
@@ -1015,7 +1124,7 @@ fn ground_towers_cannot_touch_the_air() {
         kind: Kind::Wisp,
         ..wave_at(7)
     };
-    g.phase = Phase::Combat;
+    isolate(&mut g);
     for _ in 0..10 {
         g.spawn_creep(&w, 4_000.0, 1.0, 2.0);
     }
@@ -1073,7 +1182,7 @@ fn ground_towers_are_lethal_on_the_ground() {
         kind: Kind::Grunt,
         ..wave_at(7)
     };
-    g.phase = Phase::Combat;
+    isolate(&mut g);
     for _ in 0..10 {
         g.spawn_creep(&w, 400.0, 1.0, 2.0);
     }
@@ -1104,7 +1213,7 @@ fn magma_burns_the_road_and_only_the_road() {
         kind: Kind::Grunt,
         ..wave_at(9)
     };
-    g.phase = Phase::Combat;
+    isolate(&mut g);
     for _ in 0..8 {
         g.spawn_creep(&ground, 20_000.0, 1.0, 2.0);
     }
@@ -1138,7 +1247,7 @@ fn magma_burns_the_road_and_only_the_road() {
         kind: Kind::Wisp,
         ..wave_at(7)
     };
-    g2.phase = Phase::Combat;
+    isolate(&mut g2);
     for _ in 0..8 {
         g2.spawn_creep(&air, 20_000.0, 1.0, 2.0);
     }
@@ -1168,7 +1277,7 @@ fn burning_ground_expires() {
     g.build_choice = None;
 
     let w = wave_at(9);
-    g.phase = Phase::Combat;
+    isolate(&mut g);
     for _ in 0..20 {
         g.spawn_creep(&w, 500_000.0, 1.0, 2.0);
     }
@@ -1276,75 +1385,86 @@ fn autoplay_traced(prefs: &[Element], ground_only: bool) -> (Game, Vec<WaveCost>
     let mut g = Game::new();
     g.start_run(0xE1E_7D0);
     let mut costs: Vec<WaveCost> = Vec::new();
-
     let mut built = 0usize;
-    for _ in 0..(CAMPAIGN_WAVES + 8) {
+
+    // One pass per wave. The clock runs the whole time now - there is no build
+    // phase to spend, so the bot spends between waves rather than during a lull.
+    for _ in 0..(CAMPAIGN_WAVES + 4) {
         if matches!(g.phase, Phase::Defeat | Phase::Victory) {
             break;
         }
-        if g.phase == Phase::Build {
-            // Take every essence owed before spending a coin - the draft can
-            // unlock the tower this wave's gold is about to be poured into.
-            while g.pending_draft.is_some() {
-                take_preferred(&mut g, prefs);
-            }
-            spend(&mut g, ground_only, &mut built);
-            if std::env::var("TD_TRACE").is_ok() && (g.wave + 1) % 10 == 0 {
-                let w = g.next_wave_def();
-                let dps: f32 = g.towers.iter().map(|t| t.dmg() * t.rate()).sum();
-                println!(
-                    "  w{:>3} | {:>2} towers {:>9.0} dps | next {:?} x{} = {:>10.0} ehp | lives {:>2} gold {:>10} | ess {:?}",
-                    g.wave + 1,
-                    g.towers.len(),
-                    dps,
-                    w.kind,
-                    w.count,
-                    w.hp * w.count as f32,
-                    g.lives,
-                    g.gold,
-                    g.essence
-                );
-            }
-            g.send_wave();
-            assert_ne!(
-                g.phase,
-                Phase::Build,
-                "the bot failed to start wave {}",
-                g.wave + 1
+        // Take every essence owed before spending a coin - the draft can unlock
+        // the tower this wave's gold is about to be poured into.
+        while g.pending_draft.is_some() {
+            take_preferred(&mut g, prefs);
+        }
+        spend(&mut g, ground_only, &mut built);
+
+        if std::env::var("TD_TRACE").is_ok() && (g.wave + 1) % 10 == 0 {
+            let w = g.next_wave_def();
+            let dps: f32 = g.towers.iter().map(|t| t.dmg() * t.rate()).sum();
+            println!(
+                "  w{:>3} | {:>3} towers {:>9.0} dps | next {:?} x{:<4} = {:>10.0} ehp \
+                 | ring {:>3}/{:<3} gold {:>9} | ess {:?}",
+                g.wave + 1,
+                g.towers.len(),
+                dps,
+                w.kind,
+                w.count,
+                w.hp * w.count as f32,
+                g.creeps.len(),
+                FLOOD_LIMIT,
+                g.gold,
+                g.essence
             );
         }
-        let before = g.lives;
-        let flying = g.wave_def(g.wave).has_air();
-        // Now run exactly one wave, until the game hands control back.
+
+        let wave = g.wave + 1;
+        let flying = g.wave_def(wave).has_air();
+        let before = g.creeps.len();
+
+        // Run exactly one wave period. The wave clock starts the next wave on
+        // its own, so this is just "let one period of game happen".
         let dt = 1.0 / 60.0;
         let mut elapsed = 0.0;
-        while g.phase == Phase::Combat && elapsed < 200.0 {
+        let mut peak = before;
+        let target = g.wave;
+        while g.wave == target && elapsed < WAVE_PERIOD * 3.0 {
             g.update(dt);
             elapsed += dt;
-        }
-        // A wave that outlasts this is not a hard wave, it is a stuck one -
-        // permanently stun-locked monsters neither die nor leak, and the run
-        // hangs forever. Silently moving on would mismeasure the whole test.
-        if g.phase == Phase::Combat {
-            let mut lines = String::new();
-            for c in g.creeps.iter().take(6) {
-                lines.push_str(&format!(
-                    "\n    {:?} dist {:.1}/{:.1} spd {:.2}/{:.2} hp {:.0}/{:.0} stun {:.2} slow {:.2} heal {:.3}",
-                    c.kind, c.dist, g.board.total, c.speed(), c.base_speed,
-                    c.hp, c.max_hp, c.stun, c.slow.amt, c.heal
-                ));
+            peak = peak.max(g.creeps.len());
+            if matches!(g.phase, Phase::Defeat | Phase::Victory) {
+                break;
             }
-            panic!(
-                "wave {} never ended: {} alive after 200s, {} lives, {} leaked, spawn_left {}{}",
-                g.wave,
-                g.creeps.len(),
-                g.lives,
-                g.stats.leaked,
-                g.spawn_left,
-                lines
-            );
         }
-        costs.push((g.wave, flying, before - g.lives));
+        // The clock is fixed, so a wave that does not advance means the sim has
+        // stalled - the wave timer stopped, or a draft is jammed.
+        assert!(
+            g.wave > target
+                || matches!(g.phase, Phase::Defeat | Phase::Victory)
+                || g.wave >= g.last_wave(),
+            "the wave clock stopped at wave {target}: {} circling, phase {:?}",
+            g.creeps.len(),
+            g.phase
+        );
+        costs.push((wave, flying, peak as i32 - before as i32));
+    }
+
+    // After the last wave, keep playing until the ring is cleared or drowns -
+    // the campaign is not won by outlasting the final stream, only by killing it.
+    if !matches!(g.phase, Phase::Defeat | Phase::Victory) {
+        let dt = 1.0 / 60.0;
+        let mut elapsed = 0.0;
+        while !matches!(g.phase, Phase::Defeat | Phase::Victory) && elapsed < 400.0 {
+            spend(&mut g, ground_only, &mut built);
+            for _ in 0..60 {
+                g.update(dt);
+                elapsed += dt;
+                if matches!(g.phase, Phase::Defeat | Phase::Victory) {
+                    break;
+                }
+            }
+        }
     }
     (g, costs)
 }
@@ -1401,9 +1521,23 @@ fn spend(g: &mut Game, ground_only: bool, built: &mut usize) {
         if want.is_empty() {
             break;
         }
+        // Value per gold, with one correction: a board that cannot shoot at
+        // the air prefers something that can.
+        //
+        // Even a careless player notices flyers going past untouched, so a bot
+        // with no notion of the air layer at all is not a fair control for a
+        // bot forbidden from answering it - both would build the same board and
+        // the comparison would measure nothing. This is the smallest amount of
+        // awareness that makes the two runs actually differ.
+        let air = air_share(g);
         let value = |i: usize| {
             let cap = g.tier_cap_of(i).max(1);
-            TOWERS[i].effective_dps_at(cap) / TOWERS[i].cost_at(cap) as f32
+            let d = &TOWERS[i];
+            let mut v = d.effective_dps_at(cap) / d.cost_at(cap) as f32;
+            if d.targets == Targets::Both && air < 0.45 {
+                v *= 1.0 + (0.45 - air) * 4.0;
+            }
+            v
         };
         want.sort_by(|&a, &b| value(b).total_cmp(&value(a)));
 
@@ -1507,11 +1641,15 @@ fn a_narrated_playthrough() {
     let mut g = Game::new();
     g.start_run(0x5CA1_AB1E);
     let mut built = 0usize;
-    let mut worst: Vec<(u32, String, i32)> = Vec::new();
+    // Every wave, and the highest the ring got while it was arriving.
+    let mut worst: Vec<(u32, String, usize)> = Vec::new();
 
     println!();
     println!("=========================== ELEMENTAL TD ===========================");
-    println!("  seed {:#x}   {} lives   {} gold", g.seed, g.lives, g.gold);
+    println!(
+        "  seed {:#x}   ring holds {FLOOD_LIMIT}   {} gold",
+        g.seed, g.gold
+    );
 
     for _ in 0..(CAMPAIGN_WAVES + 4) {
         if matches!(g.phase, Phase::Defeat | Phase::Victory) {
@@ -1522,8 +1660,8 @@ fn a_narrated_playthrough() {
         }
         spend_thoughtfully(&mut g, &mut built);
 
-        let w = g.next_wave_def();
-        let lives_before = g.lives;
+        let wave = g.wave + 1;
+        let w = g.wave_def(wave);
         let label = format!(
             "{:?} x{}{}",
             w.kind,
@@ -1532,55 +1670,77 @@ fn a_narrated_playthrough() {
                 .map_or(String::new(), |e| format!(" + {:?} x{}", e.kind, e.count))
         );
 
-        if (g.wave + 1) % 10 == 0 || g.wave < 3 {
+        if wave % 10 == 0 || wave <= 3 {
             println!();
             println!(
                 "-- wave {:>2} --  {label}   [{}{}]",
-                g.wave + 1,
+                wave,
                 w.armor().name(),
                 if w.has_air() { ", FLYING" } else { "" }
             );
             println!("   board: {}", board_summary(&g));
             println!(
-                "   essences: {}   gold {}   lives {}",
+                "   essences: {}   gold {}   ring {}/{FLOOD_LIMIT}",
                 essence_summary(&g),
                 g.gold,
-                g.lives
+                g.creeps.len()
             );
         }
 
-        g.send_wave();
         let dt = 1.0 / 60.0;
         let mut elapsed = 0.0;
-        while g.phase == Phase::Combat && elapsed < 200.0 {
+        let mut peak = g.creeps.len();
+        let target = g.wave;
+        while g.wave == target && elapsed < WAVE_PERIOD * 3.0 {
             g.update(dt);
             elapsed += dt;
+            peak = peak.max(g.creeps.len());
+            if matches!(g.phase, Phase::Defeat | Phase::Victory) {
+                break;
+            }
         }
-        assert_ne!(g.phase, Phase::Combat, "wave {} never ended", g.wave);
 
-        let lost = lives_before - g.lives;
-        if lost > 0 {
+        // Only worth reporting once the ring is over half full - below that the
+        // board was comfortable and the wave is not news.
+        if peak * 2 > FLOOD_LIMIT {
             println!(
-                "   !! wave {:>2} {label} cost {lost} lives ({} left)",
-                g.wave, g.lives
+                "   !! wave {:>2} {label} filled the ring to {peak}/{FLOOD_LIMIT}",
+                wave
             );
-            worst.push((g.wave, label, lost));
+        }
+        worst.push((wave, label, peak));
+    }
+
+    // The campaign is not won by outlasting the last stream, only by killing it.
+    if !matches!(g.phase, Phase::Defeat | Phase::Victory) {
+        let dt = 1.0 / 60.0;
+        let mut elapsed = 0.0;
+        while !matches!(g.phase, Phase::Defeat | Phase::Victory) && elapsed < 400.0 {
+            spend_thoughtfully(&mut g, &mut built);
+            for _ in 0..60 {
+                g.update(dt);
+                elapsed += dt;
+            }
         }
     }
 
     println!();
     println!("=========================== RESULT ===========================");
     println!(
-        "  {:?} on wave {}, {} of {START_LIVES} lives, {} kills, {} leaked",
-        g.phase, g.wave, g.lives, g.stats.kills, g.stats.leaked
+        "  {:?} on wave {}   peak {} of {FLOOD_LIMIT} circling   {} kills",
+        g.phase, g.wave, g.stats.peak_circling, g.stats.kills
     );
     println!("  board:    {}", board_summary(&g));
     println!("  essences: {}", essence_summary(&g));
-    worst.sort_by_key(|(_, _, n)| -n);
-    println!("  hardest waves:");
-    for (wave, label, lost) in worst.iter().take(6) {
-        println!("     wave {wave:>2}  {label}  -{lost} lives");
+    worst.sort_by_key(|(_, _, n)| std::cmp::Reverse(*n));
+    println!("  fullest the ring got:");
+    for (wave, label, peak) in worst.iter().take(6) {
+        println!(
+            "     wave {wave:>2}  {label}  {peak}/{FLOOD_LIMIT}  ({:.0}%)",
+            *peak as f32 / FLOOD_LIMIT as f32 * 100.0
+        );
     }
+
     // Deliberately not asserting a win. This bot is a hand-written model of a
     // player, and tuning the game until *it* wins would be fitting the game to
     // the model rather than the other way round - the campaign's difficulty is
@@ -1592,13 +1752,9 @@ fn a_narrated_playthrough() {
     // open and every mechanic has been introduced.
     assert!(
         g.wave >= 30,
-        "a board built by reading the screen died on wave {} - something is unanswerable",
+        "a board built by reading the screen drowned on wave {} - something is \
+         unanswerable",
         g.wave
-    );
-    assert!(
-        worst.iter().all(|(_, _, lost)| *lost <= START_LIVES / 2),
-        "one wave took half the run: {:?}",
-        worst.iter().max_by_key(|(_, _, n)| *n)
     );
 }
 
@@ -1849,26 +2005,23 @@ fn spend_thoughtfully(g: &mut Game, built: &mut usize) {
 fn two_elements_are_not_enough_however_deep_they_go() {
     let g = autoplay(&NARROW_DRAFT, false);
     println!(
-        "NARROW -> phase {:?} wave {} lives {} leaked {} towers {} maxed {}",
+        "NARROW -> phase {:?} wave {} peak {}/{FLOOD_LIMIT} towers {} maxed {}",
         g.phase,
         g.wave,
-        g.lives,
-        g.stats.leaked,
+        g.stats.peak_circling,
         g.towers.len(),
         g.towers.iter().filter(|t| t.tier >= MAX_TIER).count()
     );
     assert_ne!(
         g.phase,
         Phase::Victory,
-        "a two-element board cleared all {CAMPAIGN_WAVES} waves with {} lives - breadth in the \
-         draft buys nothing",
-        g.lives
+        "a two-element board cleared all {CAMPAIGN_WAVES} waves - breadth in the draft buys nothing"
     );
     // It should get a long way, though. A narrow build is meant to be a real
     // strategy that runs out of answers, not an obvious mistake.
     assert!(
         g.wave >= 25,
-        "the two-element board died on wave {} - that is not a trap, it is a wall",
+        "the two-element board drowned on wave {} - that is not a trap, it is a wall",
         g.wave
     );
 }
@@ -1876,12 +2029,12 @@ fn two_elements_are_not_enough_however_deep_they_go() {
 #[test]
 fn a_sensible_build_clears_the_campaign() {
     let g = autoplay(&SENSIBLE_DRAFT, false);
+    let peak = g.stats.peak_circling;
     println!(
-        "MIXED  -> phase {:?} wave {} lives {} leaked {} towers {} maxed {} gold {} networth {}",
+        "MIXED  -> phase {:?} wave {} peak {peak}/{FLOOD_LIMIT} towers {} maxed {} gold {} \
+         networth {}",
         g.phase,
         g.wave,
-        g.lives,
-        g.stats.leaked,
         g.towers.len(),
         g.towers.iter().filter(|t| t.tier >= MAX_TIER).count(),
         g.gold,
@@ -1890,31 +2043,29 @@ fn a_sensible_build_clears_the_campaign() {
     assert_eq!(
         g.phase,
         Phase::Victory,
-        "a mixed board died on wave {} with {} lives and {} towers - the curve is too steep",
+        "a mixed board drowned on wave {} with {} towers and {} circling - the curve is too steep",
         g.wave,
-        g.lives,
-        g.towers.len()
+        g.towers.len(),
+        g.creeps.len()
     );
-    // Won, but it must not have been a stroll. This bot does not read the wave
-    // preview, does not place towers thoughtfully, and never sells a mistake -
-    // if *it* finishes with most of its lives, a real player is asleep.
+    // Won, but it must not have been a stroll.
+    //
+    // The high-water mark is the measure now, and it is a better one than a
+    // life count ever was: it says how close the run actually came, whereas a
+    // run could finish with every life intact having been one wave from
+    // collapse. This bot does not read the wave preview, does not place towers
+    // thoughtfully and never sells a mistake - if the ring never gets a third
+    // full for *it*, the campaign is not asking anything.
     assert!(
-        g.lives < 15,
-        "a naive board finished with {} of 20 lives - the campaign is not asking enough",
-        g.lives
+        peak * 3 > FLOOD_LIMIT as u32,
+        "a naive board never let the ring past {peak} of {FLOOD_LIMIT} - the campaign is not \
+         asking enough"
     );
-    assert!(
-        g.lives > 0 && g.stats.leaked > 0,
-        "and it should have cost something"
-    );
-    // Nearly everything earned should be on the board by the end. A large idle
-    // pile means the last stretch had nothing left to decide.
-    // Some late surplus is now *intended*, which it was not before the draft
-    // existed. A board whose towers have all reached their essence ceiling has
-    // nothing left to buy but more pads, and that is the price of having
-    // drafted wide - the gold sitting there is the player being shown, in the
-    // most concrete way available, what a fifth element cost them. A fifth of
-    // net worth is where that stops being a lesson and starts being a hole.
+    // Nearly everything earned should be on the board by the end. Some late
+    // surplus is intended - a board whose towers have all reached their essence
+    // ceiling has nothing left to buy but more pads, and that gold sitting
+    // there is what a fifth element cost. A fifth of net worth is where that
+    // stops being a lesson and starts being a hole.
     assert!(
         (g.gold as f32) < g.net_worth() as f32 * 0.20,
         "{} gold left idle against a {} net worth - the endgame has no sink at all",
@@ -1923,109 +2074,110 @@ fn a_sensible_build_clears_the_campaign() {
     );
 }
 
-/// The other half of the same claim: a board that cannot shoot upwards must
-/// lose, and must lose **because** of that.
+/// The other half of the same claim: a board that cannot shoot upwards cannot
+/// survive, because on a circuit what it cannot kill never leaves.
 ///
-/// Two things are needed to show causation rather than correlation, because
-/// each alone can be explained away:
+/// This is a controlled experiment rather than a whole run, and deliberately
+/// so. Two attempts at the whole-run version both failed to isolate anything,
+/// and the reason is worth recording:
 ///
-///   - a **control** - the same draft, the same gold, the same everything, with
-///     the one restriction lifted. If the control does not get far further,
-///     what killed the run was weakness, not the sky.
-///   - a **breakdown** of which waves actually took the lives. A board short of
-///     damage bleeds on the ground waves too.
+///   - A **same-draft control** does not work. Air-capable towers cost more
+///     damage per gold in this roster, so a bot told to prefer them builds a
+///     weaker board and drowns *earlier* - the opposite of the claim, for a
+///     reason that has nothing to do with the sky.
+///   - A **per-wave pile-up comparison** does not work either, because it
+///     saturates: once the ring is nearly full no wave can add to it, so every
+///     late wave reads as harmless.
+///   - And a bot restricted to ground-only towers is not "a board that ignores
+///     the air", it is a board using five of twenty-one towers. It drowned in
+///     204 walkers and 117 flyers, which measures its poverty, not its blindness.
+///
+/// So: one board, held fixed, fed each layer in turn. That isolates exactly the
+/// variable and nothing else.
 #[test]
-fn ignoring_the_air_loses_the_run() {
-    let (g, costs) = autoplay_traced(&GROUND_DRAFT, true);
-    let control = autoplay(&GROUND_DRAFT, false);
-    let lost_to_air: i32 = costs
-        .iter()
-        .filter(|(_, air, _)| *air)
-        .map(|(_, _, n)| n)
-        .sum();
-    let lost_to_ground: i32 = costs
-        .iter()
-        .filter(|(_, air, _)| !*air)
-        .map(|(_, _, n)| n)
-        .sum();
-    println!(
-        "GROUND -> phase {:?} wave {} lives {} | lost {lost_to_air} to air, {lost_to_ground} to \
-         ground | control reached wave {}",
-        g.phase, g.wave, g.lives, control.wave
-    );
-
-    assert_ne!(
-        g.phase,
-        Phase::Victory,
-        "a board with no anti-air cleared all {CAMPAIGN_WAVES} waves - the air layer means nothing"
-    );
-    // It has to hold the road until something flies. The first flying wave is
-    // wave 7, and it arrives softened.
-    assert!(
-        g.wave >= 7,
-        "the ground-only board died on wave {} - before air even arrives, so this proves nothing \
-         except that it had no damage",
-        g.wave
-    );
-    // The same build with the air answered must get far further.
-    assert!(
-        control.wave > g.wave * 2,
-        "the same draft reached wave {} with anti-air and wave {} without - not much of a lesson",
-        control.wave,
-        g.wave
-    );
-    // And the flying waves must be what actually took the lives.
-    assert!(
-        lost_to_air > lost_to_ground,
-        "the ground-only board lost {lost_to_air} lives to flying waves and {lost_to_ground} to \
-         walking ones - it died of weakness, not of having no answer to the sky"
-    );
-}
-
-#[test]
-fn a_board_built_entirely_of_treasuries_cannot_run_away() {
-    let mut g = rich_game();
-    let mint = t("tombstone");
-    let mut n = 0;
-    for slot in 0..g.board.slots.len() {
-        g.build_choice = Some((mint, 1));
-        if g.try_build(slot) {
-            let ti = g.towers.len() - 1;
-            while g.towers[ti].tier < MAX_TIER {
-                g.upgrade(ti);
+fn a_ground_only_board_drowns_in_the_air_and_holds_the_road() {
+    /// Builds the same heavy ground board every time and feeds it `waves`
+    /// copies of one wave, streamed the way the game streams them. Returns how
+    /// many monsters were left circling.
+    fn trial(kind: Kind, waves: u32) -> usize {
+        let mut g = rich_game();
+        // A serious ground board: the two widest blasts and the heaviest hit,
+        // maxed, packed onto the pads nearest the circuit.
+        let mut n = 0;
+        for slot in 0..g.board.slots.len() {
+            let def = t(["silt", "boulder", "thornwall"][n % 3]);
+            g.build_choice = Some((def, MAX_TIER));
+            if g.try_build(slot) {
+                n += 1;
             }
-            n += 1;
+            if n >= 30 {
+                break;
+            }
         }
+        assert!(n >= 30, "only placed {n} towers");
+        g.build_choice = None;
+        g.selected = None;
+
+        isolate(&mut g);
+        // Wave 23's health, but a fixed count of sixty either way - so the two
+        // trials differ in exactly one thing, the layer. Reading `count` from
+        // the schedule would have taken it from whatever wave 23 happens to be,
+        // and a boss wave brings five.
+        let base = wave_at(23);
+        let w = WaveDef {
+            kind,
+            count: 60,
+            speed: kind_speed(kind),
+            shield: 0.0,
+            heal: 0.0,
+            phasing: false,
+            regen: false,
+            split: false,
+            escort: None,
+            ..base
+        };
+        let dt = 1.0 / 60.0;
+        for _ in 0..waves {
+            g.spawn_left = w.count;
+            g.escort_timer = 0.0;
+            g.spawn_timer = 0.0;
+            let mut t = 0.0;
+            while t < WAVE_PERIOD {
+                // Stream it in by hand: `isolate` stopped the wave clock, and
+                // this test is about one wave type rather than the schedule.
+                g.spawn_timer -= dt;
+                let gap = (WAVE_PERIOD / w.count.max(1) as f32).max(0.04);
+                while g.spawn_left > 0 && g.spawn_timer <= 0.0 {
+                    g.spawn_creep(&w, w.hp, 1.0, 0.0);
+                    g.spawn_left -= 1;
+                    g.spawn_timer += gap;
+                }
+                g.update(dt);
+                t += dt;
+            }
+        }
+        g.creeps.len()
     }
-    g.build_choice = None;
-    g.selected = None;
-    assert!(
-        n > 10,
-        "only managed {n} Tombstones; this test needs a full board"
-    );
+
+    // Six waves of each. Grunts walk, Wisps fly, and both are unarmoured, so
+    // armour is not what separates them.
+    let walkers = trial(Kind::Grunt, 6);
+    let flyers = trial(Kind::Wisp, 6);
+    println!("GROUND BOARD -> {walkers} walkers left circling, {flyers} flyers left circling");
 
     assert!(
-        g.interest_rate() <= INTEREST_MAX + 1e-6,
-        "{n} Tombstones push interest to {:.0}%, over the {:.0}% cap",
-        g.interest_rate() * 100.0,
-        INTEREST_MAX * 100.0
+        walkers * 4 < FLOOD_LIMIT,
+        "a heavy ground board could not even hold the road: {walkers} walkers still circling"
     );
-
-    // Hand it a fortune and run the economy for fifty waves with nothing being
-    // spent. Interest is capped *and* only paid up to a ceiling, so the pile
-    // must grow roughly linearly, not exponentially.
-    g.gold = 1_000_000;
-    let start = g.gold;
-    for _ in 0..50 {
-        g.wave += 1;
-        g.end_wave_for_test();
-    }
-    let growth = g.gold as f64 / start as f64;
     assert!(
-        growth < 20.0,
-        "fifty idle waves multiplied the purse by {growth:.0}x - the economy compounds away"
+        flyers > FLOOD_LIMIT / 2,
+        "six flying waves left only {flyers} circling against a board that cannot shoot up - \
+         the air layer costs nothing"
     );
-    assert!(g.gold > start, "an idle purse should still earn something");
+    assert!(
+        flyers > walkers * 5,
+        "{flyers} flyers against {walkers} walkers is not a layer split worth having"
+    );
 }
 
 /// Interest should reward banking a wave or two, and stop rewarding hoarding.
@@ -2135,7 +2287,7 @@ fn a_wall_of_control_towers_cannot_freeze_a_wave_forever() {
         kind: Kind::Grunt,
         ..wave_at(40)
     };
-    g.phase = Phase::Combat;
+    isolate(&mut g);
     let start_hp = 1.0e12;
     for _ in 0..10 {
         g.spawn_creep(&w, start_hp, 1.0, 0.0);

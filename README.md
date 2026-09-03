@@ -50,6 +50,15 @@ scatters towers, for quick playtesting.
 
 ## How it plays
 
+- **The road is a circle, and there are no lives.** Monsters walk a closed
+  circuit with no exit, so nothing ever gets past you - what you defend is a
+  *rate*. Anything your towers cannot kill comes round again, and again, and the
+  ring fills up. You lose when more than 320 are circling at once. Waves arrive
+  on a fixed 42-second clock whether the last one is dead or not, and there is no
+  build phase.
+- **Waves are streams, not bursts.** A wave is a hundred-odd monsters arriving
+  one at a time across its whole period. Area damage, chains and multishot beat
+  one enormous hit, because what kills you is throughput.
 - **You draft elements, not towers.** Twenty times over the campaign you pick one
   of six elements from three offered. Each element unlocks its own tower, and
   each *pair* of elements you hold unlocks the tower between them — six pure
@@ -78,7 +87,7 @@ src/
   math.rs          Vec3/Mat4, the diorama camera, ray picking, shadow matrix
   game/
     defs.rs        all balance data: elements, 21 towers, 14 monsters, 80 waves
-    board.rs       the fixed road and the build pads beside it
+    board.rs       the closed circuit and the 116 build pads around it
     mod.rs         entities, wave loop, economy, player actions
     combat.rs      targeting, firing, chains, armour and damage resolution
     fx.rs          particle spawn queue
@@ -124,10 +133,12 @@ pinned in place forever).
 
 The balance is a test too: `a_sensible_build_clears_the_campaign` plays a whole
 eighty-wave run with a deliberately unsophisticated bot and checks it wins with
-lives in single figures, while `two_elements_are_not_enough_however_deep_they_go`
+the ring 80% full at its worst, while `two_elements_are_not_enough_however_deep_they_go`
 and `ignoring_the_air_loses_the_run` check that the builds which *should* lose
-actually do - the latter by scoring every wave and asserting the lives were taken
-by flying ones.
+actually do. The air layer gets a controlled experiment rather than a whole run:
+one heavy ground board, held fixed, fed six ground waves and then six air waves.
+It finishes the first with **zero** monsters circling and the second with
+**360** - which is the layer split, demonstrated rather than asserted.
 
 See [`docs/EXTENDING.md`](docs/EXTENDING.md) for how to add towers, monsters and
 visual props.

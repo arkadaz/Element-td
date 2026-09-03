@@ -354,6 +354,22 @@ pub enum Special {
         below: f32,
         mult: f32,
     },
+    /// Fires at this many extra targets every shot, each taking a full hit.
+    ///
+    /// On a circuit where a hundred and fifty monsters are on the road at once,
+    /// targets-per-second matters more than damage-per-target, and this is the
+    /// only effect that buys it directly.
+    Multishot {
+        extra: u32,
+    },
+    /// Chance to destroy a non-boss outright, whatever its health.
+    ///
+    /// A lottery rather than a damage source: worth exactly as much as the
+    /// number of things walking past, which makes it the one effect that gets
+    /// *better* as the ring fills up.
+    Instakill {
+        chance: f32,
+    },
     /// Stops regeneration and Mender healing on anything it touches.
     Suppress,
     /// Buffs every tower in range. Grove only.
@@ -409,6 +425,16 @@ impl Special {
             Special::Pull { dist } => format!("Drags {dist:.1} tiles back down the road"),
             Special::Execute { below, mult } => {
                 format!("{:.1}x damage below {:.0}% health", mult, below * 100.0)
+            }
+            Special::Multishot { extra } => {
+                format!(
+                    "Hits {} extra target{} per shot",
+                    extra,
+                    if extra == 1 { "" } else { "s" }
+                )
+            }
+            Special::Instakill { chance } => {
+                format!("{:.1}% chance to kill outright", chance * 100.0)
             }
             Special::Suppress => "Stops regeneration and healing".to_string(),
             Special::Buff { dmg, rate, range } => format!(
@@ -807,8 +833,8 @@ pub static TOWERS: &[TowerDef] = &[
     TowerDef {
         id: "shade",
         name: "Shade",
-        role: "Bounty",
-        desc: "The weakest damage in the roster. It pays for itself, and then it pays for the next tower.",
+        role: "One-strike kill",
+        desc: "The weakest damage in the roster, and every shot is a lottery ticket that ignores health entirely. Worth exactly as much as the number of things walking past.",
         elem: (Dark, None),
         dtype: Damage::Toxic,
         targets: Targets::Both,
@@ -818,11 +844,14 @@ pub static TOWERS: &[TowerDef] = &[
         splash: 0.0,
         cost: 65,
         delivery: Delivery::Shot { speed: 20.0 },
-        specials: &[Special::Bounty {
-            flat: 2,
-            chance: 0.15,
-            bonus: 12,
-        }],
+        specials: &[
+            Special::Instakill { chance: 0.04 },
+            Special::Bounty {
+                flat: 2,
+                chance: 0.15,
+                bonus: 12,
+            },
+        ],
         color: [0.66, 0.44, 0.96],
     },
     // ---------------------------------------------------------- dual
@@ -1103,8 +1132,8 @@ pub static TOWERS: &[TowerDef] = &[
     TowerDef {
         id: "bastion",
         name: "Bastion",
-        role: "Single target",
-        desc: "The biggest number in the game against one target, and it can elevate. Expensive for exactly that reason.",
+        role: "Multishot",
+        desc: "Fires on three things at once, hard, and it can elevate. Expensive for exactly that reason.",
         elem: (Earth, Some(Light)),
         dtype: Damage::Physical,
         targets: Targets::Both,
@@ -1114,10 +1143,13 @@ pub static TOWERS: &[TowerDef] = &[
         splash: 0.0,
         cost: 215,
         delivery: Delivery::Beam { pierce: 1 },
-        specials: &[Special::Crit {
-            chance: 0.20,
-            mult: 2.2,
-        }],
+        specials: &[
+            Special::Multishot { extra: 2 },
+            Special::Crit {
+                chance: 0.20,
+                mult: 2.2,
+            },
+        ],
         color: [0.88, 0.82, 0.58],
     },
     TowerDef {
@@ -1318,7 +1350,6 @@ pub struct WaveDef {
     pub hp: f32,
     pub speed: f32,
     pub bounty: u32,
-    pub gap: f32,
     /// Absorbs this much damage before its health is touched.
     pub shield: f32,
     /// Heals nearby monsters this fraction of their max health per second.
@@ -1435,7 +1466,7 @@ const BOARD_EXP: f32 = 1.1718;
 /// same shape as the board that has to answer it, so the pressure is roughly
 /// even from wave 5 to wave 80. The exponent below one is what leaves the
 /// player a margin to actually play well inside.
-const HP_EXP: f32 = 1.02;
+const HP_EXP: f32 = 1.36;
 
 /// Health multiplier for a campaign wave.
 fn campaign_hp(w: u32) -> f32 {
@@ -1444,6 +1475,28 @@ fn campaign_hp(w: u32) -> f32 {
 
 /// The road is roughly 60 tiles long; this sets how briskly monsters cover it.
 pub const WALK_SPEED: f32 = 1.7;
+
+/// How many more monsters a wave holds than it used to, and how much less each
+/// one is worth.
+///
+/// Both, by exactly the same factor - so a wave's *total* health is unchanged
+/// and the tuned difficulty curve carries over intact, while the shape of a
+/// wave changes completely: eight times as many monsters, each an eighth as
+/// tough, arriving as a steady stream instead of a burst.
+///
+/// That is the whole point. A dozen fat monsters is a game about single-target
+/// damage; a hundred thin ones is a game about area, throughput and coverage -
+/// and with no exit to leak from, the second is the game worth having. Green
+/// Circle TD runs waves of sixty to a hundred and sixty for the same reason.
+pub const COUNT_SCALE: f32 = 8.0;
+
+/// How many monsters a boss wave brings.
+///
+/// Not one. On a circuit a single unkillable boss is not a threat, it is a
+/// nuisance that circles forever occupying one slot of a three-hundred-slot
+/// gauge. A handful is a genuine damage sink: every tower pointed at the boss
+/// pack is a tower not killing the stream arriving behind it.
+pub const BOSS_COUNT: u32 = 5;
 
 /// Lives you start with. One number, because there is one difficulty.
 ///
@@ -1556,7 +1609,16 @@ pub fn wave_at(i: u32) -> WaveDef {
     // board fills up, late on it does not and you have to choose what to feed.
     let campaign = i.min(CAMPAIGN_WAVES);
     let over = i.saturating_sub(CAMPAIGN_WAVES);
-    let base = campaign_hp(campaign);
+    // Same total health per wave, spread over `COUNT_SCALE` times as many
+    // bodies. Bosses are exempt: a boss split into fifty pieces is a swarm.
+    let boss = kind.is_boss();
+    let spread = if boss { BOSS_COUNT as f32 } else { COUNT_SCALE };
+    let base = campaign_hp(campaign) / spread;
+    let count = if boss {
+        BOSS_COUNT
+    } else {
+        ((count as f32 * COUNT_SCALE).round() as u32).max(1)
+    };
     // A debut wave is half the size and two thirds the health: enough to hurt,
     // not enough to end a run that had no answer ready.
     let (count, debut_hp) = if debut {
@@ -1586,11 +1648,6 @@ pub fn wave_at(i: u32) -> WaveDef {
         hp,
         speed: speed * WALK_SPEED,
         bounty,
-        gap: match kind {
-            Kind::Boss => 0.0,
-            Kind::Swarm => 0.26,
-            _ => 0.60,
-        },
         // Bulwarks absorb a flat pool that scales with the wave.
         // A Bulwark's shield rides the same curve its health does, at a fixed
         // fraction of it - so a flat shield stays a meaningful wall late

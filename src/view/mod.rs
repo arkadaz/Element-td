@@ -13,7 +13,7 @@ pub mod monsters;
 pub mod towers;
 
 use crate::decor::Decor;
-use crate::game::board::{BH, BW, ROAD_HALF};
+use crate::game::board::{self, BH, BW, ROAD_HALF};
 use crate::game::defs::*;
 use crate::game::{Game, Phase};
 use crate::gfx::draw::{Color, DrawList, Material, Shape, boost, mix, rgba};
@@ -48,7 +48,6 @@ pub mod theme {
     pub const GHOST_OK: [f32; 3] = [0.42, 0.85, 1.00];
     pub const GHOST_BAD: [f32; 3] = [1.00, 0.32, 0.38];
     pub const SPAWN: [f32; 3] = [1.00, 0.30, 0.36];
-    pub const EXIT: [f32; 3] = [0.32, 1.00, 0.60];
 }
 
 /// Height of the buildable ground, so towers and highlights sit flush on it.
@@ -289,7 +288,7 @@ fn road(g: &Game, d: &mut DrawList) {
 /// Spawn and exit portals: paired obelisks under a stone lintel, with a lit
 /// runestone in each. They mark the two ends of the run from any camera angle.
 fn gates_static(g: &Game, d: &mut DrawList) {
-    for (dist, col) in [(0.9f32, theme::SPAWN), (g.board.total - 0.9, theme::EXIT)] {
+    for (dist, col) in [(board::SPAWN_DIST + 0.9, theme::SPAWN)] {
         let p = g.board.sample(dist);
         let dir = g.board.heading(dist);
         let side = [-dir[1], dir[0]];
@@ -419,7 +418,7 @@ fn torches(decor: &Decor, d: &mut DrawList, t: f32) {
 
 fn gate_glow(g: &Game, d: &mut DrawList, t: f32) {
     let pulse = 0.55 + 0.45 * (t * 2.0).sin();
-    for (dist, col) in [(0.9f32, theme::SPAWN), (g.board.total - 0.9, theme::EXIT)] {
+    for (dist, col) in [(board::SPAWN_DIST + 0.9, theme::SPAWN)] {
         let p = g.board.sample(dist);
         d.glow(
             [p[0], p[1], 1.45],
@@ -810,6 +809,7 @@ mod tests {
 
     fn dummy(kind: Kind) -> Creep {
         Creep {
+            laps: 0,
             suppress: 0.0,
             stun_immune: 0.0,
             push_left: 0.0,

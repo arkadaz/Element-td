@@ -92,6 +92,22 @@ pub fn step_towers(g: &mut Game, dt: f32) {
         g.towers[ti].cooldown = 1.0 / rate;
         g.towers[ti].flash = 1.0;
         fire(g, ti, ci);
+
+        // Multishot: the same shot again at other targets in range. Each is a
+        // full hit, so this is a straight multiplier on a tower's throughput -
+        // which is why only two towers in the roster have it.
+        let extra = g.towers[ti].specials().iter().find_map(|s| match *s {
+            Special::Multishot { extra } => Some(extra),
+            _ => None,
+        });
+        if let Some(extra) = extra {
+            let others = nearby_targets(g, ti, ci, extra as usize, &mut scratch);
+            for oi in others {
+                if oi < g.creeps.len() {
+                    fire(g, ti, oi);
+                }
+            }
+        }
     }
     g.scratch = scratch;
 }
@@ -164,6 +180,43 @@ fn acquire(g: &Game, ti: usize, scratch: &mut Vec<usize>) -> Option<usize> {
         }
     }
     best
+}
+
+/// Up to `want` other targets a multishot tower can also hit this shot.
+///
+/// Returned high-index-first so the caller can fire at each without a
+/// `swap_remove` elsewhere invalidating the ones it has not used yet.
+fn nearby_targets(
+    g: &Game,
+    ti: usize,
+    skip: usize,
+    want: usize,
+    scratch: &mut Vec<usize>,
+) -> Vec<usize> {
+    if want == 0 {
+        return Vec::new();
+    }
+    let pos = g.towers[ti].pos;
+    let range = g.towers[ti].range();
+    let r2 = range * range;
+    let targets = g.towers[ti].def().targets;
+    scratch.clear();
+    g.spatial.query(pos, range, |i| scratch.push(i));
+    scratch.sort_unstable();
+    scratch.dedup();
+    let mut out: Vec<usize> = scratch
+        .iter()
+        .copied()
+        .filter(|&i| {
+            i != skip
+                && i < g.creeps.len()
+                && targets.can_hit(g.creeps[i].kind.layer())
+                && dist2(g.creeps[i].pos, pos) <= r2
+        })
+        .collect();
+    out.sort_unstable_by(|a, b| b.cmp(a));
+    out.truncate(want);
+    out
 }
 
 fn fire(g: &mut Game, ti: usize, ci: usize) {
@@ -713,6 +766,40 @@ pub fn damage_creep(g: &mut Game, ci: usize, base: f32, ti: usize, crit: bool) -
         1.0
     };
     let mut dealt = base * mult * (1.0 + shred) * execute;
+
+    // One-strike kill. Rolled before anything else, because a monster this
+    // lands on does not care about armour, shields or health. Never on a boss:
+    // a boss deleted by a coin flip is not a boss.
+    if ti < g.towers.len() && g.creeps[ci].armor != Armor::Boss {
+        let chance = g.towers[ti]
+            .specials()
+            .iter()
+            .find_map(|s| match *s {
+                Special::Instakill { chance } => Some(chance),
+                _ => None,
+            })
+            .unwrap_or(0.0);
+        if chance > 0.0 && g.rng.chance(chance) {
+            let pos = g.creeps[ci].pos;
+            let z = g.creeps[ci].height();
+            let hp = g.creeps[ci].hp;
+            g.creeps[ci].hp = 0.0;
+            g.towers[ti].damage += hp as f64;
+            g.stats.damage += hp as f64;
+            g.texts.push(FloatText {
+                pos: [pos[0], pos[1], z + 0.35],
+                value: hp,
+                kind: TextKind::Crit,
+                t: 1.1,
+            });
+            g.fx.burst(&mut g.rng, pos, 20, 2.4, [1.0, 0.95, 0.55, 1.0], 0.45, 0.22);
+            contagion(g, ci, ti);
+            let c = g.creeps[ci].clone();
+            g.on_creep_died(&c, Some(ti));
+            g.creeps.swap_remove(ci);
+            return true;
+        }
+    }
 
     let c = &mut g.creeps[ci];
     // Shields soak everything except Toxic, which is the point of Toxic.

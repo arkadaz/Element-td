@@ -51,18 +51,37 @@ fn busy_board(wave: u32) -> Game {
     g.build_choice = None;
     g.selected = None;
     g.wave = wave;
-    g.lives = 20;
 
-    // Fill the road by hand. Letting the wave arrive on its own measures an
-    // empty board, because ninety-nine level-six towers delete a wave faster
-    // than it can spawn - which is not the frame anyone is complaining about.
+    // Fill the ring by hand, right up to the flood limit - the worst frame the
+    // game can ever be asked to draw, and the one it has to survive. Letting
+    // the wave arrive on its own measures an empty board, because a hundred
+    // level-six towers delete a stream faster than it can spawn.
     g.phase = Phase::Combat;
     let w = crate::game::defs::wave_at(wave);
-    for i in 0..120 {
+    for i in 0..crate::game::FLOOD_LIMIT {
         g.spawn_creep(&w, 1.0e9, 1.0, i as f32 * 0.45);
     }
     g.update(1.0 / 60.0);
     g
+}
+
+#[test]
+fn the_ring_and_its_pads_are_the_size_the_design_says() {
+    let b = crate::game::board::Board::new();
+    println!(
+        "circuit {:.1} tiles round, {} build pads, ring holds {}",
+        b.total,
+        b.slots.len(),
+        crate::game::FLOOD_LIMIT
+    );
+    // Long enough that a lap takes real time, short enough that a tower on one
+    // side is not irrelevant to the other.
+    assert!(
+        (40.0..80.0).contains(&b.total),
+        "circuit is {:.1} tiles",
+        b.total
+    );
+    assert!((60..140).contains(&b.slots.len()), "{} pads", b.slots.len());
 }
 
 #[test]

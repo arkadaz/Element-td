@@ -22,9 +22,9 @@ use crate::game::{Game, Phase, TargetMode};
 
 /// Bumped whenever the shape below changes. An older save is discarded rather
 /// than half-read, because a half-restored board is worse than a fresh start.
-const VERSION: u16 = 2;
+const VERSION: u16 = 3;
 
-const KEY: &str = "elemental_td_save_v2";
+const KEY: &str = "elemental_td_save_v3";
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SavedTower {
@@ -44,7 +44,11 @@ pub struct Save {
     pub seed: u64,
     pub wave: u32,
     pub gold: i64,
-    pub lives: i32,
+    /// How many monsters were circling. There are no lives to store any more -
+    /// what a resumed run has to bring back is the *debt*, because a board that
+    /// was two hundred monsters behind is in a completely different position
+    /// from one that was clear.
+    pub circling: u16,
     pub endless: bool,
     /// Essences held, by element index. Without these a resumed run could not
     /// rebuild the board it saved, let alone upgrade it.
@@ -84,7 +88,7 @@ impl Save {
             seed: g.seed,
             wave: g.wave,
             gold: g.gold,
-            lives: g.lives,
+            circling: g.creeps.len().min(u16::MAX as usize) as u16,
             endless: g.endless,
             essence: g.essence,
             drafts_taken: g.drafts_taken.min(u16::MAX as usize) as u16,
@@ -132,14 +136,14 @@ impl Save {
         let essence_sane = self.drafts_taken as usize <= ESSENCE_WAVES.len()
             && self.essence.iter().map(|&n| n as usize).sum::<usize>()
                 == self.drafts_taken as usize;
-        if !valid || !essence_sane || self.lives <= 0 {
+        if !valid || !essence_sane || self.circling as usize > crate::game::FLOOD_LIMIT {
             return false;
         }
 
         g.start_run(self.seed);
         g.wave = self.wave;
         g.gold = self.gold;
-        g.lives = self.lives;
+
         g.endless = self.endless;
         // Restored before the towers, because try_build reads the essence pool
         // to decide whether each one is allowed to exist.
@@ -180,7 +184,9 @@ impl Save {
         g.stats.towers_built = self.towers_built;
         g.rebuild_auras();
         g.phase = Phase::Build;
-        g.build_timer = crate::game::BUILD_TIME;
+        g.wave_timer = crate::game::WAVE_PERIOD;
+        g.prep = false;
+        g.phase = Phase::Combat;
         // A run saved mid-draft comes back owing the same draft.
         g.offer_draft_if_due();
         true
@@ -189,11 +195,11 @@ impl Save {
     /// A one-line summary for the menu button.
     pub fn label(&self) -> String {
         format!(
-            "Wave {} · {} towers · {} essences · {} lives",
+            "Wave {} · {} towers · {} essences · {} circling",
             self.wave,
             self.towers.len(),
             self.drafts_taken,
-            self.lives
+            self.circling
         )
     }
 }
@@ -215,7 +221,7 @@ pub fn store(g: &Game) {
 pub fn load() -> Option<Save> {
     let text = read()?;
     let save: Save = serde_json::from_str(&text).ok()?;
-    (save.version == VERSION && save.lives > 0).then_some(save)
+    (save.version == VERSION && save.circling as usize <= crate::game::FLOOD_LIMIT).then_some(save)
 }
 
 pub fn clear() {
@@ -310,7 +316,7 @@ mod tests {
         g.selected = None;
         g.wave = 23;
         g.gold = 4_321;
-        g.lives = 11;
+
         g.stats.kills = 987;
         g
     }
@@ -333,7 +339,7 @@ mod tests {
 
         assert_eq!(after.wave, before.wave);
         assert_eq!(after.gold, before.gold);
-        assert_eq!(after.lives, before.lives);
+        assert_eq!(after.creeps.len(), before.creeps.len());
         assert_eq!(
             after.seed, before.seed,
             "the seed is what makes the waves match"
@@ -391,7 +397,9 @@ mod tests {
             |s: &mut Save| s.essence = [0; 6],
             // A pool whose total does not match the number of drafts taken.
             |s: &mut Save| s.drafts_taken = 99,
-            |s: &mut Save| s.lives = 0,
+            // More monsters circling than the ring can hold: a board that
+            // had already lost.
+            |s: &mut Save| s.circling = u16::MAX,
         ] {
             save = good.clone();
             break_it(&mut save);

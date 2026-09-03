@@ -18,17 +18,26 @@ const CORNER_R: f32 = 1.0;
 pub const BUILD_NEAR: f32 = 1.05;
 pub const BUILD_FAR: f32 = 3.05;
 
-/// The turns the road makes. Edit this to redraw the level.
+/// The corners of the circuit, in order. It closes back onto the first, so this
+/// is a ring rather than a route. Edit this to redraw the level.
+///
+/// A rounded rectangle rather than a true circle: the straights give towers
+/// long clean firing lines and give the eye something to read, and the four
+/// corners are where monsters bunch up and where the area towers want to stand.
 const WAYPOINTS: [[f32; 2]; 8] = [
-    [-1.5, 4.5],
-    [7.5, 4.5],
-    [7.5, 13.5],
-    [16.5, 13.5],
-    [16.5, 4.5],
-    [24.5, 4.5],
-    [24.5, 13.5],
-    [31.5, 13.5],
+    [7.5, 3.5],
+    [22.5, 3.5],
+    [26.5, 6.5],
+    [26.5, 11.5],
+    [22.5, 14.5],
+    [7.5, 14.5],
+    [3.5, 11.5],
+    [3.5, 6.5],
 ];
+
+/// Where the monsters enter the circuit, as a distance along it. They keep
+/// walking from there and never leave.
+pub const SPAWN_DIST: f32 = 0.0;
 
 #[derive(Clone, Copy)]
 pub struct Slot {
@@ -56,7 +65,7 @@ impl Default for Board {
 
 impl Board {
     pub fn new() -> Self {
-        let path = round_corners(&WAYPOINTS, CORNER_R);
+        let path = round_ring(&WAYPOINTS, CORNER_R);
         let mut cum = Vec::with_capacity(path.len());
         let mut total = 0.0;
         for (i, p) in path.iter().enumerate() {
@@ -126,24 +135,31 @@ impl Board {
         }
     }
 
+    /// Where monsters appear on the circuit. There is no matching exit - see
+    /// the module docs.
     pub fn start(&self) -> [f32; 2] {
         *self.path.first().unwrap_or(&[0.0, 0.0])
     }
 
-    pub fn end(&self) -> [f32; 2] {
-        *self.path.last().unwrap_or(&[0.0, 0.0])
+    /// Position at `dist` tiles along the road.
+    /// Wraps a distance into the circuit. Everything that reads a position goes
+    /// through here, so a monster on its fourth lap is handled by exactly the
+    /// same code as one on its first.
+    #[inline]
+    pub fn wrap(&self, dist: f32) -> f32 {
+        if self.total <= 0.0 {
+            return 0.0;
+        }
+        dist.rem_euclid(self.total)
     }
 
-    /// Position at `dist` tiles along the road.
     pub fn sample(&self, dist: f32) -> [f32; 2] {
         if self.path.is_empty() {
             return [0.0, 0.0];
         }
+        let dist = self.wrap(dist);
         if dist <= 0.0 {
             return self.path[0];
-        }
-        if dist >= self.total {
-            return *self.path.last().unwrap();
         }
         let i = match self.cum.binary_search_by(|c| c.partial_cmp(&dist).unwrap()) {
             Ok(i) => i,
@@ -162,8 +178,11 @@ impl Board {
 
     /// Unit heading at `dist` tiles along the road.
     pub fn heading(&self, dist: f32) -> [f32; 2] {
-        let a = self.sample((dist - 0.25).max(0.0));
-        let b = self.sample((dist + 0.25).min(self.total));
+        // No clamping: on a closed circuit the sample either side of a monster
+        // standing on the seam has to come from the other end of the ring, or
+        // everything crossing that point spins to face down the wrong axis.
+        let a = self.sample(dist - 0.25);
+        let b = self.sample(dist + 0.25);
         let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
         let l = (dx * dx + dy * dy).sqrt();
         if l < 1e-5 {
@@ -208,17 +227,27 @@ fn point_seg_dist(p: [f32; 2], a: [f32; 2], b: [f32; 2]) -> f32 {
 }
 
 /// Replaces each interior corner with a short arc so creeps bank through turns.
-fn round_corners(pts: &[[f32; 2]], r: f32) -> Vec<[f32; 2]> {
+/// Rounds every corner of a **closed** polygon and returns the ring as a
+/// polyline whose last point repeats its first.
+///
+/// The open version of this left the first and last vertices sharp, which is
+/// right for a route with two ends and wrong for a ring: run over a rounded
+/// rectangle it produced a circuit with a thirty-four tile chord across it,
+/// and monsters walked that chord straight through the middle of the board.
+fn round_ring(pts: &[[f32; 2]], r: f32) -> Vec<[f32; 2]> {
     const ARC_STEPS: usize = 6;
-    let mut out: Vec<[f32; 2]> = Vec::with_capacity(pts.len() * ARC_STEPS);
-    if pts.len() < 3 {
+    let n = pts.len();
+    if n < 3 {
         return pts.to_vec();
     }
-    out.push(pts[0]);
-    for i in 1..pts.len() - 1 {
-        let (prev, cur, next) = (pts[i - 1], pts[i], pts[i + 1]);
+    let mut out: Vec<[f32; 2]> = Vec::with_capacity(n * (ARC_STEPS + 2) + 1);
+    for i in 0..n {
+        let prev = pts[(i + n - 1) % n];
+        let cur = pts[i];
+        let next = pts[(i + 1) % n];
         let d0 = norm(sub(prev, cur));
         let d1 = norm(sub(next, cur));
+        // Never eat more than half of either leg, or adjacent corners overlap.
         let leg = r
             .min(len(sub(prev, cur)) * 0.45)
             .min(len(sub(next, cur)) * 0.45);
@@ -226,8 +255,8 @@ fn round_corners(pts: &[[f32; 2]], r: f32) -> Vec<[f32; 2]> {
         let b = [cur[0] + d1[0] * leg, cur[1] + d1[1] * leg];
         out.push(a);
         // Quadratic bend through the corner.
-        for s in 1..ARC_STEPS {
-            let t = s as f32 / ARC_STEPS as f32;
+        for st in 1..ARC_STEPS {
+            let t = st as f32 / ARC_STEPS as f32;
             let it = 1.0 - t;
             out.push([
                 it * it * a[0] + 2.0 * it * t * cur[0] + t * t * b[0],
@@ -236,7 +265,9 @@ fn round_corners(pts: &[[f32; 2]], r: f32) -> Vec<[f32; 2]> {
         }
         out.push(b);
     }
-    out.push(pts[pts.len() - 1]);
+    // Close it explicitly, so `total` counts the final segment and `sample`
+    // interpolates across the seam like any other.
+    out.push(out[0]);
     out
 }
 

@@ -1,2 +1,6 @@
 /target
 /dist
+
+# Warcraft III maps kept alongside for reference. Not ours to redistribute.
+*.w3x
+*.w3m

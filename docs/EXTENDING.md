@@ -65,9 +65,10 @@ Both of these have shipped as bugs, more than once, and both end a run by hangin
 it rather than by losing it.
 
 - **Displacement must be bounded per monster, not per second.** A cooldown alone
-  does not stop a wave being pinned in place: a shove of 0.85 tiles every 0.75
-  seconds beats a slowed monster's walking speed, so it never arrives, never
-  dies and never leaks. Spend from `Creep::push_left`, via `combat::push_back`.
+  does not stop a monster being pinned in place: a shove of 0.85 tiles every
+  0.75 seconds beats a slowed monster's walking speed, so it never moves - and
+  on a circuit a monster that never moves occupies a slot in the flood gauge for
+  the rest of the run. Spend from `Creep::push_left`, via `combat::push_back`.
 - **Nothing may scale a *distance* by the damage curve.** `Pull` briefly used
   `dist * scale.sqrt()`, which at level eight dragged a monster six tiles a hit.
   Tiles of road do not get longer as a tower gets stronger.
@@ -105,7 +106,9 @@ what a new monster forces the player to stop doing, it is decoration.
 
 ## Redraw the level
 
-`WAYPOINTS` in `game/board.rs` is the road. Corners are rounded automatically and
+`WAYPOINTS` in `game/board.rs` is the circuit, as a **closed** polygon - it
+joins back onto its first point, and `round_ring` rounds every corner including
+that join. Corners are rounded automatically and
 the build pads are regenerated from the new shape — pads land on a checkerboard
 1.15–2.35 tiles from the road, so a new route just works. `BW`/`BH` set the plot
 size; the camera reframes itself.

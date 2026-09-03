@@ -14,9 +14,31 @@ use fx::Fx;
 use crate::rng::Rng;
 
 pub const MAX_CREEPS: usize = 4000;
+
+/// How many monsters may be circling before the run is lost.
+///
+/// This is the whole loss condition. The circuit has no exit, so nothing ever
+/// leaks and there are no lives to lose - a monster the board cannot kill comes
+/// round again, and again, and the ring fills up. What the player is defending
+/// is not a gate, it is a *rate*: kill faster than the waves arrive, or drown.
+///
+/// It replaces a twenty-life counter, and it is a better gauge for three
+/// reasons. It moves continuously instead of in whole-life steps, so the player
+/// can see trouble twenty seconds before it arrives. It cannot be gamed by a
+/// tower that shoves monsters backwards, because backwards is the same
+/// direction. And it makes every wave's leftovers a debt carried into the next
+/// one, which is what makes the pressure cumulative rather than per-wave.
+pub const FLOOD_LIMIT: usize = 320;
+
+/// How long each wave takes to arrive, in seconds. The whole of a wave's count
+/// streams in evenly across this window, and then the next wave starts - there
+/// is no build phase and no gap. Taken from Green Circle TD, which spreads
+/// every wave over exactly one period this way.
+pub const WAVE_PERIOD: f32 = 42.0;
+
+/// Quiet time before the first wave, to place an opening tower or two.
+pub const PREP_TIME: f32 = 22.0;
 pub const START_GOLD: i64 = 260;
-pub const BUILD_TIME_FIRST: f32 = 25.0;
-pub const BUILD_TIME: f32 = 16.0;
 pub const SELL_REFUND: f32 = 0.75;
 /// How much stun resistance one stun adds, and the ceiling it climbs to.
 /// At the ceiling a stun still lands, but briefly - hard control should be
@@ -177,6 +199,10 @@ pub struct Creep {
     /// How much further this monster can ever be pushed backwards.
     /// See [`PUSHBACK_BUDGET`].
     pub push_left: f32,
+    /// Complete laps of the circuit. Nothing in the simulation reads it - it is
+    /// there so the player can see which monsters have been round before, and
+    /// so `Strongest`-mode towers have something to sort veterans by.
+    pub laps: u32,
     pub regen: f32,
     pub splits: u8,
     /// Absorbs damage before health is touched (Bulwark).
@@ -457,6 +483,12 @@ pub struct RunStats {
     pub gold_spent: u64,
     pub damage: f64,
     pub towers_built: u32,
+    /// The most monsters ever circling at once.
+    ///
+    /// The run's high-water mark, and the only honest measure of how close it
+    /// came to ending - a run that finished with an empty ring might have been
+    /// one monster from drowning at wave 60, and nothing else records that.
+    pub peak_circling: u32,
 }
 
 /// A patch of road claimed by a zone tower - Magma's fire or Mire's swamp.
@@ -525,9 +557,11 @@ pub struct Game {
     pub wave: u32,
     pub phase: Phase,
     pub gold: i64,
-    pub lives: i32,
 
-    pub build_timer: f32,
+    /// Counts down to the next wave. Always running.
+    pub wave_timer: f32,
+    /// True until the first wave has been called; the only quiet moment in a run.
+    pub prep: bool,
     pub spawn_left: u32,
     /// How much of the wave's escort is still to arrive.
     pub escort_left: u32,
@@ -581,8 +615,8 @@ impl Game {
             wave: 0,
             phase: Phase::Build,
             gold: START_GOLD,
-            lives: START_LIVES,
-            build_timer: BUILD_TIME_FIRST,
+            wave_timer: PREP_TIME,
+            prep: true,
             spawn_left: 0,
             escort_left: 0,
             escort_timer: 0.0,
@@ -639,7 +673,9 @@ impl Game {
     pub fn snapshot(&self) -> td_proto::Snapshot {
         td_proto::Snapshot {
             wave: self.wave.min(u16::MAX as u32) as u16,
-            lives: self.lives.clamp(i16::MIN as i32, i16::MAX as i32) as i16,
+            // The scoreboard still speaks in "lives", so the flood gauge is
+            // reported as headroom: how many more monsters the ring will take.
+            lives: (FLOOD_LIMIT.saturating_sub(self.creeps.len())).min(i16::MAX as usize) as i16,
             gold: self.gold.clamp(i32::MIN as i64, i32::MAX as i64) as i32,
             net_worth: self.net_worth().clamp(0, i32::MAX as i64) as i32,
             kills: self.stats.kills.min(u32::MAX as u64) as u32,
@@ -654,8 +690,8 @@ impl Game {
     pub fn continue_endless(&mut self) {
         if self.phase == Phase::Victory {
             self.endless = true;
-            self.phase = Phase::Build;
-            self.build_timer = BUILD_TIME;
+            self.phase = Phase::Combat;
+            self.wave_timer = WAVE_PERIOD;
         }
     }
 
@@ -1025,8 +1061,14 @@ impl Game {
     }
 
     /// Call the next wave now; pays a bonus for the time skipped.
+    /// Calls the next wave now, and pays for the time skipped.
+    ///
+    /// On a circuit this is a real gamble rather than a free speed-up: the wave
+    /// you were still killing does not go anywhere, so calling early stacks the
+    /// new stream on top of the old one. The gold is the reward for judging
+    /// that your board can take it.
     pub fn send_wave(&mut self) {
-        if self.phase != Phase::Build {
+        if matches!(self.phase, Phase::Defeat | Phase::Victory) {
             return;
         }
         if self.pending_draft.is_some() {
@@ -1034,7 +1076,11 @@ impl Game {
             self.sound_cues.push(Cue::Error);
             return;
         }
-        let bonus = (self.build_timer * EARLY_BONUS_PER_SEC).round().max(0.0) as i64;
+        if self.wave >= self.last_wave() {
+            self.toast("No more waves to call");
+            return;
+        }
+        let bonus = (self.wave_timer * EARLY_BONUS_PER_SEC).round().max(0.0) as i64;
         if bonus > 0 {
             self.gold += bonus;
             self.stats.gold_earned += bonus as u64;
@@ -1049,15 +1095,36 @@ impl Game {
         self.begin_wave();
     }
 
+    /// The last wave the campaign will send. Endless has no last wave.
+    pub fn last_wave(&self) -> u32 {
+        if self.endless {
+            u32::MAX
+        } else {
+            CAMPAIGN_WAVES
+        }
+    }
+
+    /// Starts the next wave streaming, and pays the stipend for it.
+    ///
+    /// Whatever the previous wave had left to spawn is dropped: a wave's count
+    /// is spread across exactly one [`WAVE_PERIOD`], so if the clock has come
+    /// round then the wave has finished arriving. Carrying a backlog of *spawns*
+    /// as well as a backlog of live monsters would compound twice over.
     fn begin_wave(&mut self) {
         self.wave += 1;
+        self.prep = false;
         self.phase = Phase::Combat;
+        self.wave_timer = WAVE_PERIOD;
         let w = self.wave_def(self.wave);
         self.spawn_left = w.count;
         self.escort_left = w.escort.map_or(0, |e| e.count);
         self.spawn_timer = 0.0;
         self.escort_timer = 0.0;
-        self.build_timer = 0.0;
+        self.pay_wave_stipend();
+        self.maybe_offer_draft();
+        // A wave boundary is the only moment worth checkpointing: no monster is
+        // mid-spawn, so a resumed run never starts half a wave in.
+        self.wants_save = true;
         self.sound_cues.push(if w.kind.is_boss() {
             Cue::Boss
         } else {
@@ -1068,12 +1135,18 @@ impl Game {
     /// Runs one wave boundary's payout. Tests only.
     #[cfg(test)]
     pub fn end_wave_for_test(&mut self) {
-        self.end_wave();
+        self.pay_wave_stipend();
     }
 
-    fn end_wave(&mut self) {
-        let bonus = wave_clear_bonus(self.wave) as i64;
-        // Interest rewards holding gold, exactly like the original.
+    /// The per-wave income: a flat stipend, interest on gold in hand, and
+    /// whatever the economy towers pay.
+    ///
+    /// It is paid when a wave *starts*, because on a circuit no wave ever ends.
+    /// The stipend exists for the same reason it always did - a board that
+    /// falls behind still needs the money to climb back out, or one bad wave
+    /// quietly decides the whole run.
+    fn pay_wave_stipend(&mut self) {
+        let stipend = wave_clear_bonus(self.wave) as i64;
         let earning = self.gold.clamp(0, self.interest_ceiling());
         let interest = (earning as f64 * self.interest_rate() as f64).floor() as i64;
         let income = self.tower_income();
@@ -1082,7 +1155,7 @@ impl Game {
             let paid: i64 = self.towers[i]
                 .specials()
                 .iter()
-                .filter_map(|s| match *s {
+                .filter_map(|sp| match *sp {
                     Special::Income { per_wave } => Some((per_wave as f32 * u) as i64),
                     _ => None,
                 })
@@ -1090,21 +1163,42 @@ impl Game {
             self.towers[i].gold_earned += paid.max(0) as u64;
         }
         self.last_interest = interest;
-        self.gold += bonus + interest + income;
-        self.stats.gold_earned += (bonus + interest + income) as u64;
-        // Clearing the campaign is a win the first time. After that the waves
-        // keep coming until the player finally runs out of lives.
-        if self.wave >= CAMPAIGN_WAVES && !self.endless {
-            self.phase = Phase::Victory;
-            self.sound_cues.push(Cue::Victory);
+        self.gold += stipend + interest + income;
+        self.stats.gold_earned += (stipend + interest + income) as u64;
+    }
+
+    /// Checks the two ways a run can end.
+    fn check_end(&mut self) {
+        if matches!(self.phase, Phase::Defeat | Phase::Victory) {
             return;
         }
-        self.phase = Phase::Build;
-        self.build_timer = BUILD_TIME;
-        self.maybe_offer_draft();
-        // A wave boundary is the only moment worth checkpointing: nothing is in
-        // flight, so a resumed run never starts mid-projectile.
-        self.wants_save = true;
+        self.stats.peak_circling = self.stats.peak_circling.max(self.creeps.len() as u32);
+        if self.creeps.len() > FLOOD_LIMIT {
+            self.phase = Phase::Defeat;
+            self.sound_cues.push(Cue::Defeat);
+            return;
+        }
+        // Winning means the last wave has finished arriving *and* the ring is
+        // empty. Surviving the final stream is not the same as clearing it.
+        if !self.endless
+            && self.wave >= CAMPAIGN_WAVES
+            && self.spawn_left == 0
+            && self.escort_left == 0
+            && self.creeps.is_empty()
+        {
+            self.phase = Phase::Victory;
+            self.sound_cues.push(Cue::Victory);
+        }
+    }
+
+    /// How full the ring is, 0 to 1. The gauge the HUD draws.
+    pub fn flood(&self) -> f32 {
+        self.creeps.len() as f32 / FLOOD_LIMIT as f32
+    }
+
+    /// How many more monsters the ring will hold.
+    pub fn headroom(&self) -> usize {
+        FLOOD_LIMIT.saturating_sub(self.creeps.len())
     }
 
     // ------------------------------------------------ update
@@ -1149,20 +1243,20 @@ impl Game {
     fn step(&mut self, dt: f32) {
         self.time += dt;
 
-        match self.phase {
-            Phase::Build => {
-                // The clock stops while an essence is owed. A wave that arrives
-                // during the decision turns the decision into a penalty, and a
-                // player reading three cards is not idling.
-                if self.pending_draft.is_none() {
-                    self.build_timer -= dt;
-                    if self.build_timer <= 0.0 {
-                        self.begin_wave();
-                    }
-                }
+        // The wave clock never stops except for a draft. There is no build
+        // phase to hide in: the only quiet stretch in a run is before wave one.
+        //
+        // The draft is the exception because a player reading three cards is
+        // not idling, and a wave that arrived during the decision would turn
+        // the decision into a penalty.
+        if self.pending_draft.is_none() && self.wave < self.last_wave() {
+            self.wave_timer -= dt;
+            if self.wave_timer <= 0.0 {
+                self.begin_wave();
             }
-            Phase::Combat => self.spawn_step(dt),
-            _ => {}
+        }
+        if !self.prep {
+            self.spawn_step(dt);
         }
 
         self.spatial.rebuild(&self.creeps);
@@ -1171,14 +1265,7 @@ impl Game {
         combat::step_towers(self, dt);
         combat::step_projectiles(self, dt);
         self.step_zones(dt);
-
-        if self.phase == Phase::Combat
-            && self.spawn_left == 0
-            && self.escort_left == 0
-            && self.creeps.is_empty()
-        {
-            self.end_wave();
-        }
+        self.check_end();
     }
 
     /// Burning road. Zones tick a few times a second rather than every step -
@@ -1227,27 +1314,33 @@ impl Game {
         self.zones.retain(|z| z.life > 0.0);
     }
 
+    /// Streams the current wave in evenly across one [`WAVE_PERIOD`].
+    ///
+    /// A wave is not a burst any more; it is a rate. A count of a hundred and
+    /// fifty over forty-two seconds is one monster every third of a second, so
+    /// the road is never empty and the board is never idle - which is the
+    /// difference between defending a gate and defending a throughput.
     fn spawn_step(&mut self, dt: f32) {
         if self.spawn_left == 0 && self.escort_left == 0 {
             return;
         }
         let w = self.wave_def(self.wave);
+        let total = w.count.max(1);
 
         self.spawn_timer -= dt;
+        let gap = (WAVE_PERIOD / total as f32).max(0.04);
         while self.spawn_left > 0 && self.spawn_timer <= 0.0 {
             self.spawn_creep(&w, w.hp, 1.0, 0.0);
             self.spawn_left -= 1;
-            self.spawn_timer += w.gap.max(0.05);
-            if w.gap <= 0.0 {
-                break;
-            }
+            self.spawn_timer += gap;
         }
 
-        // The escort arrives on its own clock, spread across the same window,
-        // so the two types are genuinely mixed rather than queued one after the
-        // other - which would just be two easier waves.
+        // The escort arrives on its own clock across the same window, so the
+        // two types are genuinely mixed rather than queued one after the other
+        // - which would just be two easier waves.
         let Some(e) = w.escort else { return };
         self.escort_timer -= dt;
+        let egap = (WAVE_PERIOD / e.count.max(1) as f32).max(0.04);
         while self.escort_left > 0 && self.escort_timer <= 0.0 {
             let mut sub = w;
             sub.kind = e.kind;
@@ -1259,8 +1352,7 @@ impl Game {
             sub.escort = None;
             self.spawn_creep(&sub, e.hp, 1.0, 0.0);
             self.escort_left -= 1;
-            let span = (w.gap.max(0.05) * w.count as f32).max(2.0);
-            self.escort_timer += (span / e.count as f32).max(0.12);
+            self.escort_timer += egap;
         }
     }
 
@@ -1296,6 +1388,7 @@ impl Game {
             suppress: 0.0,
             stun_immune: 0.0,
             push_left: PUSHBACK_BUDGET,
+            laps: 0,
             regen: if w.regen { hp * 0.02 } else { 0.0 },
             splits: if w.split { 1 } else { 0 },
             shield,
@@ -1353,7 +1446,6 @@ impl Game {
 
     fn step_creeps(&mut self, dt: f32) {
         let mut died: Vec<usize> = Vec::new();
-        let mut leaked: Vec<usize> = Vec::new();
 
         for i in 0..self.creeps.len() {
             {
@@ -1396,10 +1488,19 @@ impl Game {
                 }
                 c.dist += c.speed() * dt;
             }
-            place(&self.board, &mut self.creeps[i]);
-            if self.creeps[i].dist >= self.board.total {
-                leaked.push(i);
+            // Round the circuit rather than off the end of it. Nothing leaks,
+            // so the only bookkeeping a lap needs is a counter.
+            let total = self.board.total;
+            let c = &mut self.creeps[i];
+            if total > 0.0 && c.dist >= total {
+                c.dist -= total;
+                c.laps += 1;
+                // A pushback budget that never refreshed meant a monster on its
+                // fifth lap could not be slowed by a Thornwall at all. One lap
+                // survived is worth a fresh shove.
+                c.push_left = PUSHBACK_BUDGET;
             }
+            place(&self.board, &mut self.creeps[i]);
         }
 
         // Remove back-to-front so swap_remove never invalidates a pending index.
@@ -1409,49 +1510,6 @@ impl Game {
             let c = self.creeps[i].clone();
             self.on_creep_died(&c, None);
             self.creeps.swap_remove(i);
-        }
-
-        leaked.sort_unstable();
-        leaked.dedup();
-        for &i in leaked.iter().rev() {
-            if i >= self.creeps.len() {
-                continue;
-            }
-            let c = self.creeps[i].clone();
-            // Both bosses, not just the walking one. `Kind::Boss` alone meant a
-            // Skylord - the boss whose entire job is to punish a board that
-            // cannot shoot upwards - leaked for a single life, which is the
-            // opposite of the intent.
-            //
-            // Five, not ten. A single monster taking half the run turns one
-            // unlucky wave into the whole game, and a narrated playthrough lost
-            // ten of twenty lives to the wave-30 boss and never recovered.
-            let cost = if c.kind.is_boss() { 5 } else { 1 };
-            self.lives -= cost;
-            self.stats.leaked += 1;
-            self.shake = (self.shake + 0.5).min(1.0);
-            self.sound_cues.push(Cue::Leak);
-            self.texts.push(FloatText {
-                pos: [c.pos[0], c.pos[1], 1.0],
-                value: cost as f32,
-                kind: TextKind::Leak,
-                t: 1.6,
-            });
-            self.fx.burst(
-                &mut self.rng,
-                c.pos,
-                26,
-                5.0,
-                [1.0, 0.25, 0.35, 1.0],
-                0.55,
-                0.35,
-            );
-            self.creeps.swap_remove(i);
-            if self.lives <= 0 {
-                self.lives = 0;
-                self.phase = Phase::Defeat;
-                self.sound_cues.push(Cue::Defeat);
-            }
         }
     }
 
@@ -1514,7 +1572,6 @@ impl Game {
                 hp: c.max_hp * 0.35,
                 speed: c.base_speed * 1.2,
                 bounty: (c.bounty / 2).max(1),
-                gap: 0.0,
                 shield: 0.0,
                 heal: 0.0,
                 phasing: c.phasing,

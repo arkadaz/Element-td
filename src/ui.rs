@@ -11,7 +11,7 @@ use egui::{
 
 use crate::game::board::{BH, BW};
 use crate::game::defs::*;
-use crate::game::{BUILD_TIME_FIRST, Game, Phase};
+use crate::game::{FLOOD_LIMIT, Game, Phase, WAVE_PERIOD};
 use crate::math::{Camera, v3};
 
 pub const TOP_H: f32 = 58.0;
@@ -235,7 +235,7 @@ pub fn top_bar(g: &mut Game, ui: &mut Ui, ust: &mut UiState, perf: &str) {
         Menu,
         Help,
     }
-    let send_bonus = (g.build_timer * EARLY_BONUS_PER_SEC) as i32;
+    let send_bonus = (g.wave_timer * EARLY_BONUS_PER_SEC) as i32;
     let send_label = if compact {
         format!("Send +{send_bonus}")
     } else {
@@ -281,7 +281,10 @@ pub fn top_bar(g: &mut Game, ui: &mut Ui, ust: &mut UiState, perf: &str) {
     } else {
         format!("{}/{}", g.wave, N_WAVES)
     };
-    let lives = g.lives.to_string();
+    // Not lives - there are none. The number that decides the run is how many
+    // monsters are still going round, against what the ring will hold.
+    let circling = format!("{}/{}", g.creeps.len(), FLOOD_LIMIT);
+    let flood = g.flood();
     let value_size = if compact { 15.0 } else { 18.0 };
     let chips: [(&str, &str, Color32); 3] = [
         (
@@ -289,7 +292,19 @@ pub fn top_bar(g: &mut Game, ui: &mut Ui, ust: &mut UiState, perf: &str) {
             wave.as_str(),
             if g.endless { pal::ACC } else { pal::INK },
         ),
-        ("LIVES", lives.as_str(), pal::BAD),
+        (
+            "CIRCLING",
+            circling.as_str(),
+            // Green while there is room, amber once the ring is filling,
+            // red when it is nearly over. The colour is the warning.
+            if flood > 0.8 {
+                pal::BAD
+            } else if flood > 0.55 {
+                pal::GOLD
+            } else {
+                pal::GOOD
+            },
+        ),
         ("GOLD", gold.as_str(), pal::GOLD),
     ];
     let chip_ws: Vec<f32> = chips
@@ -533,8 +548,8 @@ fn wave_preview(g: &mut Game, ui: &mut Ui, rect: Rect) {
         c32(w.armor().color(), 1.0),
     );
 
-    if g.phase == Phase::Build {
-        let frac = (g.build_timer / BUILD_TIME_FIRST.max(1.0)).clamp(0.0, 1.0);
+    if g.wave < g.last_wave() {
+        let frac = (g.wave_timer / WAVE_PERIOD.max(1.0)).clamp(0.0, 1.0);
         let bar = Rect::from_min_size(rect.left_bottom() + vec2(8.0, -6.0), vec2(252.0, 3.0));
         p.rect_filled(bar, CornerRadius::same(2), pal::LINE);
         p.rect_filled(
@@ -545,7 +560,7 @@ fn wave_preview(g: &mut Game, ui: &mut Ui, rect: Rect) {
         p.text(
             rect.right_top() + vec2(-8.0, 5.0),
             Align2::RIGHT_TOP,
-            format!("{:.0}s", g.build_timer.max(0.0)),
+            format!("{:.0}s", g.wave_timer.max(0.0)),
             FontId::monospace(10.0),
             pal::ACC,
         );
@@ -628,7 +643,11 @@ pub fn scoreboard(g: &Game, ctx: &Context) {
                 ));
             }
             rows.push(("", String::new(), pal::DIM));
-            rows.push(("Lives", g.lives.to_string(), pal::BAD));
+            rows.push((
+                "Circling",
+                format!("{} / {}", g.creeps.len(), FLOOD_LIMIT),
+                if g.flood() > 0.7 { pal::BAD } else { pal::GOOD },
+            ));
             rows.push(("Gold", gold_str(g.gold), pal::GOLD));
             rows.push(("Net worth", gold_str(g.net_worth()), pal::GOOD));
             rows.push(("Towers", g.towers.len().to_string(), pal::DIM));
@@ -1680,7 +1699,7 @@ fn game_over(g: &mut Game, ctx: &Context) {
                 );
                 ui.label(
                     RichText::new(if won {
-                        format!("All {N_WAVES} waves cleared with {} lives left.", g.lives)
+                        format!("All {N_WAVES} waves cleared, and the ring emptied.",)
                     } else if g.endless {
                         format!("Endless run ended on wave {}.", g.wave)
                     } else {
@@ -1760,12 +1779,15 @@ fn help(ctx: &Context, ust: &mut UiState) {
             ui.label(RichText::new("How to play").strong().size(20.0));
             ui.add_space(6.0);
             for (title, body) in [
+                ("The road is a circle", "Monsters walk a closed circuit and there is no exit. Nothing ever gets past you, so you have no lives to lose - what you defend is a RATE. Anything your towers cannot kill comes round again, and again, and the ring fills up. You lose when it overflows."),
+                ("Read the CIRCLING gauge", "It counts what is still going round against what the ring holds. Green is comfortable, amber is falling behind, red is nearly over. It moves slowly, so it warns you a long time before the end."),
+                ("Waves never stop", "A new wave arrives every 42 seconds whether the last one is dead or not, and there is no build phase - you spend gold while the road is busy. Calling a wave early pays 2 gold a second and stacks the new stream on top of whatever you have not killed yet."),
                 ("Essences decide your run", "Twenty times over the campaign you choose one element from three. Every element unlocks its own tower, and every PAIR of elements you hold unlocks the tower between them - six pure towers and fifteen duals, twenty-one in all."),
                 ("Depth or breadth", "Each essence of an element raises the level ceiling of every tower using it by one, and a dual tower reads whichever of its two elements you have fewer of. Six of one element maxes its pure tower; six of each of two maxes the dual between them. Spreading wide unlocks answers, stacking deep buys numbers - you cannot have both."),
                 ("Armour beats damage type", "Physical bounces off Plated but shreds Warded. Magic is the reverse, and it is the only real answer to Ethereal. Fire loves an unarmoured crowd and barely scratches a ghost. Toxic is never resisted and ignores shields. Read the wave preview before you buy."),
                 ("Five towers cannot shoot up", "Boulder, Mire, Thornwall, Magma and Silt own the road and pay for it. Something in your board has to answer the air, and from wave 45 every escorted wave crosses the layers."),
-                ("Interest, and calling early", "You earn 5% of the gold in hand every wave, up to a ceiling. Sending a wave early pays 2 gold for every second you skip - the only speed control that is also a decision."),
-                ("Eighty waves, then forever", "Clearing wave 80 wins. You may keep going afterwards: endless waves grow faster than the purse does, so the only question is how far."),
+                ("Waves are streams, not bursts", "A wave is a hundred-odd monsters arriving one at a time across its whole period. Area damage, chains and multishot are worth far more than one enormous hit, because what kills you is throughput."),
+                ("Eighty waves, then forever", "You win by surviving all eighty AND clearing the ring - outlasting the last stream is not the same as killing it. You may keep going afterwards: endless waves grow faster than the purse does, so the only question is how far."),
             ] {
                 ui.label(RichText::new(title).strong().size(13.0));
                 ui.label(RichText::new(body).size(12.0).color(pal::DIM));

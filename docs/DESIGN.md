@@ -27,9 +27,45 @@ The fix is not more waves. It is a second resource that the player spends on
 
 ---
 
-## 2. The core loop
+## 2. The circuit
 
-> **Draft an element. Elements combine into towers. Towers hold the road.**
+> **There is no exit, and there are no lives. You are defending a rate.**
+
+The road is a **closed ring**. Monsters enter it and walk, and nothing ever
+reaches an end, because there is no end. What the towers cannot kill comes round
+again, and again, and the ring fills up. The run is lost when more than
+**320 monsters** are circling at once.
+
+This replaced a twenty-life counter, and it is a better gauge for four reasons:
+
+- **It moves continuously.** A life counter jumps in whole lives, so a player
+  learns they are in trouble at the moment it becomes unrecoverable. The ring
+  fills over a dozen waves, visibly.
+- **It makes leftovers a debt.** A wave you only three-quarters killed is
+  carried into the next one, and the one after. Pressure is cumulative instead
+  of per-wave, which is what makes the back half of a run feel like a run.
+- **It cannot be gamed by displacement.** A tower that shoves monsters backwards
+  used to buy free distance from the exit. On a ring, backwards is the same
+  direction.
+- **It gives every monster more than one pass.** A survivor is not a loss, it is
+  a second chance at it - so a board slightly behind the curve degrades
+  gracefully instead of falling off a cliff.
+
+Waves arrive on a **fixed 42-second clock** whether the last one is dead or not,
+and each wave's whole count streams in evenly across its own period. There is no
+build phase: gold is spent while the road is busy. The only quiet stretch in a
+run is the twenty-two seconds before wave one.
+
+Taken from Green Circle TD, which does all of this - a closed circle, no lives,
+a loss condition of 700 living monsters, and 36 waves on a 45-second clock. What
+is not taken from it is the wave *content*: this keeps its own elements, armour
+table and draft.
+
+---
+
+## 2b. The core loop
+
+> **Draft an element. Elements combine into towers. Towers hold the ring.**
 
 The player never buys a tower from an open shop. They earn **essences**, one
 element at a time, and their collection of essences decides which of the
@@ -120,7 +156,7 @@ role; no two share both a delivery and a special.
 | **Tide** | Water | Magic | air + ground | slow; buys every other tower more shots |
 | **Boulder** | Earth | Physical | **ground only** | one heavy shot, knocks back |
 | **Prism** | Light | Magic | air + ground | long range, crits |
-| **Shade** | Dark | Toxic | air + ground | weakest damage, pays gold per kill |
+| **Shade** | Dark | Toxic | air + ground | **one-strike kill** chance, pays gold per kill |
 
 ### Dual - expensive, specialised, the reason to broaden
 
@@ -138,13 +174,28 @@ role; no two share both a delivery and a special.
 | **Silt** | W+E | Physical | **ground only** | widest splash, slows, shreds |
 | **Mirror** | W+L | Magic | air + ground | longest chain in the game |
 | **Abyss** | W+D | Magic | air + ground | **drags monsters back down the road** |
-| **Bastion** | E+L | Physical | air + ground | highest single-target damage |
+| **Bastion** | E+L | Physical | air + ground | **multishot** - three targets at once |
 | **Tombstone** | E+D | - | none | economy: pays every wave, raises interest |
 | **Eclipse** | L+D | Magic | air + ground | stuns and shreds - the boss answer |
 
 Five towers cannot shoot upwards (Boulder, Mire, Thornwall, Magma, Silt). Two do
 not shoot at all (Grove, Tombstone). Both facts are load-bearing: they are what
 stops "build the highest-DPS thing everywhere" from being correct.
+
+### Two effects the circuit made necessary
+
+A hundred and fifty monsters on the road at once is a different problem from a
+dozen, and two of Green Circle TD's towers answer it directly:
+
+- **Multishot** (Bastion) fires a full hit at three targets at a time. On a
+  circuit, targets-per-second matters more than damage-per-target, and this is
+  the only effect that buys it outright. Bastion used to be the
+  highest-single-target tower, which is an identity worth almost nothing here.
+- **One-strike kill** (Shade) has a small chance to delete a non-boss outright,
+  whatever its health. It is a lottery rather than a damage source, so it is
+  worth exactly as much as the number of things walking past - the one effect
+  in the game that gets *better* as the ring fills up. Never on a boss: a boss
+  deleted by a coin flip is not a boss.
 
 ### Levels
 
@@ -225,78 +276,119 @@ Bosses at every tenth wave, alternating ground and air.
 
 ## 7. Length and pacing
 
-**Eighty waves.** Sixteen seconds of build time between waves (twenty-five
-before the first), and a wave takes thirty to fifty seconds to walk the road.
-That is a measured **69 minutes** for a full campaign, and the draft pauses are
-load-bearing pacing: they are the moments the player looks up from the road.
+**Eighty waves on a 42-second clock**, plus twenty-two seconds before the
+first. That is **58 minutes**, exactly, and the arithmetic is now trivial -
+which is itself worth having. The old version had to estimate how long each
+wave would take to walk a road, and got it wrong by a factor of 1.7.
 
-Calling a wave early pays **2 gold per second saved**. A player who reads the
-preview and knows they are safe can compress the run and get paid for it. This
-is the only speed control that is also a decision.
+The draft pauses are the load-bearing pacing. They are the only moments the
+clock stops, and therefore the only moments the player looks up.
 
-Clearing wave 80 is a win. The run may continue into **endless**, where health
-climbs 7.5% and the purse 6.2% per wave - health outruns gold, so endless always
-ends eventually. The question is only how far.
+Calling a wave early pays **2 gold per second saved**, and on a circuit that is
+a genuine gamble rather than a free speed-up: whatever you have not killed yet
+does not go anywhere, so the new stream stacks on top of it. The gold is the
+reward for judging that your board can take it.
+
+Winning means surviving all eighty **and clearing the ring**. Outlasting the
+final stream is not the same as killing it. The run may continue into
+**endless**, where health climbs 7.5% and the purse 6.2% per wave - health
+outruns gold, so endless always ends eventually. The question is only how far.
+
+### What a wave is
+
+A wave is **not a burst**. Its whole count arrives one monster at a time, evenly
+spread across its own 42 seconds, so the road is never empty and no tower is
+ever idle.
+
+Counts are **eight times** what they were, and each monster is **an eighth** as
+tough - the same total health per wave, so the tuned difficulty curve carried
+over intact, but a completely different shape of problem. A dozen fat monsters
+is a game about single-target damage; a hundred thin ones is a game about area,
+throughput and coverage. With no exit to leak from, the second is the game worth
+having.
+
+Bosses are the exception: five of them per boss wave rather than a hundred, at
+a fifth of the wave's health each. A single unkillable boss on a circuit is not
+a threat, it is a nuisance occupying one slot of a three-hundred-slot gauge; a
+pack of five is a real damage sink, because every tower pointed at it is a tower
+not killing the stream arriving behind it.
 
 ### The four acts
 
 | Act | Waves | What it is about |
 |---|---|---|
-| **I - The Road** | 1-20 | Learning layers and armour. First air at 7, first Plated at 9. |
-| **II - Pressure** | 21-40 | Healers, swarms, wards. Focus fire and area damage. |
-| **III - Attrition** | 41-60 | Ethereal, shields, splitting, phasing. Burst versus sustain. |
-| **IV - The Deep** | 61-80 | Cross-layer escorts every wave. Full-board answers only. |
+| **I - The Ring** | 1-20 | Learning layers and armour. First air at 7, first Plated at 9. The gauge stays near empty. |
+| **II - Pressure** | 21-40 | Healers, swarms, wards. Focus fire and area damage. Leftovers start to be visible. |
+| **III - Attrition** | 41-60 | Ethereal, shields, splitting, phasing. The gauge begins to climb and does not come back down. |
+| **IV - The Deep** | 61-80 | Cross-layer escorts every wave. The ring sits at 85-95% full and every wave is the one that might overflow. |
+
+A measured run bears this out: a naive board keeps the ring under 70 of 320 for
+fifty waves, is at 194 by wave 59, and then spends waves 60 to 80 between 260
+and 310 - ten straight waves of not knowing whether it will hold. The old
+twenty-life version, by contrast, lost nothing at all for sixty-four waves and
+then died twice in the last fifteen.
 
 ---
 
 ## 8. Economy
 
-- Start with **260 gold** and **20 lives**.
-- A wave's purse is fixed. **55%** rides on kills, **45%** is paid for surviving
-  it. A half-cleared wave costs lives, which is the real currency, but does not
-  quietly destroy the economy needed to recover. Paying the whole purse on kills
-  made the balance bimodal: cruise to victory, or collapse at wave 60, with
-  almost nothing between.
+- Start with **260 gold**. There are no lives; see section 2.
+- A wave's purse is fixed. **55%** rides on kills, **45%** is a stipend paid
+  when the wave *starts* - because on a circuit no wave ever ends. The stipend
+  exists so that a board which has fallen behind still has the money to climb
+  back out. Paying the whole purse on kills made the balance bimodal: cruise to
+  victory, or collapse at wave 60, with almost nothing between.
 - Escorts split the same purse across more monsters. They are a threat, not a
   payday.
-- **Interest** pays 5% of gold in hand at each wave end, up to **20%** with
+- **Interest** pays 5% of gold in hand at each wave boundary, up to **20%** with
   Tombstones, and only on gold up to a ceiling of twelve wave-purses. Uncapped
   compound interest is not an economy, it is a runaway - the previous version
   reached 813 billion gold by wave 89 and ran to wave 136 without difficulty.
 - Selling refunds **75%** of everything invested.
 
-### Ninety-nine pads
+### The ring, and its hundred and sixteen pads
 
-The road has ninety-nine build plots beside it, on alternating tiles.
+The circuit is a rounded rectangle roughly **59 tiles** round - so a lap takes
+about half a minute - with **116 build plots** on alternating tiles, inside the
+ring and outside it.
 
-The number matters more than it looks. There used to be one on every tile in the
-band - a hundred and ninety-eight - and a campaign purse that can cover two
-hundred plots is a campaign with no placement decision in it. Filling the board
-with cheap towers beat levelling good ones, which is the opposite of what the
-cost curve is built to reward, and a simulated run confirmed it: a bot that
-papered the board with level-one towers cleared eighty waves without losing a
-life. Half as many plots makes each one worth thinking about and leaves levels
-as the real sink for gold.
+Both numbers matter more than they look. Pads were once on every tile in the
+band, which gave a hundred and ninety-eight of them, and a campaign purse that
+can cover two hundred plots is a campaign with no placement decision in it:
+filling the board with cheap towers beat levelling good ones, which is the
+opposite of what the cost curve is built to reward. A simulated run confirmed
+it - a bot that papered the board with level-one towers cleared eighty waves
+without losing a life. Alternating tiles makes each plot worth thinking about
+and leaves levels as the real sink for gold.
+
+The lap time matters because it sets how many chances a board gets at each
+monster. Too short and the ring is a blur with no positional meaning; too long
+and a tower on the far side is irrelevant to what is happening on this one.
 
 ### Nothing may pin a wave in place
 
-Three separate stalls have shipped in this game, all the same bug wearing
-different clothes: a wave that can be held still forever neither dies nor leaks,
-so it never ends and the run hangs. Stun-lock did it, then knockback, then
-Abyss - whose pull briefly scaled with the *damage* curve and dragged monsters
-six tiles per hit at level eight.
+Three separate stalls shipped in this game before the circuit existed, all the
+same bug wearing different clothes: a wave that can be held still forever
+neither dies nor leaks, so it never ends and the run hangs. Stun-lock did it,
+then knockback, then Abyss - whose pull briefly scaled with the *damage* curve
+and dragged monsters six tiles per hit at level eight.
 
-Cooldowns and diminishing returns are not enough, because they only shorten each
-effect; they do nothing about how often it lands. Two hard bounds fix it for
-good, and both are stated as guarantees rather than tunings:
+The circuit removes the *hang* - the wave clock does not care whether anything
+moved - but the underlying problem is worse here, not better: a monster pinned
+in place is a monster occupying a slot in the flood gauge forever, so hard
+control that never expires is a slow way to lose.
+
+Cooldowns and diminishing returns are not enough on their own, because they only
+shorten each effect; they do nothing about how often it lands. Two hard bounds
+fix it, and both are stated as guarantees rather than tunings:
 
 - After a stun ends, a monster **cannot be stunned again for 1.2 seconds**. It
   therefore moves for at least that long out of every stun-plus-window.
-- Every monster has a **total pushback budget of 5 tiles** for its whole life,
-  shared by knockback and pull. Once spent, the road is a one-way street.
+- Every monster has a **pushback budget of 5 tiles per lap**, shared by
+  knockback and pull. Once spent, the ring turns one-way until it comes round.
 
-The balance harness asserts that no wave takes longer than 200 seconds, which is
-what catches the next one.
+The harness asserts the wave clock actually advances, which is what catches the
+next one.
 
 ---
 
@@ -307,10 +399,11 @@ solids. It was being drawn with a deferred-flavoured pipeline costing seven
 render passes a frame - shadow map, multisampled scene, separate effects buffer,
 three bloom blits, composite - and in a browser falling back to WebGL2 that is
 where the frame went. Measured on a packed board (198 towers, 5,300 instances)
-the CPU side costs **0.05 ms** to build the draw list and **0.03 ms** to step the
-simulation on a full board of ninety-nine towers and a hundred and twenty
-monsters. Nothing about the slowness was the simulation, and
-`a_packed_board_costs_almost_nothing_on_the_cpu` keeps that true.
+the CPU side costs **0.09 ms** to build the draw list and **0.08 ms** to step the
+simulation on the worst frame the game can produce - a full ring of 320 monsters
+against a full board of 116 towers, ten thousand instances. Nothing about the
+slowness was the simulation, and `a_packed_board_costs_almost_nothing_on_the_cpu`
+keeps that true.
 
 The pipeline is therefore collapsed by quality tier:
 
@@ -334,8 +427,10 @@ discrete GPU gets High without anyone being asked.
 
 ## 10. What is deliberately not here
 
-- **No mazing.** The road is fixed. A creep's position is one scalar - how far
-  along it has walked - which is what keeps four thousand of them cheap.
+- **No mazing.** The circuit is fixed. A creep's position is one scalar - how
+  far round it has walked - which is what keeps three hundred of them cheap: the
+  worst frame the game can produce, a full ring against a full board, costs
+  0.09 ms to build and 0.08 ms to simulate.
 - **No difficulty menu.** One curve, tuned properly, beats three curves of which
   one was ever tested.
 - **No ray tracing.** WebGPU does not expose it, so it cannot ship to a browser,
