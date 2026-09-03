@@ -567,7 +567,7 @@ fn build_ghost(g: &Game, d: &mut DrawList, t: f32) {
         towers::draw_ghost(d, def_i, tier, p, t);
         d.ground_ring(
             p,
-            def.stats(tier).range,
+            TOWERS[def_i].range,
             0.10,
             rgba(tower_color(def), 0.55),
             80,

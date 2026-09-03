@@ -682,7 +682,7 @@ pub fn on_hit_specials(g: &mut Game, ti: usize, ci: usize, _crit: bool) {
                 // Bosses are immune to hard control by design, and nothing can
                 // be stunned again inside its post-stun window.
                 let locked = g.creeps[ci].stun > 0.0 || g.creeps[ci].stun_immune > 0.0;
-                if g.creeps[ci].armor != Armor::Boss && !locked && g.rng.chance(chance) {
+                if g.creeps[ci].armour_type != ArmourType::Boss && !locked && g.rng.chance(chance) {
                     let c = &mut g.creeps[ci];
                     // Diminishing returns. Without them, enough Eclipse towers
                     // freeze a wave permanently: nothing dies, nothing leaks,
@@ -725,7 +725,7 @@ pub fn on_hit_specials(g: &mut Game, ti: usize, ci: usize, _crit: bool) {
 
 /// Moves one monster back down the road, within its cooldown and its budget.
 fn push_back(c: &mut crate::game::Creep, dist: f32) {
-    if c.armor == Armor::Boss || c.kb_cd > 0.0 || c.push_left <= 0.0 {
+    if c.armour_type == ArmourType::Boss || c.kb_cd > 0.0 || c.push_left <= 0.0 {
         return;
     }
     let moved = dist.min(c.push_left);
@@ -740,11 +740,11 @@ pub fn damage_creep(g: &mut Game, ci: usize, base: f32, ti: usize, crit: bool) -
         return false;
     }
     let dtype = if ti < g.towers.len() {
-        g.towers[ti].dtype()
+        g.towers[ti].attack()
     } else {
-        Damage::Physical
+        Attack::Physical
     };
-    let mult = armor_mult(dtype, g.creeps[ci].armor);
+    let mult = armor_mult(dtype, g.creeps[ci].armour_type);
     let shred = if g.creeps[ci].shred.active() {
         g.creeps[ci].shred.amt
     } else {
@@ -770,7 +770,7 @@ pub fn damage_creep(g: &mut Game, ci: usize, base: f32, ti: usize, crit: bool) -
     // One-strike kill. Rolled before anything else, because a monster this
     // lands on does not care about armour, shields or health. Never on a boss:
     // a boss deleted by a coin flip is not a boss.
-    if ti < g.towers.len() && g.creeps[ci].armor != Armor::Boss {
+    if ti < g.towers.len() && g.creeps[ci].armour_type != ArmourType::Boss {
         let chance = g.towers[ti]
             .specials()
             .iter()
@@ -803,7 +803,7 @@ pub fn damage_creep(g: &mut Game, ci: usize, base: f32, ti: usize, crit: bool) -
 
     let c = &mut g.creeps[ci];
     // Shields soak everything except Toxic, which is the point of Toxic.
-    if c.shield > 0.0 && dtype != Damage::Toxic {
+    if c.shield > 0.0 && dtype != Attack::Toxic {
         let absorbed = dealt.min(c.shield);
         c.shield -= absorbed;
         dealt -= absorbed;

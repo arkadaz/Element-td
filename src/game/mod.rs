@@ -180,7 +180,11 @@ pub struct Creep {
     pub hp: f32,
     pub max_hp: f32,
     pub base_speed: f32,
-    pub armor: Armor,
+    /// Warcraft III armour: a *number*, reduced with diminishing returns, plus
+    /// a type deciding which attacks are resisted at all. Together those two
+    /// are the whole counter system - see `greentd_types::damage_taken`.
+    pub armour: i32,
+    pub armour_type: ArmourType,
     pub kind: Kind,
     pub radius: f32,
     pub bounty: u32,
@@ -207,17 +211,6 @@ pub struct Creep {
     /// there so the player can see which monsters have been round before, and
     /// so `Strongest`-mode towers have something to sort veterans by.
     pub laps: u32,
-    pub regen: f32,
-    pub splits: u8,
-    /// Absorbs damage before health is touched (Bulwark).
-    pub shield: f32,
-    pub max_shield: f32,
-    /// Heals nearby monsters this fraction of max health per second (Mender).
-    pub heal: f32,
-    /// Ignores slows for half of every second (Phaser).
-    pub phasing: bool,
-    /// Set each step while phasing is suppressing slows.
-    pub slow_off: bool,
     pub flash: f32,
     pub bob: f32,
 }
@@ -228,11 +221,7 @@ impl Creep {
         if self.stun > 0.0 {
             return 0.0;
         }
-        let slow = if self.slow.active() && !self.slow_off {
-            self.slow.amt
-        } else {
-            0.0
-        };
+        let slow = if self.slow.active() { self.slow.amt } else { 0.0 };
         self.base_speed * (1.0 - slow).max(0.15)
     }
     #[inline]
@@ -259,8 +248,9 @@ impl Creep {
 
 #[derive(Clone)]
 pub struct Tower {
+    /// Index into [`TOWERS`] - a family *and* a rung, together. Upgrading moves
+    /// this to the next rung rather than bumping a separate tier counter.
     pub def: usize,
-    pub tier: u32,
     pub slot: usize,
     pub pos: [f32; 2],
     pub cooldown: f32,
@@ -282,72 +272,71 @@ pub struct Tower {
 }
 
 impl Tower {
-    pub fn def(&self) -> &'static TowerDef {
+    pub fn def(&self) -> &'static TowerLevel {
         &TOWERS[self.def]
     }
-    pub fn stats(&self) -> Stats {
-        self.def().stats(self.tier)
+    pub fn family(&self) -> Family {
+        self.def().family
     }
-    pub fn specials(&self) -> SpecialSet {
-        self.def().specials_for()
+    /// Which rung of its ladder this is, counting from one.
+    pub fn level(&self) -> u32 {
+        self.def().step + 1
     }
-    pub fn dmg(&self) -> f32 {
-        self.stats().dmg * (1.0 + self.buff_dmg)
-    }
-    pub fn rate(&self) -> f32 {
-        self.stats().rate * (1.0 + self.buff_rate)
-    }
-    pub fn range(&self) -> f32 {
-        self.stats().range + self.buff_range
-    }
-    pub fn splash(&self) -> f32 {
-        self.stats().splash
-    }
-    pub fn scale(&self) -> f32 {
-        TowerDef::scale(self.tier)
-    }
-    /// Multiplier applied to auras, income and interest at this level.
-    pub fn utility(&self) -> f32 {
-        TowerDef::utility_scale(self.tier)
-    }
-    pub fn dtype(&self) -> Damage {
-        self.def().dtype
+    pub fn ladder_len(&self) -> u32 {
+        ladder_len(self.family())
     }
     pub fn full_name(&self) -> &'static str {
         self.def().name
     }
-    /// The milestone this level has passed, if any. Shown on the card and used
-    /// by the model to change shape.
-    pub fn rank(&self) -> Option<&'static str> {
-        match self.tier {
-            t if t >= ASCEND_TIER => Some("Ascendant"),
-            t if t >= ATTUNE_TIER => Some("Attuned"),
-            _ => None,
-        }
+    pub fn attack(&self) -> Attack {
+        self.def().attack
+    }
+    pub fn targets(&self) -> Targets {
+        self.def().targets
+    }
+    pub fn flags(&self) -> Flag {
+        self.def().flags
+    }
+    /// Damage of one hit, with any aura bonus.
+    pub fn dmg(&self) -> f32 {
+        self.def().damage * (1.0 + self.buff_dmg)
+    }
+    /// Attacks per second, with any aura bonus.
+    pub fn rate(&self) -> f32 {
+        let cd = self.def().cooldown.max(0.05);
+        (1.0 / cd) * (1.0 + self.buff_rate)
+    }
+    pub fn range(&self) -> f32 {
+        self.def().range + self.buff_range
+    }
+    pub fn splash(&self) -> f32 {
+        self.def().splash
+    }
+    pub fn is_support(&self) -> bool {
+        !self.def().attacks()
     }
     pub fn sell_value(&self) -> u32 {
         (self.invested as f32 * SELL_REFUND).round() as u32
     }
-    /// Cost of the next level, or None at the ceiling. The ceiling is passed in
-    /// because it depends on the run's essences, which a Tower does not know
-    /// about - see [`Game::tier_cap_of`].
-    pub fn upgrade_cost_capped(&self, cap: u32) -> Option<u32> {
-        if self.tier >= cap.min(MAX_TIER) {
-            return None;
-        }
-        let d = self.def();
-        Some(d.cost_at(self.tier + 1) - d.cost_at(self.tier))
+    /// The rung above, and what it costs. `None` at the top of a ladder - and
+    /// on a Single shot Tower, whose next step is a choice of six families.
+    pub fn upgrade_target(&self) -> Option<(usize, u32)> {
+        next_level(self.def).map(|i| (i, TOWERS[i].gold))
     }
-    /// How tall the tower stands, in tiles.
+    /// Whether this tower is the ten gold seed, and so offers a choice rather
+    /// than a next level.
+    pub fn needs_specialisation(&self) -> bool {
+        self.family() == Family::Single
+    }
+    /// How tall it stands, in tiles - taller the further up its ladder.
     pub fn height(&self) -> f32 {
-        0.55 + 0.30 * (self.tier - 1) as f32
+        0.55 + 0.16 * (self.def().step.min(12) as f32)
     }
-    pub fn is_support(&self) -> bool {
-        self.def().dtype == Damage::None
-    }
-    /// Where shots leave the tower.
     pub fn muzzle_height(&self) -> f32 {
         self.height() + 0.16
+    }
+    pub fn scale(&self) -> f32 {
+        1.0 + 0.10 * self.def().step as f32
     }
 }
 
@@ -546,16 +535,6 @@ pub struct Game {
     pub seed: u64,
     pub spatial: SpatialHash,
 
-    /// How many essences of each element the player holds, indexed by
-    /// [`Element::idx`]. This, and nothing else, decides which of the
-    /// twenty-one towers exist for this run and how far each may be upgraded.
-    pub essence: [u8; 6],
-    /// The offer waiting to be taken. Combat cannot start while this is set -
-    /// the draft is a decision, not a notification.
-    pub pending_draft: Option<[Element; DRAFT_SIZE]>,
-    /// How many awards have been handed out, which indexes [`ESSENCE_WAVES`].
-    pub drafts_taken: usize,
-
     /// True once the campaign has been cleared and the run has continued.
     pub endless: bool,
     pub wave: u32,
@@ -612,9 +591,6 @@ impl Game {
             rng: Rng::new(0x5eed_1234_abcd_9876),
             seed: 0x5eed_1234_abcd_9876,
             spatial: SpatialHash::new(),
-            essence: [0; 6],
-            pending_draft: None,
-            drafts_taken: 0,
             endless: false,
             wave: 0,
             phase: Phase::Build,
@@ -703,133 +679,35 @@ impl Game {
         self.wave_def(self.wave + 1)
     }
 
-    /// The highest level this tower may reach with the essences held.
-    pub fn tier_cap_of(&self, def: usize) -> u32 {
-        TOWERS.get(def).map_or(0, |d| tier_cap(&self.essence, d))
-    }
-    /// Kept under the old name because the UI reads naturally with it.
-    pub fn max_tier_of(&self, def: usize) -> u32 {
-        self.tier_cap_of(def)
-    }
-    /// Whether this tower can be built at all yet.
-    pub fn unlocked(&self, def: usize) -> bool {
-        self.tier_cap_of(def) > 0
-    }
-    /// What is still missing before this tower unlocks, for the build card.
-    pub fn missing_elements(&self, def: usize) -> Vec<Element> {
-        let Some(d) = TOWERS.get(def) else {
-            return Vec::new();
-        };
-        d.elements()
-            .filter(|e| self.essence[e.idx()] == 0)
-            .collect()
-    }
-    /// Cost of the next level for a tower, respecting its essence ceiling.
-    pub fn upgrade_cost_of(&self, ti: usize) -> Option<u32> {
-        let t = self.towers.get(ti)?;
-        t.upgrade_cost_capped(self.tier_cap_of(t.def))
-    }
-    /// Total essences drafted so far.
-    pub fn essences_held(&self) -> u32 {
-        self.essence.iter().map(|&n| n as u32).sum()
-    }
-    /// The wave the next essence arrives on, if the campaign has any left.
-    pub fn next_essence_wave(&self) -> Option<u32> {
-        ESSENCE_WAVES.get(self.drafts_taken).copied()
-    }
-
-    /// Offers a draft if this wave owes one. Called at every wave boundary and
-    /// once at the start of the run.
-    pub fn offer_draft_if_due(&mut self) {
-        self.maybe_offer_draft();
-    }
-
-    fn maybe_offer_draft(&mut self) {
-        if self.pending_draft.is_some() {
-            return;
-        }
-        let Some(&due) = ESSENCE_WAVES.get(self.drafts_taken) else {
-            return;
-        };
-        // `wave` is the number of waves *cleared*, so the award for wave N is
-        // offered during the build phase that precedes it.
-        if self.wave + 1 >= due {
-            self.pending_draft = Some(draft_offer(&mut self.rng, &self.essence));
-        }
-    }
-
-    /// Takes one of the three offered elements.
-    pub fn take_essence(&mut self, choice: usize) -> bool {
-        let Some(offer) = self.pending_draft else {
-            return false;
-        };
-        let Some(&e) = offer.get(choice) else {
-            return false;
-        };
-        self.essence[e.idx()] = self.essence[e.idx()].saturating_add(1);
-        self.pending_draft = None;
-        self.drafts_taken += 1;
-        self.sound_cues.push(Cue::Build);
-        self.toast(format!("{} essence taken", e.name()));
-        // Another award may already be due - the opening hands out three in the
-        // first three waves, and a resumed or fast-forwarded run can owe more
-        // than one at a time.
-        self.maybe_offer_draft();
+    /// Every tower is buildable; gold is the only gate. Kept under the old
+    /// name because the HUD reads naturally with it.
+    pub fn unlocked(&self, _def: usize) -> bool {
         true
     }
 
-    /// Gold in hand plus everything sunk into towers.
-    pub fn net_worth(&self) -> i64 {
-        self.gold + self.towers.iter().map(|t| t.invested as i64).sum::<i64>()
+    /// What upgrading this tower costs, if its ladder goes any higher.
+    pub fn upgrade_cost_of(&self, ti: usize) -> Option<u32> {
+        self.towers.get(ti)?.upgrade_target().map(|(_, g)| g)
     }
 
-    /// What interest will pay if the wave ended right now.
-    pub fn projected_interest(&self) -> i64 {
-        let earning = self.gold.clamp(0, self.interest_ceiling());
-        (earning as f64 * self.interest_rate() as f64).floor() as i64
+    /// The six families a Single shot Tower can be turned into, with prices.
+    pub fn specialisation_choices(&self, ti: usize) -> Vec<(usize, u32)> {
+        let Some(t) = self.towers.get(ti) else {
+            return Vec::new();
+        };
+        if !t.needs_specialisation() {
+            return Vec::new();
+        }
+        specialisations().into_iter().map(|i| (i, TOWERS[i].gold)).collect()
     }
-
-    /// What the Tombstones will pay at the end of this wave.
-    pub fn projected_income(&self) -> i64 {
-        self.tower_income()
-    }
-
-    pub fn can_afford(&self, cost: u32) -> bool {
-        self.gold >= cost as i64
-    }
-
-    /// The tower standing on a pad, if any.
-    pub fn tower_in_slot(&self, slot: usize) -> Option<usize> {
-        self.board.slots.get(slot).and_then(|s| s.tower)
-    }
-
-    pub fn toast(&mut self, msg: impl Into<String>) {
-        self.toast = Some((msg.into(), 2.2));
-    }
-
-    // ------------------------------------------------ player actions
 
     pub fn try_build(&mut self, slot: usize) -> bool {
-        let Some((def, tier)) = self.build_choice else {
+        let Some((def, _)) = self.build_choice else {
             return false;
         };
-        if tier == 0 || tier > MAX_TIER {
+        let Some(level) = TOWERS.get(def) else {
             return false;
-        }
-        let cap = self.tier_cap_of(def);
-        if cap == 0 {
-            let missing: Vec<&str> = self
-                .missing_elements(def)
-                .iter()
-                .map(|e| e.name())
-                .collect();
-            self.toast(format!("Needs {} essence", missing.join(" and ")));
-            self.sound_cues.push(Cue::Error);
-            return false;
-        }
-        if tier > cap {
-            return false;
-        }
+        };
         let Some(s) = self.board.slots.get(slot) else {
             return false;
         };
@@ -839,7 +717,7 @@ impl Game {
             return false;
         }
         let pos = s.pos;
-        let cost = TOWERS[def].cost_at(tier);
+        let cost = level.gold;
         if !self.can_afford(cost) {
             self.toast("Not enough gold");
             self.sound_cues.push(Cue::Error);
@@ -852,7 +730,6 @@ impl Game {
         let ti = self.towers.len();
         self.towers.push(Tower {
             def,
-            tier,
             slot,
             pos,
             cooldown: 0.0,
@@ -874,16 +751,9 @@ impl Game {
         self.rebuild_auras();
         self.selected = Some(ti);
         self.sound_cues.push(Cue::Build);
-        let c = tower_color(&TOWERS[def]);
-        self.fx.burst(
-            &mut self.rng,
-            pos,
-            22,
-            3.0,
-            [c[0], c[1], c[2], 1.0],
-            0.5,
-            0.30,
-        );
+        let c = level.color();
+        self.fx
+            .burst(&mut self.rng, pos, 22, 3.0, [c[0], c[1], c[2], 1.0], 0.5, 0.30);
         true
     }
 
@@ -927,25 +797,21 @@ impl Game {
         }
     }
 
-    /// Upgrades one level, if the essences held allow it.
+    /// Buys the next rung of this tower's ladder.
+    ///
+    /// A Single shot Tower has no next rung - what it has is a *choice* of six
+    /// families, which is [`Game::specialise`].
     pub fn upgrade(&mut self, ti: usize) {
         if ti >= self.towers.len() {
             return;
         }
-        let cap = self.tier_cap_of(self.towers[ti].def);
-        let Some(cost) = self.towers[ti].upgrade_cost_capped(cap) else {
-            // Two different walls, and telling them apart is the whole point of
-            // the draft: one is the end of the ladder, the other is a nudge to
-            // spend the next essence on this element.
-            if cap < MAX_TIER {
-                let d = self.towers[ti].def();
-                self.toast(format!(
-                    "Level {cap} needs more {} essence",
-                    d.element_label()
-                ));
-            } else {
-                self.toast("Already at max level");
-            }
+        if self.towers[ti].needs_specialisation() {
+            self.toast("Choose what it becomes");
+            self.sound_cues.push(Cue::Error);
+            return;
+        }
+        let Some((next, cost)) = self.towers[ti].upgrade_target() else {
+            self.toast("Top of the ladder");
             self.sound_cues.push(Cue::Error);
             return;
         };
@@ -954,26 +820,45 @@ impl Game {
             self.sound_cues.push(Cue::Error);
             return;
         }
+        self.pay_and_replace(ti, next, cost);
+    }
+
+    /// Turns a Single shot Tower into one of the six families that cannot be
+    /// bought any other way.
+    pub fn specialise(&mut self, ti: usize, into: usize) {
+        if ti >= self.towers.len() || !self.towers[ti].needs_specialisation() {
+            return;
+        }
+        let Some(level) = TOWERS.get(into) else { return };
+        if level.step != 0 || level.family.buildable() {
+            return;
+        }
+        let cost = level.gold;
+        if !self.can_afford(cost) {
+            self.toast("Not enough gold");
+            self.sound_cues.push(Cue::Error);
+            return;
+        }
+        self.pay_and_replace(ti, into, cost);
+    }
+
+    fn pay_and_replace(&mut self, ti: usize, into: usize, cost: u32) {
         self.gold -= cost as i64;
         self.stats.gold_spent += cost as u64;
-        let def = self.towers[ti].def;
         let t = &mut self.towers[ti];
-        t.tier += 1;
+        t.def = into;
         t.invested += cost;
         t.flash = 1.0;
+        // A rung change can move the tower onto a different attack type, so its
+        // target is no longer necessarily something it can hurt.
+        t.target_uid = 0;
+        t.ramp = 0.0;
         let pos = t.pos;
-        let c = tower_color(&TOWERS[def]);
+        let c = TOWERS[into].color();
         self.rebuild_auras();
         self.sound_cues.push(Cue::Build);
-        self.fx.burst(
-            &mut self.rng,
-            pos,
-            30,
-            3.6,
-            [c[0], c[1], c[2], 1.0],
-            0.6,
-            0.34,
-        );
+        self.fx
+            .burst(&mut self.rng, pos, 30, 3.6, [c[0], c[1], c[2], 1.0], 0.6, 0.34);
     }
 
     /// Recomputes every tower's aura bonus. Only runs when the board changes.

@@ -20,7 +20,7 @@ fn local(p: [f32; 2], yaw: f32, fwd: f32, right: f32) -> [f32; 2] {
 }
 
 pub fn draw(d: &mut DrawList, c: &Creep) {
-    let base = c.armor.color();
+    let base = c.armour_type.color();
     let body_rgb = mix(base, [1.0, 1.0, 1.0], c.flash * 0.75);
     let body = rgba(body_rgb, 1.0);
     let dark = rgba(mix(body_rgb, [0.05, 0.05, 0.08], 0.45), 1.0);
@@ -325,7 +325,7 @@ fn warden(d: &mut DrawList, c: &Creep, col: Color, dark: Color) {
             [r * 0.34, r * 0.34, r * 0.14],
             a,
             0.0,
-            rgba(c.armor.color(), 1.0),
+            rgba(c.armour_type.color(), 1.0),
             Material::GEM,
             1.0,
         );
@@ -479,7 +479,7 @@ fn phaser(d: &mut DrawList, c: &Creep, col: Color, dark: Color) {
             [c.pos[0], c.pos[1], bz],
             r * 3.0,
             2.2,
-            rgba(c.armor.color(), 0.30),
+            rgba(c.armour_type.color(), 0.30),
         );
     }
 }
@@ -535,7 +535,7 @@ fn wraith(d: &mut DrawList, c: &Creep, col: Color, dark: Color) {
         [c.pos[0], c.pos[1], bz],
         r * 3.4,
         2.0,
-        rgba(c.armor.color(), 0.26),
+        rgba(c.armour_type.color(), 0.26),
     );
 }
 
@@ -596,7 +596,7 @@ fn seraph(d: &mut DrawList, c: &Creep, col: Color, dark: Color) {
         [c.pos[0], c.pos[1], z],
         r * 5.0,
         1.9,
-        rgba(c.armor.color(), 0.32),
+        rgba(c.armour_type.color(), 0.32),
     );
 }
 
@@ -632,7 +632,7 @@ fn boss(d: &mut DrawList, c: &Creep, col: Color, dark: Color) {
             r * 0.34,
             hgt,
             c.facing,
-            rgba(c.armor.color(), 1.0),
+            rgba(c.armour_type.color(), 1.0),
             Material::GEM,
         );
     }
@@ -657,7 +657,7 @@ fn boss(d: &mut DrawList, c: &Creep, col: Color, dark: Color) {
         [c.pos[0], c.pos[1], bz],
         r * 3.4,
         2.0,
-        rgba(c.armor.color(), 0.35),
+        rgba(c.armour_type.color(), 0.35),
     );
 }
 
@@ -1040,7 +1040,7 @@ fn skylord(d: &mut DrawList, c: &Creep, col: Color, dark: Color) {
             [r * 0.42, r * 0.42, r * 0.30],
             a,
             0.0,
-            rgba(c.armor.color(), 1.0),
+            rgba(c.armour_type.color(), 1.0),
             Material::GEM,
             1.0,
         );
@@ -1049,6 +1049,6 @@ fn skylord(d: &mut DrawList, c: &Creep, col: Color, dark: Color) {
         [c.pos[0], c.pos[1], z],
         r * 4.5,
         2.0,
-        rgba(c.armor.color(), 0.38),
+        rgba(c.armour_type.color(), 0.38),
     );
 }
