@@ -358,3 +358,52 @@ fn every_glyph_the_hud_prints_actually_exists() {
         );
     }
 }
+
+/// Text that does not fit its box is shortened, never clipped.
+///
+/// A centred string wider than its container loses characters off *both* ends,
+/// so "Stacking poison" rendered as "tacking poiso" - which reads as a word
+/// rather than as truncation, and is therefore worse than useless. The build
+/// palette shrinks its cards to fit however many towers the draft has unlocked,
+/// so this is not a hypothetical.
+#[test]
+fn labels_too_wide_for_their_box_are_shortened_not_cut() {
+    let ctx = Context::default();
+    ui::install_style(&ctx);
+    let mut out = ctx.run_ui(
+        RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(800.0, 600.0))),
+            ..Default::default()
+        },
+        |ui| {
+            let font = egui::FontId::proportional(9.0);
+            let width = |s: &str| {
+                ui.painter()
+                    .layout_no_wrap(s.to_owned(), font.clone(), egui::Color32::WHITE)
+                    .rect
+                    .width()
+            };
+
+            // Every role on every build card, at the narrowest a card can get.
+            const MIN_CARD: f32 = 46.0 - 6.0;
+            for d in crate::game::defs::TOWERS {
+                let short = ui::elide(ui, d.role, &font, MIN_CARD);
+                assert!(
+                    width(&short) <= MIN_CARD,
+                    "{:?} still {:.1}px wide in a {MIN_CARD}px card",
+                    short,
+                    width(&short)
+                );
+                assert!(!short.is_empty(), "{} elided away to nothing", d.role);
+            }
+
+            // A string that already fits is left exactly alone.
+            assert_eq!(ui::elide(ui, "Roots", &font, 400.0), "Roots");
+            // And one that does not is marked as shortened.
+            let cut = ui::elide(ui, "Stacking poison", &font, 40.0);
+            assert!(cut.ends_with(".."), "{cut:?} is not marked as shortened");
+            assert!(!cut.starts_with("tacking"), "elide cut from the front");
+        },
+    );
+    out.textures_delta.clear();
+}

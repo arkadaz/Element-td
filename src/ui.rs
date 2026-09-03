@@ -1340,11 +1340,16 @@ fn tower_card(g: &mut Game, ui: &mut Ui, rect: Rect, def_i: usize, tier: u32, ho
         FontId::proportional(11.5),
         pal::INK,
     );
+    // Elided, not clipped. The palette shrinks its cards to fit however many
+    // towers the draft has unlocked, so a fixed string will eventually be wider
+    // than the card - and a centred one then loses characters off *both* ends,
+    // which is how "Stacking poison" came to read "tacking poiso".
+    let role_font = FontId::proportional(9.0);
     p.text(
         pos2(rect.center().x, rect.top() + h * 0.68),
         Align2::CENTER_TOP,
-        def.role,
-        FontId::proportional(9.0),
+        elide(ui, def.role, &role_font, rect.width() - 6.0),
+        role_font,
         pal::DIM,
     );
     p.text(
@@ -1376,6 +1381,32 @@ fn tower_card(g: &mut Game, ui: &mut Ui, rect: Rect, def_i: usize, tier: u32, ho
         g.selected = None;
     }
     resp.on_hover_ui(|ui| tower_tooltip(ui, def_i, tier, cap));
+}
+
+/// Shortens `text` until it fits `max_w`, ending in two dots.
+///
+/// Two dots rather than a single ellipsis character on purpose: the HUD's
+/// font coverage is asserted by a test, and `…` is exactly the kind of glyph
+/// that is missing from a bundled font and renders as a tofu box.
+pub(crate) fn elide(ui: &Ui, text: &str, font: &FontId, max_w: f32) -> String {
+    let width = |s: &str| {
+        ui.painter()
+            .layout_no_wrap(s.to_owned(), font.clone(), pal::DIM)
+            .rect
+            .width()
+    };
+    if width(text) <= max_w {
+        return text.to_string();
+    }
+    let mut best = String::new();
+    for (i, _) in text.char_indices() {
+        let candidate = format!("{}..", &text[..i]);
+        if width(&candidate) > max_w {
+            break;
+        }
+        best = candidate;
+    }
+    best
 }
 
 fn tower_tooltip(ui: &mut Ui, def_i: usize, tier: u32, cap: u32) {
@@ -1518,69 +1549,77 @@ fn draft(g: &mut Game, ctx: &Context) {
     let Some(offer) = g.pending_draft else { return };
     let mut taken: Option<usize> = None;
 
-    egui::Modal::new(Id::new("essence_draft")).show(ctx, |ui| {
-        ui.set_width(620.0);
-        ui.vertical_centered(|ui| {
-            ui.add_space(4.0);
-            ui.label(
-                RichText::new("CHOOSE AN ESSENCE")
-                    .size(20.0)
-                    .strong()
-                    .color(pal::INK),
-            );
-            ui.label(
-                RichText::new(format!(
-                    "Essence {} of {}  ·  before wave {}",
-                    g.drafts_taken + 1,
-                    ESSENCE_WAVES.len(),
-                    g.wave + 1
-                ))
-                .size(11.5)
-                .color(pal::DIM),
-            );
-        });
-        ui.add_space(10.0);
+    egui::Modal::new(Id::new("essence_draft"))
+        .frame(
+            egui::Frame::NONE
+                .fill(pal::PANEL)
+                .stroke(Stroke::new(1.0, pal::LINE))
+                .corner_radius(CornerRadius::same(14))
+                .inner_margin(20.0),
+        )
+        .show(ctx, |ui| {
+            ui.set_width(620.0);
+            ui.vertical_centered(|ui| {
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new("CHOOSE AN ESSENCE")
+                        .size(20.0)
+                        .strong()
+                        .color(pal::INK),
+                );
+                ui.label(
+                    RichText::new(format!(
+                        "Essence {} of {}  ·  before wave {}",
+                        g.drafts_taken + 1,
+                        ESSENCE_WAVES.len(),
+                        g.wave + 1
+                    ))
+                    .size(11.5)
+                    .color(pal::DIM),
+                );
+            });
+            ui.add_space(10.0);
 
-        ui.horizontal(|ui| {
-            for (i, e) in offer.iter().enumerate() {
-                let e = *e;
-                let have = g.essence[e.idx()] as u32;
-                let card = egui::Frame::NONE
-                    .fill(pal::CARD)
-                    .stroke(Stroke::new(1.5, c32(e.color(), 0.75)))
-                    .corner_radius(CornerRadius::same(10))
-                    .inner_margin(egui::Margin::same(12));
-                card.show(ui, |ui| {
-                    ui.set_width(178.0);
-                    ui.vertical(|ui| {
-                        ui.label(
-                            RichText::new(e.name())
-                                .size(17.0)
-                                .strong()
-                                .color(c32(e.color(), 1.0)),
-                        );
-                        ui.label(RichText::new(e.flavour()).size(11.0).color(pal::DIM));
-                        ui.add_space(4.0);
-                        ui.label(
-                            RichText::new(format!("You hold {have}  ->  {}", have + 1))
-                                .size(11.5)
-                                .monospace()
-                                .color(pal::GOLD),
-                        );
-                        ui.add_space(6.0);
-                        draft_effects(ui, g, e);
-                        ui.add_space(8.0);
-                        let b = egui::Button::new(RichText::new("Take").size(13.0).strong())
-                            .fill(c32(e.color(), 0.30))
-                            .min_size(vec2(154.0, 32.0));
-                        if ui.add(b).clicked() {
-                            taken = Some(i);
-                        }
+            ui.horizontal(|ui| {
+                for (i, e) in offer.iter().enumerate() {
+                    let e = *e;
+                    let have = g.essence[e.idx()] as u32;
+                    let card = egui::Frame::NONE
+                        .fill(pal::CARD)
+                        .stroke(Stroke::new(1.5, c32(e.color(), 0.75)))
+                        .corner_radius(CornerRadius::same(10))
+                        .inner_margin(egui::Margin::same(12));
+                    card.show(ui, |ui| {
+                        ui.set_width(178.0);
+                        ui.vertical(|ui| {
+                            ui.label(
+                                RichText::new(e.name())
+                                    .size(17.0)
+                                    .strong()
+                                    .color(c32(e.color(), 1.0)),
+                            );
+                            ui.label(RichText::new(e.flavour()).size(11.0).color(pal::DIM));
+                            ui.add_space(4.0);
+                            ui.label(
+                                RichText::new(format!("You hold {have}  ->  {}", have + 1))
+                                    .size(11.5)
+                                    .monospace()
+                                    .color(pal::GOLD),
+                            );
+                            ui.add_space(6.0);
+                            draft_effects(ui, g, e);
+                            ui.add_space(8.0);
+                            let b = egui::Button::new(RichText::new("Take").size(13.0).strong())
+                                .fill(c32(e.color(), 0.30))
+                                .min_size(vec2(154.0, 32.0));
+                            if ui.add(b).clicked() {
+                                taken = Some(i);
+                            }
+                        });
                     });
-                });
-            }
+                }
+            });
         });
-    });
 
     if let Some(i) = taken {
         g.take_essence(i);
@@ -1703,7 +1742,7 @@ fn game_over(g: &mut Game, ctx: &Context) {
                     } else if g.endless {
                         format!("Endless run ended on wave {}.", g.wave)
                     } else {
-                        format!("The road fell on wave {}.", g.wave)
+                        format!("The ring overflowed on wave {}.", g.wave)
                     })
                     .size(13.0)
                     .color(pal::DIM),
@@ -1718,7 +1757,14 @@ fn game_over(g: &mut Game, ctx: &Context) {
                             ("Gold earned", gold_str(g.stats.gold_earned as i64)),
                             ("Net worth", gold_str(g.net_worth())),
                             ("Towers built", g.stats.towers_built.to_string()),
-                            ("Leaked", g.stats.leaked.to_string()),
+                            // Not "leaked" - nothing can leak off a circuit,
+                            // and a stat that is always zero is worse than no
+                            // stat at all. How full the ring ever got is the
+                            // number that describes the run.
+                            (
+                                "Fullest ring",
+                                format!("{} / {FLOOD_LIMIT}", g.stats.peak_circling),
+                            ),
                         ] {
                             ui.label(RichText::new(k).color(pal::DIM));
                             ui.label(RichText::new(v).monospace());

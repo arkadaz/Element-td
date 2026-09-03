@@ -47,8 +47,22 @@ pub struct Shot {
     pub rgba: Vec<u8>,
 }
 
-/// Renders one frame of `game` and returns the pixels.
-pub fn capture(game: &Game, decor: &Decor, width: u32, height: u32, quality: Quality) -> Shot {
+/// Creates a headless device, records a frame through `record`, and reads the
+/// result back.
+///
+/// Both capture paths share this: the board-only one and the one that also
+/// draws the HUD. `record` draws into `view` and returns any command buffers
+/// that must be submitted before the encoder it was given.
+pub fn render_to_image<F>(width: u32, height: u32, format: wgpu::TextureFormat, record: F) -> Shot
+where
+    F: FnOnce(
+        &wgpu::Device,
+        &wgpu::Queue,
+        &wgpu::Adapter,
+        &mut wgpu::CommandEncoder,
+        &wgpu::TextureView,
+    ) -> Vec<wgpu::CommandBuffer>,
+{
     pollster_block(async move {
         // No display handle: there is no window and no surface to present to,
         // which is the whole point of this path.
@@ -74,27 +88,6 @@ pub fn capture(game: &Game, decor: &Decor, width: u32, height: u32, quality: Qua
             .await
             .expect("no device for offscreen capture");
 
-        let mut renderer = Renderer::new(&device, &adapter, FORMAT);
-        renderer.quality = quality;
-        renderer.set_quality(&device, quality);
-
-        let statics = view::build_static(game, decor);
-        renderer.set_static_scene(&queue, &statics.casters, &statics.flat);
-        renderer.upload_static(&queue);
-
-        let mut list = DrawList::default();
-        view::draw_scene(game, decor, &mut list, game.time);
-
-        let camera = Camera::frame_board(
-            BW,
-            BH,
-            width as f32 / height.max(1) as f32,
-            CAM_PITCH_DEG.to_radians(),
-            0.0,
-            cam_zoom(),
-        );
-        let light = shadow_view_proj(BW, BH, LIGHT_DIR);
-
         let target = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("capture target"),
             size: wgpu::Extent3d {
@@ -105,7 +98,7 @@ pub fn capture(game: &Game, decor: &Decor, width: u32, height: u32, quality: Qua
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: FORMAT,
+            format,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
@@ -123,44 +116,7 @@ pub fn capture(game: &Game, decor: &Decor, width: u32, height: u32, quality: Qua
         });
 
         let mut encoder = device.create_command_encoder(&Default::default());
-        // Two frames: the particle ring and the effects buffer both carry state
-        // from the previous frame, and a single-frame capture of a freshly
-        // created renderer catches them mid-initialisation.
-        for _ in 0..2 {
-            renderer.prepare(
-                &device,
-                &queue,
-                &mut encoder,
-                &list,
-                &[],
-                &camera,
-                &light,
-                width,
-                height,
-                1.0 / 60.0,
-            );
-        }
-        {
-            let mut pass = encoder
-                .begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("capture composite"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &view_tex,
-                        depth_slice: None,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
-                    depth_stencil_attachment: None,
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                    multiview_mask: None,
-                })
-                .forget_lifetime();
-            renderer.composite(&mut pass, 0.0, 0.0, width as f32, height as f32);
-        }
+        let extra = record(&device, &queue, &adapter, &mut encoder, &view_tex);
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
                 texture: &target,
@@ -182,7 +138,7 @@ pub fn capture(game: &Game, decor: &Decor, width: u32, height: u32, quality: Qua
                 depth_or_array_layers: 1,
             },
         );
-        queue.submit([encoder.finish()]);
+        queue.submit(extra.into_iter().chain([encoder.finish()]));
 
         let slice = readback.slice(..);
         let (tx, rx) = std::sync::mpsc::channel();
@@ -209,6 +165,76 @@ pub fn capture(game: &Game, decor: &Decor, width: u32, height: u32, quality: Qua
             rgba,
         }
     })
+}
+
+/// Renders one frame of the board - no HUD - and returns the pixels.
+pub fn capture(game: &Game, decor: &Decor, width: u32, height: u32, quality: Quality) -> Shot {
+    render_to_image(
+        width,
+        height,
+        FORMAT,
+        |device, queue, adapter, encoder, view_tex| {
+            let mut renderer = Renderer::new(device, adapter, FORMAT);
+            renderer.quality = quality;
+            renderer.set_quality(device, quality);
+
+            let statics = view::build_static(game, decor);
+            renderer.set_static_scene(queue, &statics.casters, &statics.flat);
+            renderer.upload_static(queue);
+
+            let mut list = DrawList::default();
+            view::draw_scene(game, decor, &mut list, game.time);
+
+            let camera = Camera::frame_board(
+                BW,
+                BH,
+                width as f32 / height.max(1) as f32,
+                CAM_PITCH_DEG.to_radians(),
+                0.0,
+                cam_zoom(),
+            );
+            let light = shadow_view_proj(BW, BH, LIGHT_DIR);
+
+            // Two frames: the particle ring and the effects buffer both carry state
+            // from the previous frame, and a single-frame capture of a freshly
+            // created renderer catches them mid-initialisation.
+            for _ in 0..2 {
+                renderer.prepare(
+                    device,
+                    queue,
+                    encoder,
+                    &list,
+                    &[],
+                    &camera,
+                    &light,
+                    width,
+                    height,
+                    1.0 / 60.0,
+                );
+            }
+            let mut pass = encoder
+                .begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("capture composite"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: view_tex,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                })
+                .forget_lifetime();
+            renderer.composite(&mut pass, 0.0, 0.0, width as f32, height as f32);
+            drop(pass);
+            Vec::new()
+        },
+    )
 }
 
 /// Writes a PNG. Uncompressed deflate blocks, so there is no dependency to add

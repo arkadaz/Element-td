@@ -21,6 +21,8 @@ mod save;
 mod shot;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod shot_tests;
+#[cfg(not(target_arch = "wasm32"))]
+mod shot_ui;
 mod ui;
 mod ui_layout_tests;
 mod view;

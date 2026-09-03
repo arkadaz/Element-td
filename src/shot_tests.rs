@@ -239,3 +239,79 @@ fn what_is_drawing_all_those_rings() {
         }
     }
 }
+
+// ---------------------------------------------------------------- the HUD
+
+/// Captures the game as a player sees it: board and HUD together.
+///
+/// Run it with:
+///     cargo test --release capture_the_interface -- --ignored --nocapture
+#[test]
+#[ignore = "renders PNGs; run it deliberately"]
+fn capture_the_interface() {
+    let dir = out_dir();
+    println!();
+
+    // 1. The very first thing a run shows: the opening essence draft.
+    let mut g = Game::new();
+    g.start_run(0x5CA1_AB1E);
+    let decor = Decor::build(&g.board);
+    assert!(g.pending_draft.is_some(), "a run should open on a draft");
+    save(&dir, "ui_draft", &mut g, &decor);
+
+    // 2. Mid-game: a full build palette, the essence strip, a live wave.
+    let mut built = 0usize;
+    while g.wave < 30 && !matches!(g.phase, Phase::Defeat | Phase::Victory) {
+        while g.pending_draft.is_some() {
+            super::game::tests::draft_for_shot(&mut g);
+        }
+        super::game::tests::spend_for_shot(&mut g, &mut built);
+        let was = g.wave;
+        let mut t = 0.0;
+        while g.wave == was && t < WAVE_PERIOD * 3.0 {
+            g.update(1.0 / 60.0);
+            t += 1.0 / 60.0;
+        }
+    }
+    for _ in 0..(WAVE_PERIOD * 0.5 * 60.0) as u32 {
+        g.update(1.0 / 60.0);
+    }
+    // Select a tower so the panel shows a real tower's stats and commands.
+    if !g.towers.is_empty() {
+        g.selected = Some(0);
+    }
+    save(&dir, "ui_midgame", &mut g, &decor);
+
+    // 3. Under pressure, with the ring most of the way full.
+    while g.wave < 66 && !matches!(g.phase, Phase::Defeat | Phase::Victory) {
+        while g.pending_draft.is_some() {
+            super::game::tests::draft_for_shot(&mut g);
+        }
+        super::game::tests::spend_for_shot(&mut g, &mut built);
+        let was = g.wave;
+        let mut t = 0.0;
+        while g.wave == was && t < WAVE_PERIOD * 3.0 {
+            g.update(1.0 / 60.0);
+            t += 1.0 / 60.0;
+        }
+    }
+    for _ in 0..(WAVE_PERIOD * 0.6 * 60.0) as u32 {
+        g.update(1.0 / 60.0);
+    }
+    g.selected = None;
+    save(&dir, "ui_pressure", &mut g, &decor);
+}
+
+fn save(dir: &std::path::Path, name: &str, g: &mut Game, decor: &Decor) {
+    let s = crate::shot_ui::capture(g, decor, W, H, Quality::Ultra);
+    let path = dir.join(format!("{name}.png"));
+    crate::shot_ui::write_png(&path, &s).expect("could not write the PNG");
+    println!(
+        "  {name:<12} wave {:>2}  {:>3} towers  {:>3}/{FLOOD_LIMIT} circling  {:>7} gold  ->  {}",
+        g.wave,
+        g.towers.len(),
+        g.creeps.len(),
+        g.gold,
+        path.display()
+    );
+}
