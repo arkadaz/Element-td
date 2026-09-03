@@ -91,10 +91,12 @@ fn fs_composite(o: VsOut) -> @location(0) vec4<f32> {
     c = c + b * P.params.y;
 
     // Exposure, then a filmic curve.
-    c = aces(c * 0.62);
-    // Gentle grade: lift the shadows towards blue, warm the highlights.
+    c = aces(c * 0.90);
+    // Gentle grade: cool the shadows, warm the highlights. Deliberately gentle -
+    // at (0.94, 0.97, 1.08) the shadow tint was pushing blue up by 8% across
+    // almost the whole frame, on top of an ambient that was already too blue.
     let lum = dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
-    c = mix(c * vec3<f32>(0.94, 0.97, 1.08), c * vec3<f32>(1.05, 1.00, 0.95), lum);
+    c = mix(c * vec3<f32>(0.98, 0.99, 1.03), c * vec3<f32>(1.03, 1.00, 0.98), lum);
 
     let d = distance(o.uv, vec2<f32>(0.5, 0.5));
     c = c * (1.0 - smoothstep(0.58, 1.10, d) * 0.5);

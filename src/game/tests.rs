@@ -1758,6 +1758,16 @@ fn a_narrated_playthrough() {
     );
 }
 
+/// Wrappers so the offscreen capture driver can reuse this file's player model
+/// rather than growing a second, worse one.
+pub fn draft_for_shot(g: &mut Game) {
+    draft_thoughtfully(g);
+}
+
+pub fn spend_for_shot(g: &mut Game, built: &mut usize) {
+    spend_thoughtfully(g, built);
+}
+
 fn essence_summary(g: &Game) -> String {
     ELEMENTS
         .iter()

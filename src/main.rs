@@ -17,6 +17,10 @@ mod menu;
 mod net;
 mod rng;
 mod save;
+#[cfg(not(target_arch = "wasm32"))]
+mod shot;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod shot_tests;
 mod ui;
 mod ui_layout_tests;
 mod view;
@@ -38,8 +42,8 @@ use net::Net;
 
 /// How far the camera tilts down towards the board, and how much of the
 /// viewport the board fills.
-const CAM_PITCH_DEG: f32 = 52.0;
-const CAM_ZOOM: f32 = 1.06;
+pub const CAM_PITCH_DEG: f32 = 52.0;
+pub const CAM_ZOOM: f32 = 1.15;
 /// Ceiling on how many device pixels the 3D scene is rendered at per point.
 ///
 /// The HUD stays crisp at the display's real scale; the 3D scene does not need

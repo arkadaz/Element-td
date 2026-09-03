@@ -38,7 +38,11 @@ impl Vec3 {
     }
     pub fn norm(self) -> Vec3 {
         let l = self.len();
-        if l < 1e-6 { v3(0.0, 0.0, 1.0) } else { self.mul(1.0 / l) }
+        if l < 1e-6 {
+            v3(0.0, 0.0, 1.0)
+        } else {
+            self.mul(1.0 / l)
+        }
     }
 }
 
@@ -80,10 +84,22 @@ impl Mat4 {
         let s = f.cross(up).norm();
         let u = s.cross(f);
         Mat4([
-            s.x, u.x, -f.x, 0.0, //
-            s.y, u.y, -f.y, 0.0, //
-            s.z, u.z, -f.z, 0.0, //
-            -s.dot(eye), -u.dot(eye), f.dot(eye), 1.0,
+            s.x,
+            u.x,
+            -f.x,
+            0.0, //
+            s.y,
+            u.y,
+            -f.y,
+            0.0, //
+            s.z,
+            u.z,
+            -f.z,
+            0.0, //
+            -s.dot(eye),
+            -u.dot(eye),
+            f.dot(eye),
+            1.0,
         ])
     }
 
@@ -92,10 +108,22 @@ impl Mat4 {
         let t = 1.0 / (fov_y * 0.5).tan();
         let d = near - far;
         Mat4([
-            t / aspect.max(0.001), 0.0, 0.0, 0.0, //
-            0.0, t, 0.0, 0.0, //
-            0.0, 0.0, far / d, -1.0, //
-            0.0, 0.0, near * far / d, 0.0,
+            t / aspect.max(0.001),
+            0.0,
+            0.0,
+            0.0, //
+            0.0,
+            t,
+            0.0,
+            0.0, //
+            0.0,
+            0.0,
+            far / d,
+            -1.0, //
+            0.0,
+            0.0,
+            near * far / d,
+            0.0,
         ])
     }
 
@@ -103,10 +131,22 @@ impl Mat4 {
     pub fn ortho(half_w: f32, half_h: f32, near: f32, far: f32) -> Mat4 {
         let d = far - near;
         Mat4([
-            1.0 / half_w, 0.0, 0.0, 0.0, //
-            0.0, 1.0 / half_h, 0.0, 0.0, //
-            0.0, 0.0, -1.0 / d, 0.0, //
-            0.0, 0.0, -near / d, 1.0,
+            1.0 / half_w,
+            0.0,
+            0.0,
+            0.0, //
+            0.0,
+            1.0 / half_h,
+            0.0,
+            0.0, //
+            0.0,
+            0.0,
+            -1.0 / d,
+            0.0, //
+            0.0,
+            0.0,
+            -near / d,
+            1.0,
         ])
     }
 
@@ -368,8 +408,7 @@ mod tests {
         for &aspect in &[0.35, 0.55, 0.75, 1.0, 1.33, 1.78, 2.4, 3.2, 5.0] {
             for &pitch_deg in &[35.0f32, 52.0, 70.0] {
                 for &yaw in &[-0.3f32, 0.0, 0.3] {
-                    let cam =
-                        Camera::frame_board(W, H, aspect, pitch_deg.to_radians(), yaw, 1.06);
+                    let cam = Camera::frame_board(W, H, aspect, pitch_deg.to_radians(), yaw, 1.06);
                     for &(x, y, z) in &[
                         (0.0, 0.0, 0.0),
                         (W, 0.0, 0.0),
@@ -402,6 +441,44 @@ mod tests {
     /// And it must not be framed so loosely that the board is a stamp in the
     /// middle of the screen - a fit that is always "safe" is a useless fit.
     #[test]
+    /// Every build pad must be on screen at every window shape.
+    ///
+    /// This is the constraint that decides how far the camera can be pushed in.
+    /// The board carries a wide decorative stone frame, and cropping *that* is
+    /// free - the play area is what the camera is for. Cropping a **pad** is
+    /// not: an off-screen pad is a pad the player cannot click, and there is
+    /// nothing on screen to tell them it exists.
+    #[test]
+    fn every_build_pad_is_on_screen_at_every_aspect() {
+        use crate::game::board::Board;
+        let board = Board::new();
+        assert!(!board.slots.is_empty());
+        for &aspect in &[0.6, 1.0, 1.4, 1.78, 2.6] {
+            let cam = Camera::frame_board(
+                30.0,
+                18.0,
+                aspect,
+                crate::CAM_PITCH_DEG.to_radians(),
+                0.0,
+                crate::CAM_ZOOM,
+            );
+            for s in &board.slots {
+                // Towers stand on the pad, so the top of one has to fit too.
+                let n = cam
+                    .view_proj
+                    .project(v3(s.pos[0], s.pos[1], 1.2))
+                    .expect("pad is behind the camera");
+                assert!(
+                    n[0].abs() <= 1.0 && n[1].abs() <= 1.0,
+                    "pad at {:?} is off screen at aspect {aspect}: ndc {:.2},{:.2}",
+                    s.pos,
+                    n[0],
+                    n[1]
+                );
+            }
+        }
+    }
+
     fn the_board_actually_fills_the_frame() {
         for &aspect in &[0.6, 1.0, 1.78, 2.6] {
             let cam = Camera::frame_board(30.0, 18.0, aspect, 52f32.to_radians(), 0.0, 1.06);
@@ -410,7 +487,10 @@ mod tests {
                 let n = cam.view_proj.project(v3(x, y, 0.0)).expect("in front");
                 extent = extent.max(n[0].abs()).max(n[1].abs());
             }
-            assert!(extent > 0.72, "board only fills {extent:.2} of the frame at aspect {aspect}");
+            assert!(
+                extent > 0.72,
+                "board only fills {extent:.2} of the frame at aspect {aspect}"
+            );
         }
     }
 

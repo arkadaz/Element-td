@@ -5,7 +5,7 @@ pub mod combat;
 pub mod defs;
 pub mod fx;
 #[cfg(test)]
-mod tests;
+pub mod tests;
 
 use board::{BH, BW, Board};
 use defs::*;

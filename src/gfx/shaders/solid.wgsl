@@ -178,7 +178,12 @@ fn fs(o: VsOut) -> @location(0) vec4<f32> {
     if (ndl > 0.0) {
         shade = shadow_at(o.light_pos, ndl);
     }
-    let sun = vec3<f32>(1.00, 0.945, 0.86) * 3.1;
+    // Measured, not guessed: with the old values 93% of every frame sat below
+    // 96 of 255 and a grass tile whose albedo is (0.118, 0.168, 0.140) came out
+    // as (45, 54, 84) - blue, and darker than the stone wall behind it. The key
+    // light is the only term that carries a surface's own colour, so it has to
+    // beat the ambient rather than lose to it.
+    let sun = vec3<f32>(1.00, 0.945, 0.86) * 4.4;
     let d = distribution_ggx(ndh, rough);
     let g = geometry_smith(ndv, ndl, rough);
     let f = fresnel_schlick(vdh, f0);
@@ -187,8 +192,12 @@ fn fs(o: VsOut) -> @location(0) vec4<f32> {
     let direct = (kd * albedo / 3.14159265 + spec) * sun * ndl * shade;
 
     // --- ambient: sky above, warm bounce below, standing in for an IBL probe
-    let sky = vec3<f32>(0.33, 0.45, 0.66) * 1.15;
-    let ground = vec3<f32>(0.20, 0.16, 0.13);
+    //
+    // Much less blue than it was, and weaker. A strongly tinted ambient is a
+    // multiplier on every albedo in the scene, so a saturated one does not read
+    // as atmosphere - it reads as everything being made of the same material.
+    let sky = vec3<f32>(0.30, 0.34, 0.43) * 0.95;
+    let ground = vec3<f32>(0.24, 0.19, 0.15) * 0.9;
     let irradiance = mix(ground, sky, n.z * 0.5 + 0.5);
     let fa = fresnel_roughness(ndv, f0, rough);
     let kda = (vec3<f32>(1.0) - fa) * (1.0 - metal);

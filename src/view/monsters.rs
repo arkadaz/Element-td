@@ -370,20 +370,21 @@ fn mender(d: &mut DrawList, c: &Creep, col: Color, dark: Color) {
             1.0,
         );
     }
-    // The heal aura: impossible to miss, so it can be focused down.
+    // The heal aura, as a soft glow rather than a drawn circle.
+    //
+    // It used to be a forty-segment ground ring at the aura's full radius, on
+    // the reasoning that a healer should be impossible to miss. That was right
+    // when a Mender wave was ten of them. A wave is now eighty, and eighty
+    // overlapping two-and-a-half tile circles is not emphasis - it is a
+    // criss-cross that hides the circuit underneath it, and 3,200 box instances
+    // to draw it. A glow overlaps into a brighter glow, which is what a crowd of
+    // healers should look like anyway.
     let pulse = (c.bob * 1.8).sin() * 0.5 + 0.5;
-    d.ground_ring(
-        c.pos,
-        2.6 * (0.85 + pulse * 0.15),
-        0.09,
-        rgba([0.45, 1.0, 0.62], 0.45),
-        40,
-    );
     d.glow(
         [c.pos[0], c.pos[1], bz],
-        r * 3.2,
-        2.2,
-        rgba([0.45, 1.0, 0.62], 0.25 + pulse * 0.12),
+        r * 4.4,
+        2.0,
+        rgba([0.45, 1.0, 0.62], 0.30 + pulse * 0.14),
     );
 }
 
