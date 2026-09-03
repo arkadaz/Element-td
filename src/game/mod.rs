@@ -4,6 +4,10 @@ pub mod board;
 pub mod combat;
 pub mod defs;
 pub mod fx;
+pub mod greentd;
+#[cfg(test)]
+mod greentd_tests;
+pub mod greentd_types;
 #[cfg(test)]
 pub mod tests;
 
