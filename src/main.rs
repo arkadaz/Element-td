@@ -2,7 +2,7 @@
 // opens a terminal alongside it and steals focus from the game.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-//! Elemental TD - a GPU-accelerated element tower defense, in pure Rust.
+//! Green Circle TD - the Warcraft III map, ported to Rust and wgpu.
 //!
 //! Rendering runs on wgpu (WebGPU in the browser, WebGL2 as a fallback, native
 //! Vulkan/DX12 on the desktop). egui draws the HUD on top of the same surface.
@@ -33,19 +33,46 @@ use egui::{Key, Rect, Sense};
 use decor::Decor;
 use game::Game;
 use game::board::{BH, BW};
-use game::defs::TOWERS;
 use game::fx::ParticleSpawn;
 use gfx::Quality;
 use gfx::Renderer;
 use gfx::draw::DrawList;
-use math::{Camera, Mat4, shadow_view_proj};
+use math::{Camera, Mat4, Rig, shadow_view_proj};
 use menu::{MenuState, Screen};
 use net::Net;
 
-/// How far the camera tilts down towards the board, and how much of the
-/// viewport the board fills.
+/// How far the camera tilts down towards the board. Every framing the game
+/// builds shares it, so the ground meets the screen at one angle whether the
+/// player is scrolling the board, watching the title backdrop turn or looking
+/// at a screenshot.
 pub const CAM_PITCH_DEG: f32 = 52.0;
+/// A quarter turn, so the lane's long axis runs across a landscape window
+/// rather than up and down it.
+pub const CAM_YAW_DEG: f32 = 90.0;
+/// How tightly a fitted framing pulls in on what it was asked to fit. Only the
+/// title screen's backdrop is framed that way now; play frames a window of the
+/// board and scrolls it.
 pub const CAM_ZOOM: f32 = 1.15;
+/// How much board is in frame at the zoom play opens on, measured along the
+/// longer side of the ground the camera takes in.
+///
+/// Warcraft III sits about thirteen tiles back and shows a couple of dozen of
+/// them, and the player scrolls for the rest; this lands the camera at much
+/// the same distance. Framing the whole forty-five tile arena at once instead
+/// - which is what this did until the camera learned to pan - put a monster on
+/// screen twelve pixels tall, and no amount of modelling or lighting survives
+/// being that small.
+pub const CAM_SPAN: f32 = 26.0;
+/// The tightest the wheel may zoom in. Closer than this and a tower fills the
+/// screen with the lane either side of it out of frame.
+pub const CAM_SPAN_MIN: f32 = 14.0;
+/// How fast the keys and the screen edge scroll, in viewports per second.
+const CAM_PAN_SPEED: f32 = 0.6;
+/// How close to the edge of the board the cursor scrolls the view, in points.
+const CAM_EDGE: f32 = 14.0;
+/// How much of the span one point of wheel travel takes off. A notch is around
+/// fifty points, so a notch is about a fifth.
+const CAM_WHEEL: f32 = 0.004;
 /// Ceiling on how many device pixels the 3D scene is rendered at per point.
 ///
 /// The HUD stays crisp at the display's real scale; the 3D scene does not need
@@ -138,6 +165,9 @@ struct Keys {
     bloom: bool,
     shift: bool,
     digits: [bool; 9],
+    /// Which way the player is scrolling, in screen terms: x across, y down,
+    /// each -1, 0 or 1. Held rather than tapped, so it is read every frame.
+    pan: [f32; 2],
     /// Debug builds only: fill pads / grant gold, for playtesting.
     dev_fill: bool,
     dev_gold: bool,
@@ -160,6 +190,10 @@ fn read_keys(ui: &egui::Ui) -> Keys {
         for (n, key) in NUMS.iter().enumerate() {
             digits[n] = i.key_pressed(*key);
         }
+        let axis = |back: &[Key], fwd: &[Key]| {
+            let held = |keys: &[Key]| keys.iter().any(|k| i.key_down(*k));
+            f32::from(held(fwd)) - f32::from(held(back))
+        };
         Keys {
             pause: i.key_pressed(Key::Space),
             speed: i.key_pressed(Key::F),
@@ -171,6 +205,15 @@ fn read_keys(ui: &egui::Ui) -> Keys {
             bloom: i.key_pressed(Key::B),
             shift: i.modifiers.shift,
             digits,
+            pan: [
+                axis(&[Key::ArrowLeft, Key::A], &[Key::ArrowRight, Key::D]),
+                // S is missing from that row on purpose. It is the sell hotkey
+                // the command bar advertises, and holding it to scroll south
+                // would sell the selected tower for a fraction of what it cost,
+                // with no way to undo it. Down arrow, the screen edge and the
+                // middle mouse button all scroll that way instead.
+                axis(&[Key::ArrowUp, Key::W], &[Key::ArrowDown]),
+            ],
             dev_fill: cfg!(debug_assertions) && i.key_pressed(Key::T),
             dev_gold: cfg!(debug_assertions) && i.key_pressed(Key::G),
         }
@@ -242,6 +285,16 @@ struct App {
     /// frame goes is how you end up optimising a shader on a card that was
     /// never the bottleneck, so the HUD reports it.
     prof: Profile,
+    /// Where the player has scrolled to, in tiles, and how much of the board
+    /// is in frame. They live here rather than in [`ui::UiState`] because the
+    /// camera belongs to the app: the HUD never moves it, and the shot paths
+    /// frame the board without a `UiState` at all.
+    pan: [f32; 2],
+    span: f32,
+    /// The rectangle every build pad falls inside. The pan clamp needs it: the
+    /// pads stop short of the arena's edge, and a camera that cannot be aimed
+    /// at one is a plot the player cannot build on.
+    pads: [f32; 4],
     /// When the next frame is due, for the native frame limiter.
     #[cfg(not(target_arch = "wasm32"))]
     next_frame: Option<std::time::Instant>,
@@ -273,6 +326,7 @@ impl App {
 
         ui::install_style(&cc.egui_ctx);
 
+        let pads = pad_bounds(&game.board);
         let mut app = Self {
             game,
             decor,
@@ -288,6 +342,9 @@ impl App {
             fps: 60.0,
             anim: 0.0,
             prof: Profile::default(),
+            pan: lane_middle(),
+            span: CAM_SPAN,
+            pads,
             #[cfg(not(target_arch = "wasm32"))]
             next_frame: None,
             sized_once: false,
@@ -308,27 +365,29 @@ impl App {
             if v.is_empty() || v == "0" {
                 return;
             }
-            let level: u32 = v.parse().unwrap_or(1).clamp(1, game::defs::MAX_TIER);
-            // A played-in board implies a drafted one. Without the essences
-            // nothing is buildable and the demo starts on an empty road.
-            self.game.essence = [(game::defs::MAX_TIER - game::defs::FREE_TIERS) as u8; 6];
-            self.game.pending_draft = None;
-            self.game.drafts_taken = game::defs::ESSENCE_WAVES.len();
-            self.game.gold = 400_000;
+            // How many steps up its path each demo tower is pushed.
+            let level: u32 = v.parse().unwrap_or(1).clamp(1, 20);
+            self.game.gold = 40_000_000;
+            let shop = game::defs::shop_order();
             let mut n = 0usize;
             for slot in 0..self.game.board.slots.len() {
                 if slot % 4 != 0 {
                     continue;
                 }
-                self.game.build_choice = Some((n % TOWERS.len(), 1));
+                self.game.build_choice = Some((shop[n % shop.len()], 1));
                 if self.game.try_build(slot) {
                     let ti = self.game.towers.len() - 1;
-                    while self.game.towers[ti].tier < level {
-                        let before = self.game.towers[ti].tier;
-                        self.game.upgrade(ti);
-                        // The essence ceiling can stop this well below `level`,
-                        // and a while-loop that cannot advance is a hang.
-                        if self.game.towers[ti].tier == before {
+                    for _ in 0..level {
+                        let before = self.game.towers[ti].def;
+                        // At a fork, take the first branch: the demo wants a
+                        // played-in board, not a considered one.
+                        let choices = self.game.upgrade_choices(ti);
+                        match choices.first() {
+                            Some(&(into, _)) => self.game.upgrade_into(ti, into),
+                            None => break,
+                        }
+                        // A loop that cannot advance is a hang.
+                        if self.game.towers[ti].def == before {
                             break;
                         }
                     }
@@ -337,10 +396,69 @@ impl App {
             }
             self.game.build_choice = None;
             self.game.selected = None;
-            self.game.gold = 3_000;
+            self.game.gold = 30_000;
             self.menu.screen = Screen::Playing;
             self.game.send_wave();
         }
+    }
+
+    /// Scrolling and zooming, the way Warcraft III does it.
+    ///
+    /// Four ways in, and all of them end up as one drag measured in fractions
+    /// of the viewport: the keys, the cursor resting against the edge of the
+    /// board, the middle mouse button, and the wheel for the zoom. Going
+    /// through the rig rather than adding tiles directly is what makes a drag
+    /// keep the same patch of ground under the cursor at every zoom, and makes
+    /// a key press scroll by the same fraction of the screen whether the
+    /// camera is close in or right out.
+    ///
+    /// The clamp at the end is the whole reason this is not just an addition:
+    /// the player defends one arena out of eight on a shared map, and the
+    /// other seven are not theirs to look at.
+    fn camera_input(&mut self, resp: &egui::Response, rect: Rect, rig: &Rig, k: &Keys, dt: f32) {
+        let mut scroll = [k.pan[0], k.pan[1]];
+        let mut drag = [0.0f32, 0.0];
+
+        if let Some(p) = resp.hover_pos() {
+            // Edge scroll, over the board only. `hover_pos` is None whenever a
+            // panel, a modal or the scoreboard is under the cursor, which is
+            // exactly the test that keeps the view still while the player is
+            // reaching for a button in the HUD.
+            let edge = |lo: f32, hi: f32, at: f32| {
+                f32::from(at >= hi - CAM_EDGE) - f32::from(at <= lo + CAM_EDGE)
+            };
+            scroll[0] += edge(rect.left(), rect.right(), p.x);
+            scroll[1] += edge(rect.top(), rect.bottom(), p.y);
+
+            let wheel = resp.ctx.input(|i| i.smooth_scroll_delta.y);
+            if wheel != 0.0 {
+                // Geometric, so a notch feels the same at every zoom rather
+                // than crawling when close in and jumping when far out.
+                self.span *= (-wheel * CAM_WHEEL).exp();
+            }
+        }
+
+        // A drag that started on the board keeps working past the edge of it,
+        // which is what a player throwing the view across expects.
+        if resp.dragged_by(egui::PointerButton::Middle) {
+            let d = resp.drag_delta();
+            drag[0] += d.x / rect.width().max(1.0);
+            drag[1] += d.y / rect.height().max(1.0);
+        }
+
+        // Scrolling is dragging backwards: the keys and the screen edge move
+        // the camera, a drag moves the ground under it. The direction is
+        // capped at one so that a key held down while the cursor also rests on
+        // the edge does not scroll at twice the speed.
+        for (d, s) in drag.iter_mut().zip(scroll) {
+            *d -= s.clamp(-1.0, 1.0) * CAM_PAN_SPEED * dt;
+        }
+        let step = rig.drag(self.span, drag[0], drag[1]);
+        self.pan = [self.pan[0] + step[0], self.pan[1] + step[1]];
+
+        let view = crate::game::greentd_map::VIEW;
+        self.span = rig.clamp_span(self.span, CAM_SPAN_MIN, view);
+        self.pan = rig.clamp_pan(self.pan, self.span, view, self.pads);
     }
 
     /// Board interaction. The cursor is cast as a ray onto the ground plane,
@@ -430,7 +548,8 @@ impl App {
                 if g.board.slots[slot].tower.is_some() || slot % 3 != 0 {
                     continue;
                 }
-                g.build_choice = Some((n % TOWERS.len(), 1 + (n % 3) as u32));
+                let shop = game::defs::shop_order();
+                g.build_choice = Some((shop[n % shop.len()], 1));
                 g.try_build(slot);
                 n += 1;
             }
@@ -440,8 +559,7 @@ impl App {
         for (n, pressed) in k.digits.iter().enumerate() {
             if *pressed {
                 if let Some(&def) = self.ust.hotkeys.get(n) {
-                    let tier = self.ust.build_tier.min(g.max_tier_of(def)).max(1);
-                    g.build_choice = Some((def, tier));
+                    g.build_choice = Some((def, 1));
                     g.selected = None;
                 }
             }
@@ -548,13 +666,12 @@ impl App {
                     (rect.width() * ppp).round().max(8.0) as u32,
                     (rect.height() * ppp).round().max(8.0) as u32,
                 ];
-                let camera = Camera::frame_board(
-                    BW,
-                    BH,
+                let camera = Camera::frame_rect(
+                    crate::game::greentd_map::VIEW,
                     rect.width() / rect.height().max(1.0),
                     CAM_PITCH_DEG.to_radians(),
                     // A slow orbit, so the title screen is not a still frame.
-                    (self.anim * 0.06).sin() * 0.22,
+                    CAM_YAW_DEG.to_radians() + (self.anim * 0.06).sin() * 0.22,
                     CAM_ZOOM * 1.04,
                 );
                 self.draw.clear();
@@ -730,16 +847,18 @@ impl eframe::App for App {
                     (rect.width() * ppp).round().max(8.0) as u32,
                     (rect.height() * ppp).round().max(8.0) as u32,
                 ];
-                // One camera drives rendering, picking and the text overlay, so
-                // they can never disagree about where something is on screen.
-                let camera = Camera::frame_board(
-                    BW,
-                    BH,
+                let rig = Rig::new(
                     rect.width() / rect.height().max(1.0),
                     CAM_PITCH_DEG.to_radians(),
-                    0.0,
-                    CAM_ZOOM,
+                    CAM_YAW_DEG.to_radians(),
                 );
+                self.camera_input(&resp, rect, &rig, &keys, dt);
+                // One camera drives rendering, picking and the text overlay, so
+                // they can never disagree about where something is on screen.
+                // That is why the scrolling is settled first: the ray a click
+                // is cast along has to come from the frame the player is
+                // looking at, not the one before it.
+                let camera = rig.camera(self.pan, self.span);
 
                 self.board_input(&resp, rect, &camera, keys.shift);
 
@@ -777,6 +896,52 @@ impl eframe::App for App {
     }
 }
 
+/// Where the camera opens, in tiles. Used by play and by a headless capture,
+/// since neither has a player to scroll it.
+///
+/// The middle of the arena rectangle is the obvious answer and it is the wrong
+/// one. The lane runs around two sides of the field rather than through it, so
+/// the rectangle's centre is a spot in the open with the fighting off at the
+/// edge of the frame - which is exactly what the first screenshots showed: a
+/// thin strip of lane along the top and two thirds of the picture empty grass.
+///
+/// So aim at the lane instead: the centroid of [`LAP`] weighted by segment
+/// length, which is the point the walking is densest around. Every plot worth
+/// building on is within a few tiles of it.
+///
+/// [`LAP`]: game::greentd_map::LAP
+pub fn lane_middle() -> [f32; 2] {
+    let lap = game::greentd_map::LAP;
+    let (mut acc, mut total) = ([0.0f32; 2], 0.0f32);
+    for (a, b) in lap.iter().zip(lap.iter().cycle().skip(1)).take(lap.len()) {
+        let len = ((b[0] - a[0]).powi(2) + (b[1] - a[1]).powi(2)).sqrt();
+        acc[0] += (a[0] + b[0]) * 0.5 * len;
+        acc[1] += (a[1] + b[1]) * 0.5 * len;
+        total += len;
+    }
+    if total <= 0.0 {
+        let v = game::greentd_map::VIEW;
+        return [(v[0] + v[2]) * 0.5, (v[1] + v[3]) * 0.5];
+    }
+    [acc[0] / total, acc[1] / total]
+}
+
+/// The rectangle that holds every build pad, in tiles.
+///
+/// Read off the board rather than assumed from the arena, so that if the plots
+/// ever move the camera's idea of where the player needs to be able to look
+/// moves with them.
+pub fn pad_bounds(board: &game::board::Board) -> [f32; 4] {
+    let mut r = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
+    for s in &board.slots {
+        r[0] = r[0].min(s.pos[0]);
+        r[1] = r[1].min(s.pos[1]);
+        r[2] = r[2].max(s.pos[0]);
+        r[3] = r[3].max(s.pos[1]);
+    }
+    r
+}
+
 /// A seed for a local run. There is no `getrandom` in the wasm build on
 /// purpose, so this comes from the clock - good enough to vary a solo run, and
 /// never used for a shared one (rooms take their seed from the server).
@@ -805,12 +970,12 @@ fn seed_now() -> u64 {
 fn main() -> eframe::Result {
     env_logger::init();
     eframe::run_native(
-        "Elemental TD",
+        "Green Circle TD",
         eframe::NativeOptions {
             viewport: egui::ViewportBuilder::default()
                 .with_inner_size([1400.0, 900.0])
                 .with_min_inner_size([900.0, 620.0])
-                .with_title("Elemental TD"),
+                .with_title("Green Circle TD"),
             wgpu_options: high_performance_gpu(),
             ..Default::default()
         },

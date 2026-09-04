@@ -1,10 +1,33 @@
 //! Targeting, firing, projectile flight and damage resolution.
+//!
+//! Every rule here is one of the map's. A tower fires a missile on a cooldown;
+//! some missiles splash, some leap on to the next target, some are fired at
+//! several targets at once. Riders - crit, poison, roots, the outright kill,
+//! the armour a Corruption Tower strips - come straight out of [`Abil`], which
+//! is generated from the map's own ability data.
 
 use super::defs::*;
 use super::{
-    Beam, FloatText, Game, KNOCKBACK_CD, Proj, ProjKind, STUN_DR_MAX, STUN_DR_STEP, SUPPRESS_TIME,
-    TargetMode, TextKind, Zone,
+    Beam, FloatText, Game, KNOCKBACK_CD, Proj, ProjKind, STUN_DR_MAX, STUN_DR_STEP, TargetMode,
+    TextKind,
 };
+
+/// How fast a tower's missile travels, in tiles per second.
+///
+/// The map gives every tower a Warcraft III missile art and speed; they are all
+/// fast, and the differences between them are decoration. One number keeps the
+/// projectiles readable and the maths honest.
+const MISSILE_SPEED: f32 = 22.0;
+
+/// How much a bouncing shot loses at each leap - the Moon Glaive's own falloff.
+const BOUNCE_FALLOFF: f32 = 0.7;
+/// How far a bouncing shot will reach for its next target, in tiles.
+const BOUNCE_HOP: f32 = 4.0;
+
+/// How often a standing aura - a Slow Tower's chill, a Fire Tower's
+/// immolation - is applied. Every step would be a hundred floating numbers a
+/// second for the same total damage.
+const AURA_TICK: f32 = 0.25;
 
 // ---------------------------------------------------------------- towers
 
@@ -13,61 +36,18 @@ pub fn step_towers(g: &mut Game, dt: f32) {
     for ti in 0..g.towers.len() {
         g.towers[ti].flash = (g.towers[ti].flash - dt * 5.0).max(0.0);
 
-        // Support towers never attack; their aura is applied when the board changes.
+        // Standing auras first: a Slow Tower and a Frost Tower never fire, and
+        // a Fire Tower burns everything near it as well as shooting.
+        aura_tick(g, ti, dt, &mut scratch);
+
         if g.towers[ti].is_support() {
             continue;
         }
+
+        // The Troll Tower works itself into a frenzy on its own timer.
+        frenzy_tick(g, ti, dt);
+
         g.towers[ti].cooldown -= dt;
-
-        let stats = g.towers[ti].stats();
-        let range = g.towers[ti].range();
-        let rate = g.towers[ti].rate().max(0.05);
-        let pos = g.towers[ti].pos;
-
-        if stats.delivery == Delivery::Nova {
-            if g.towers[ti].cooldown <= 0.0 && !g.creeps.is_empty() {
-                scratch.clear();
-                g.spatial.query(pos, range, |i| scratch.push(i));
-                scratch.sort_unstable();
-                scratch.dedup();
-                scratch.retain(|&i| {
-                    i < g.creeps.len() && dist2(g.creeps[i].pos, pos) <= range * range
-                });
-                if !scratch.is_empty() {
-                    g.towers[ti].cooldown = 1.0 / rate;
-                    g.towers[ti].flash = 1.0;
-                    let col = tower_color(g.towers[ti].def());
-                    g.beams.push(Beam {
-                        from: [pos[0], pos[1], 0.12],
-                        to: [pos[0] + range, pos[1], 0.12],
-                        color: col,
-                        t: 1.0,
-                        width: 0.0,
-                    });
-                    g.fx.burst(
-                        &mut g.rng,
-                        pos,
-                        30,
-                        range * 2.0,
-                        [col[0], col[1], col[2], 1.0],
-                        0.35,
-                        0.22,
-                    );
-                    let dmg = g.towers[ti].dmg();
-                    let mut list = scratch.clone();
-                    list.sort_unstable_by(|a, b| b.cmp(a));
-                    for ci in list {
-                        if ci >= g.creeps.len() {
-                            continue;
-                        }
-                        on_hit_specials(g, ti, ci, false);
-                        damage_creep(g, ci, dmg, ti, false);
-                    }
-                }
-            }
-            continue;
-        }
-
         if g.towers[ti].cooldown > 0.0 {
             // Keep the barrel tracking even while reloading.
             if let Some(ci) = live_target(g, ti) {
@@ -77,31 +57,22 @@ pub fn step_towers(g: &mut Game, dt: f32) {
         }
 
         let Some(ci) = acquire(g, ti, &mut scratch) else {
-            g.towers[ti].ramp = 0.0;
             continue;
         };
         let tgt_uid = g.creeps[ci].uid;
         let tgt_pos = g.creeps[ci].pos;
         aim(g, ti, tgt_pos, 1.0);
 
-        // Ramp resets whenever the tower switches target.
-        if g.towers[ti].target_uid != tgt_uid {
-            g.towers[ti].ramp = 0.0;
-        }
         g.towers[ti].target_uid = tgt_uid;
-        g.towers[ti].cooldown = 1.0 / rate;
+        g.towers[ti].cooldown = 1.0 / g.towers[ti].rate().max(0.05);
         g.towers[ti].flash = 1.0;
         fire(g, ti, ci);
 
-        // Multishot: the same shot again at other targets in range. Each is a
-        // full hit, so this is a straight multiplier on a tower's throughput -
-        // which is why only two towers in the roster have it.
-        let extra = g.towers[ti].specials().iter().find_map(|s| match *s {
-            Special::Multishot { extra } => Some(extra),
-            _ => None,
-        });
-        if let Some(extra) = extra {
-            let others = nearby_targets(g, ti, ci, extra as usize, &mut scratch);
+        // Multishot: the same attack at several targets at once, which is the
+        // whole of the Multi Tower - ten of them at the top of its ladder.
+        let extra = g.towers[ti].abil().multishot.saturating_sub(1) as usize;
+        if extra > 0 {
+            let others = nearby_targets(g, ti, ci, extra, &mut scratch);
             for oi in others {
                 if oi < g.creeps.len() {
                     fire(g, ti, oi);
@@ -110,6 +81,82 @@ pub fn step_towers(g: &mut Game, dt: f32) {
         }
     }
     g.scratch = scratch;
+}
+
+/// The Slow Tower's chill and the Fire Tower's immolation: no shot, no target,
+/// just everything standing too close.
+fn aura_tick(g: &mut Game, ti: usize, dt: f32, scratch: &mut Vec<usize>) {
+    let a = g.towers[ti].abil();
+    let slow = a.slow_amt;
+    let slow_r = a.slow_range;
+    let burn = a.burn_dps * (1.0 + g.towers[ti].buff_dmg);
+    let burn_r = a.burn_range;
+    if (slow <= 0.0 || slow_r <= 0.0) && (burn <= 0.0 || burn_r <= 0.0) {
+        return;
+    }
+    g.towers[ti].aura_timer -= dt;
+    if g.towers[ti].aura_timer > 0.0 {
+        return;
+    }
+    g.towers[ti].aura_timer += AURA_TICK;
+
+    let pos = g.towers[ti].pos;
+    let reach = slow_r.max(burn_r);
+    scratch.clear();
+    g.spatial.query(pos, reach, |i| scratch.push(i));
+    scratch.sort_unstable();
+    scratch.dedup();
+    let list: Vec<usize> = scratch
+        .iter()
+        .copied()
+        .filter(|&i| i < g.creeps.len())
+        .collect();
+
+    // A tower that never attacks - a Slow Tower, the Snowman - has no attack
+    // targeting to read, and in Warcraft III its aura covers both layers. Only
+    // a tower that *does* attack is limited to what it can shoot.
+    let reaches_air = match g.towers[ti].targets() {
+        Targets::Nothing => true,
+        t => t.can_hit(true),
+    };
+    let mut dead: Vec<usize> = Vec::new();
+    for ci in list {
+        let d2 = dist2(g.creeps[ci].pos, pos);
+        // Immolation is fire on the ground; a Fire Tower that cannot reach the
+        // air does not burn what is flying over it. A slow cloud is a cloud,
+        // and it catches everything.
+        if burn > 0.0 && g.creeps[ci].flying && !reaches_air && d2 <= burn_r * burn_r {
+            continue;
+        }
+        if slow > 0.0 && d2 <= slow_r * slow_r {
+            // Refreshed a little longer than the tick, so walking through the
+            // cloud is a continuous slow rather than a flicker.
+            g.creeps[ci].slow.apply(slow, AURA_TICK * 2.0);
+        }
+        if burn > 0.0 && d2 <= burn_r * burn_r {
+            let hurt = burn * AURA_TICK;
+            if damage_creep(g, ci, hurt, ti, false) {
+                dead.push(ci);
+            }
+        }
+    }
+    let _ = dead;
+}
+
+/// The Troll Tower's self-buff: a burst of attack speed on a fixed cycle.
+fn frenzy_tick(g: &mut Game, ti: usize, dt: f32) {
+    let a = g.towers[ti].abil();
+    if a.frenzy <= 0.0 {
+        return;
+    }
+    let (dur, cd) = (a.frenzy_dur, a.frenzy_cd.max(a.frenzy_dur + 1.0));
+    let t = &mut g.towers[ti];
+    t.ramp = (t.ramp - dt).max(0.0);
+    t.frenzy_cd = (t.frenzy_cd - dt).max(0.0);
+    if t.ramp <= 0.0 && t.frenzy_cd <= 0.0 {
+        t.ramp = dur;
+        t.frenzy_cd = cd;
+    }
 }
 
 fn aim(g: &mut Game, ti: usize, at: [f32; 2], k: f32) {
@@ -127,6 +174,11 @@ fn aim(g: &mut Game, ti: usize, at: [f32; 2], k: f32) {
 
 /// The target a tower held last frame, if it is still alive, in range, and on a
 /// layer this tower can reach.
+///
+/// Through the spatial hash rather than a scan of every monster on the board.
+/// A packed field is a thousand towers, and a thousand linear scans of seven
+/// hundred creeps - just to keep a barrel pointing the right way while the
+/// tower reloads - was more than half of one frame's simulation.
 fn live_target(g: &Game, ti: usize) -> Option<usize> {
     let uid = g.towers[ti].target_uid;
     if uid == 0 {
@@ -134,10 +186,18 @@ fn live_target(g: &Game, ti: usize) -> Option<usize> {
     }
     let r = g.towers[ti].range();
     let pos = g.towers[ti].pos;
-    let targets = g.towers[ti].def().targets;
-    g.creeps
-        .iter()
-        .position(|c| c.uid == uid && targets.can_hit(c.kind.layer()) && dist2(c.pos, pos) <= r * r)
+    let targets = g.towers[ti].targets();
+    let mut found = None;
+    g.spatial.query(pos, r, |i| {
+        if found.is_some() || i >= g.creeps.len() {
+            return;
+        }
+        let c = &g.creeps[i];
+        if c.uid == uid && targets.can_hit(c.flying) && dist2(c.pos, pos) <= r * r {
+            found = Some(i);
+        }
+    });
+    found
 }
 
 fn acquire(g: &Game, ti: usize, scratch: &mut Vec<usize>) -> Option<usize> {
@@ -150,7 +210,7 @@ fn acquire(g: &Game, ti: usize, scratch: &mut Vec<usize>) -> Option<usize> {
     scratch.dedup();
 
     let mode = g.towers[ti].mode;
-    let targets = g.towers[ti].def().targets;
+    let targets = g.towers[ti].targets();
     let mut best: Option<usize> = None;
     let mut best_score = f32::MAX;
     for &i in scratch.iter() {
@@ -158,9 +218,9 @@ fn acquire(g: &Game, ti: usize, scratch: &mut Vec<usize>) -> Option<usize> {
             continue;
         }
         let c = &g.creeps[i];
-        // A mortar cannot elevate and a fire pool cannot leave the road, so
-        // ground-only towers simply do not see what is flying over them.
-        if !targets.can_hit(c.kind.layer()) {
+        // Nine of the ten Air Towers see nothing but what flies, and the Siege
+        // ladder never elevates. Both are the map's own targeting.
+        if !targets.can_hit(c.flying) {
             continue;
         }
         let d2 = dist2(c.pos, pos);
@@ -199,7 +259,7 @@ fn nearby_targets(
     let pos = g.towers[ti].pos;
     let range = g.towers[ti].range();
     let r2 = range * range;
-    let targets = g.towers[ti].def().targets;
+    let targets = g.towers[ti].targets();
     scratch.clear();
     g.spatial.query(pos, range, |i| scratch.push(i));
     scratch.sort_unstable();
@@ -210,7 +270,7 @@ fn nearby_targets(
         .filter(|&i| {
             i != skip
                 && i < g.creeps.len()
-                && targets.can_hit(g.creeps[i].kind.layer())
+                && targets.can_hit(g.creeps[i].flying)
                 && dist2(g.creeps[i].pos, pos) <= r2
         })
         .collect();
@@ -221,32 +281,19 @@ fn nearby_targets(
 
 fn fire(g: &mut Game, ti: usize, ci: usize) {
     let def = g.towers[ti].def();
-    let stats = g.towers[ti].stats();
-    let specials = g.towers[ti].specials();
+    let abil = g.towers[ti].abil();
     let pos = g.towers[ti].pos;
     let mz = g.towers[ti].muzzle_height();
     let col = tower_color(def);
     let tgt = g.creeps[ci].pos;
-    let tgt_z = g.creeps[ci].height();
     let dir = norm([tgt[0] - pos[0], tgt[1] - pos[1]]);
     let muzzle = [pos[0] + dir[0] * 0.30, pos[1] + dir[1] * 0.30];
 
-    let mut dmg = g.towers[ti].dmg() * (1.0 + g.towers[ti].ramp);
+    let mut dmg = g.towers[ti].dmg();
     let mut crit = false;
-
-    for s in specials.iter() {
-        match *s {
-            Special::Crit { chance, mult } => {
-                if g.rng.chance(chance) {
-                    dmg *= mult;
-                    crit = true;
-                }
-            }
-            Special::Ramp { per_hit, max } => {
-                g.towers[ti].ramp = (g.towers[ti].ramp + per_hit).min(max);
-            }
-            _ => {}
-        }
+    if abil.crit_chance > 0.0 && g.rng.chance(abil.crit_chance) {
+        dmg *= abil.crit_mult.max(1.0);
+        crit = true;
     }
 
     g.fx.cone(
@@ -260,199 +307,22 @@ fn fire(g: &mut Game, ti: usize, ci: usize) {
         0.12,
     );
 
-    match stats.delivery {
-        Delivery::Zone { radius, dur } => {
-            // Aimed at the road under the target, not at the target itself: the
-            // fire stays where it is put, and whatever walks through it burns.
-            g.zones.push(Zone {
-                pos: tgt,
-                radius,
-                life: dur,
-                max_life: dur,
-                dps: dmg,
-                shred: specials.shred_amt(),
-                tower: ti,
-                def: g.towers[ti].def,
-                tick: 0.0,
-            });
-            g.fx.burst(
-                &mut g.rng,
-                tgt,
-                14,
-                2.2,
-                [col[0], col[1], col[2], 1.0],
-                0.6,
-                0.26,
-            );
-        }
-        Delivery::Shot { speed } => {
-            g.projs.push(Proj {
-                pos: muzzle,
-                z: mz,
-                vel: [dir[0] * speed, dir[1] * speed],
-                kind: ProjKind::Homing,
-                tower: ti,
-                def: g.towers[ti].def,
-                tier: g.towers[ti].tier,
-                dmg,
-                splash: stats.splash,
-                crit,
-                target_idx: ci,
-                target_uid: g.creeps[ci].uid,
-                life: 3.0,
-                trail: 0.0,
-                hit: [0; 16],
-                hit_n: 0,
-            });
-        }
-        Delivery::Lance { speed } => {
-            g.projs.push(Proj {
-                pos: muzzle,
-                z: mz * 0.8,
-                vel: [dir[0] * speed, dir[1] * speed],
-                kind: ProjKind::Lance,
-                tower: ti,
-                def: g.towers[ti].def,
-                tier: g.towers[ti].tier,
-                dmg,
-                splash: 0.0,
-                crit,
-                target_idx: usize::MAX,
-                target_uid: 0,
-                life: stats.range / speed * 1.35,
-                trail: 0.0,
-                hit: [0; 16],
-                hit_n: 0,
-            });
-        }
-        Delivery::Beam { pierce } => {
-            g.beams.push(Beam {
-                from: [muzzle[0], muzzle[1], mz],
-                to: [tgt[0], tgt[1], tgt_z],
-                color: col,
-                t: 1.0,
-                width: 0.08,
-            });
-            on_hit_specials(g, ti, ci, crit);
-            damage_creep(g, ci, dmg, ti, crit);
-            if pierce > 0 {
-                let primary_uid = if ci < g.creeps.len() {
-                    g.creeps[ci].uid
-                } else {
-                    0
-                };
-                let mut list: Vec<usize> = Vec::new();
-                for (i, c) in g.creeps.iter().enumerate() {
-                    if c.uid != primary_uid
-                        && point_seg_dist2(c.pos, muzzle, tgt) < (c.radius + 0.16).powi(2)
-                    {
-                        list.push(i);
-                    }
-                }
-                list.sort_unstable_by(|a, b| b.cmp(a));
-                let mut extra = pierce;
-                for i in list {
-                    if extra == 0 {
-                        break;
-                    }
-                    if i >= g.creeps.len() {
-                        continue;
-                    }
-                    on_hit_specials(g, ti, i, false);
-                    damage_creep(g, i, dmg * 0.6, ti, false);
-                    extra -= 1;
-                }
-            }
-        }
-        Delivery::Chain {
-            bounces,
-            falloff,
-            hop,
-        } => {
-            chain(
-                g,
-                ti,
-                ci,
-                dmg,
-                bounces,
-                falloff,
-                hop,
-                crit,
-                [muzzle[0], muzzle[1], mz],
-                col,
-            );
-        }
-        Delivery::Nova | Delivery::Aura => {}
-    }
-}
-
-/// Lightning leaping from one monster to the next, losing power each hop.
-#[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
-fn chain(
-    g: &mut Game,
-    ti: usize,
-    first: usize,
-    dmg: f32,
-    bounces: u32,
-    falloff: f32,
-    hop: f32,
-    crit: bool,
-    from: [f32; 3],
-    col: [f32; 3],
-) {
-    let mut hit_uids: Vec<u32> = Vec::with_capacity(bounces as usize + 1);
-    let mut cur = first;
-    let mut power = dmg;
-    let mut origin = from;
-
-    for leap in 0..=bounces {
-        if cur >= g.creeps.len() {
-            break;
-        }
-        let uid = g.creeps[cur].uid;
-        let to = [
-            g.creeps[cur].pos[0],
-            g.creeps[cur].pos[1],
-            g.creeps[cur].height(),
-        ];
-        hit_uids.push(uid);
-
-        g.beams.push(Beam {
-            from: origin,
-            to,
-            color: col,
-            t: 1.0,
-            width: 0.08 * (1.0 - leap as f32 * 0.08).max(0.45),
-        });
-
-        on_hit_specials(g, ti, cur, crit && leap == 0);
-        damage_creep(g, cur, power, ti, crit && leap == 0);
-
-        if leap == bounces {
-            break;
-        }
-        power *= falloff;
-        origin = to;
-
-        // Nearest monster not already struck by this bolt.
-        let mut best: Option<usize> = None;
-        let mut best_d = hop * hop;
-        for (i, c) in g.creeps.iter().enumerate() {
-            if hit_uids.contains(&c.uid) {
-                continue;
-            }
-            let d = dist2(c.pos, [origin[0], origin[1]]);
-            if d < best_d {
-                best_d = d;
-                best = Some(i);
-            }
-        }
-        match best {
-            Some(n) => cur = n,
-            None => break,
-        }
-    }
+    g.projs.push(Proj {
+        pos: muzzle,
+        z: mz,
+        vel: [dir[0] * MISSILE_SPEED, dir[1] * MISSILE_SPEED],
+        kind: ProjKind::Homing,
+        tower: ti,
+        def: g.towers[ti].def,
+        dmg,
+        splash: def.splash,
+        bounces: abil.bounce,
+        crit,
+        target_idx: ci,
+        target_uid: g.creeps[ci].uid,
+        life: 3.0,
+        trail: 0.0,
+    });
 }
 
 // ---------------------------------------------------------------- projectiles
@@ -461,6 +331,7 @@ fn chain(
 struct Detonation {
     dmg: f32,
     splash: f32,
+    bounces: u32,
     tower: usize,
     def: usize,
     at: [f32; 3],
@@ -480,11 +351,11 @@ pub fn step_projectiles(g: &mut Game, dt: f32) {
             p.trail -= dt;
             if p.life <= 0.0 {
                 remove = true;
-                detonate_now = p.kind == ProjKind::Homing && p.splash > 0.0;
+                detonate_now = p.splash > 0.0;
             }
         }
 
-        if !remove && g.projs[i].kind == ProjKind::Homing {
+        if !remove {
             // Re-acquire by uid; the index may have shifted or the creep may be gone.
             let uid = g.projs[i].target_uid;
             let ti = g.projs[i].target_idx;
@@ -523,36 +394,17 @@ pub fn step_projectiles(g: &mut Game, dt: f32) {
             let p = &mut g.projs[i];
             p.pos[0] += p.vel[0] * dt;
             p.pos[1] += p.vel[1] * dt;
-            if p.pos[0] < -4.0 || p.pos[0] > 40.0 || p.pos[1] < -4.0 || p.pos[1] > 28.0 {
+            // Off the map entirely. This is a safety net for a shot whose
+            // target died mid-flight, not a play boundary - it used to be a
+            // hard-coded forty by twenty-eight box, which on the real map is a
+            // corner of the field, and every projectile fired was deleted the
+            // instant it left the barrel.
+            if p.pos[0] < -4.0
+                || p.pos[0] > super::board::BW + 4.0
+                || p.pos[1] < -4.0
+                || p.pos[1] > super::board::BH + 4.0
+            {
                 remove = true;
-            }
-        }
-
-        // Lances damage everything they pass through and keep going.
-        if !remove && g.projs[i].kind == ProjKind::Lance {
-            let ppos = g.projs[i].pos;
-            let mut hits: Vec<usize> = Vec::new();
-            for (ci, c) in g.creeps.iter().enumerate() {
-                if dist2(c.pos, ppos) <= (c.radius + 0.2).powi(2)
-                    && !g.projs[i].hit[..g.projs[i].hit_n as usize].contains(&c.uid)
-                {
-                    hits.push(ci);
-                }
-            }
-            hits.sort_unstable_by(|a, b| b.cmp(a));
-            for ci in hits {
-                if ci >= g.creeps.len() {
-                    continue;
-                }
-                let uid = g.creeps[ci].uid;
-                let p = &mut g.projs[i];
-                if (p.hit_n as usize) < p.hit.len() {
-                    p.hit[p.hit_n as usize] = uid;
-                    p.hit_n += 1;
-                }
-                let (dmg, tower, crit) = (p.dmg, p.tower, p.crit);
-                on_hit_specials(g, tower, ci, crit);
-                damage_creep(g, ci, dmg, tower, crit);
             }
         }
 
@@ -572,6 +424,7 @@ pub fn step_projectiles(g: &mut Game, dt: f32) {
                 pending.push(Detonation {
                     dmg: p.dmg,
                     splash: p.splash,
+                    bounces: p.bounces,
                     tower: p.tower,
                     def: p.def,
                     at: [p.pos[0], p.pos[1], p.z],
@@ -623,12 +476,21 @@ fn detonate(g: &mut Game, d: &Detonation) {
 
     if let Some(ci) = primary {
         if ci < g.creeps.len() {
-            on_hit_specials(g, tower, ci, crit);
+            on_hit_riders(g, tower, ci);
             damage_creep(g, ci, dmg, tower, crit);
         }
     }
 
     if splash > 0.0 {
+        // Splash obeys the same layers the shot did. Without this a Siege
+        // Tower - which cannot see the air at all - still shot down every
+        // flyer on the ring by landing a shell under one, and a board with no
+        // anti-air quietly cleared every air wave in the campaign.
+        let targets = if tower < g.towers.len() {
+            g.towers[tower].targets()
+        } else {
+            Targets::Both
+        };
         let mut scratch = std::mem::take(&mut g.scratch);
         scratch.clear();
         g.spatial.query(ground, splash, |i| scratch.push(i));
@@ -638,6 +500,7 @@ fn detonate(g: &mut Game, d: &Detonation) {
             .iter()
             .copied()
             .filter(|&i| i < g.creeps.len() && Some(i) != primary)
+            .filter(|&i| targets.can_hit(g.creeps[i].flying))
             .filter(|&i| dist2(g.creeps[i].pos, ground) <= (splash + g.creeps[i].radius).powi(2))
             .collect();
         list.sort_unstable_by(|a, b| b.cmp(a));
@@ -647,85 +510,123 @@ fn detonate(g: &mut Game, d: &Detonation) {
             }
             let dd = dist2(g.creeps[ci].pos, ground).sqrt();
             let f = (1.0 - (dd / splash.max(0.001)) * 0.55).clamp(0.35, 1.0);
-            on_hit_specials(g, tower, ci, false);
+            on_hit_riders(g, tower, ci);
             damage_creep(g, ci, dmg * f, tower, false);
         }
         g.scratch = scratch;
+    }
+
+    // A bouncing shot leaps on from where it landed, weaker each time.
+    if d.bounces > 0 {
+        bounce(g, tower, ground, at[2], dmg, d.bounces, d.target_uid, col);
+    }
+}
+
+/// The Moon Glaive: the shot carries on to the next thing standing near it.
+#[allow(clippy::too_many_arguments)]
+fn bounce(
+    g: &mut Game,
+    ti: usize,
+    from: [f32; 2],
+    z: f32,
+    dmg: f32,
+    hops: u32,
+    first_uid: u32,
+    col: [f32; 3],
+) {
+    let mut hit: Vec<u32> = vec![first_uid];
+    let mut origin = from;
+    let mut power = dmg * BOUNCE_FALLOFF;
+    let mut oz = z;
+
+    for _ in 0..hops {
+        let targets = if ti < g.towers.len() {
+            g.towers[ti].targets()
+        } else {
+            Targets::Both
+        };
+        let mut best: Option<usize> = None;
+        let mut best_d = BOUNCE_HOP * BOUNCE_HOP;
+        for (i, c) in g.creeps.iter().enumerate() {
+            if hit.contains(&c.uid) || !targets.can_hit(c.flying) {
+                continue;
+            }
+            let d = dist2(c.pos, origin);
+            if d < best_d {
+                best_d = d;
+                best = Some(i);
+            }
+        }
+        let Some(ci) = best else { break };
+        let to = [
+            g.creeps[ci].pos[0],
+            g.creeps[ci].pos[1],
+            g.creeps[ci].height(),
+        ];
+        g.beams.push(Beam {
+            from: [origin[0], origin[1], oz],
+            to,
+            color: col,
+            t: 1.0,
+            width: 0.07,
+        });
+        hit.push(g.creeps[ci].uid);
+        origin = [to[0], to[1]];
+        oz = to[2];
+        on_hit_riders(g, ti, ci);
+        damage_creep(g, ci, power, ti, false);
+        power *= BOUNCE_FALLOFF;
     }
 }
 
 // ---------------------------------------------------------------- damage
 
-/// Applies the on-hit riders (burn, slow, stun, ...) to one monster.
-pub fn on_hit_specials(g: &mut Game, ti: usize, ci: usize, _crit: bool) {
+/// Applies the on-hit riders - poison, roots - to one monster.
+pub fn on_hit_riders(g: &mut Game, ti: usize, ci: usize) {
     if ti >= g.towers.len() || ci >= g.creeps.len() {
         return;
     }
-    let specials = g.towers[ti].specials();
-    let k = g.towers[ti].scale();
-    for s in specials.iter() {
-        match *s {
-            Special::Burn { dps, dur } => {
-                g.creeps[ci].burn.apply(dps * k, dur);
+    let a = g.towers[ti].abil();
+
+    // The Poison Tower's sting: damage over time and a heavy slow, both of
+    // which the map states outright on the ability - 500 a second and 40% for
+    // twelve seconds, on up to 8000 and 80% for thirty at the top of the
+    // ladder. It stacks rather than refreshing, which is why the family scales
+    // on one big target.
+    if a.poison_dps > 0.0 {
+        let cap = a.poison_dps * 12.0;
+        let c = &mut g.creeps[ci];
+        c.poison.amt = (c.poison.amt + a.poison_dps).min(cap);
+        c.poison.t = c.poison.t.max(a.poison_dur);
+    }
+    if a.poison_slow > 0.0 {
+        g.creeps[ci]
+            .slow
+            .apply(a.poison_slow, a.poison_dur.max(1.0));
+    }
+
+    // The Troll Tower's roots. Bosses stand through them, and nothing can be
+    // rooted again inside its post-root window - see `STUN_IMMUNE`.
+    if a.root_chance > 0.0 {
+        let locked = g.creeps[ci].stun > 0.0 || g.creeps[ci].stun_immune > 0.0;
+        if !g.creeps[ci].is_boss() && !locked && g.rng.chance(a.root_chance) {
+            let c = &mut g.creeps[ci];
+            // Diminishing returns. Without them, enough rooting towers freeze a
+            // wave permanently: nothing dies, nothing leaks, and the wave simply
+            // never ends.
+            let effective = a.root_dur * (1.0 - c.stun_dr);
+            if effective > 0.05 {
+                c.stun = c.stun.max(effective);
             }
-            Special::Poison { dps, dur } => {
-                let c = &mut g.creeps[ci];
-                // Venom stacks instead of refreshing - that is Bramble and Blight's
-                // whole identity, and the reason they scale on one big target.
-                c.poison.amt = (c.poison.amt + dps * k).min(dps * k * 12.0);
-                c.poison.t = c.poison.t.max(dur);
-            }
-            Special::Slow { amt, dur } => {
-                g.creeps[ci].slow.apply(amt, dur);
-            }
-            Special::Stun { chance, dur } => {
-                // Bosses are immune to hard control by design, and nothing can
-                // be stunned again inside its post-stun window.
-                let locked = g.creeps[ci].stun > 0.0 || g.creeps[ci].stun_immune > 0.0;
-                if g.creeps[ci].armour_type != ArmourType::Boss && !locked && g.rng.chance(chance) {
-                    let c = &mut g.creeps[ci];
-                    // Diminishing returns. Without them, enough Eclipse towers
-                    // freeze a wave permanently: nothing dies, nothing leaks,
-                    // and the wave simply never ends. A full campaign got stuck
-                    // on wave 76 that way. Each stun in quick succession lands
-                    // shorter, and the resistance bleeds off once the target is
-                    // left alone.
-                    let effective = dur * (1.0 - c.stun_dr);
-                    if effective > 0.05 {
-                        c.stun = c.stun.max(effective);
-                    }
-                    c.stun_dr = (c.stun_dr + STUN_DR_STEP).min(STUN_DR_MAX);
-                }
-            }
-            Special::Shred { amt, dur } => {
-                g.creeps[ci].shred.apply(amt, dur);
-            }
-            // Thornwall shoves, Abyss drags. Both spend from the same
-            // per-monster budget and share one cooldown, because two towers
-            // that each move a monster backwards faster than it walks forwards
-            // is a wave that never arrives.
-            //
-            // Neither scales with the tower's level. Displacement is measured
-            // in tiles of road, and the road does not get longer as a tower
-            // gets stronger - Pull briefly scaled with the damage curve, which
-            // at level eight dragged a monster six tiles per hit and stalled
-            // the game outright.
-            Special::Knockback { dist } => push_back(&mut g.creeps[ci], dist),
-            Special::Pull { dist } => push_back(&mut g.creeps[ci], dist),
-            Special::Suppress => {
-                // Mire. Regeneration and Mender healing both stop while this
-                // holds, which is the only counter in the game to a wave that
-                // out-heals a board rather than out-tanking it.
-                g.creeps[ci].suppress = g.creeps[ci].suppress.max(SUPPRESS_TIME);
-            }
-            _ => {}
+            c.stun_dr = (c.stun_dr + STUN_DR_STEP).min(STUN_DR_MAX);
         }
     }
 }
 
 /// Moves one monster back down the road, within its cooldown and its budget.
+#[allow(dead_code)]
 fn push_back(c: &mut crate::game::Creep, dist: f32) {
-    if c.armour_type == ArmourType::Boss || c.kb_cd > 0.0 || c.push_left <= 0.0 {
+    if c.is_boss() || c.kb_cd > 0.0 || c.push_left <= 0.0 {
         return;
     }
     let moved = dist.min(c.push_left);
@@ -734,56 +635,37 @@ fn push_back(c: &mut crate::game::Creep, dist: f32) {
     c.kb_cd = KNOCKBACK_CD;
 }
 
-/// Deals `base` damage (before armour) and cleans up if the monster dies.
+/// Deals `base` damage and cleans up if the monster dies.
+///
+/// This is where the map's two rules meet: the attack-versus-armour table,
+/// which after `war3mapMisc.txt` is only "Immune takes five percent, except
+/// from Chaos and Hero", and the armour *value*, which climbs to seven hundred
+/// and is the whole of the difficulty curve.
 pub fn damage_creep(g: &mut Game, ci: usize, base: f32, ti: usize, crit: bool) -> bool {
     if ci >= g.creeps.len() {
         return false;
     }
-    let dtype = if ti < g.towers.len() {
-        g.towers[ti].attack()
+    let (attack, pen) = if ti < g.towers.len() {
+        (g.towers[ti].attack(), g.towers[ti].abil().armour_pen)
     } else {
-        Attack::Physical
+        (Attack::Normal, 0)
     };
-    let mult = armor_mult(dtype, g.creeps[ci].armour_type);
-    let shred = if g.creeps[ci].shred.active() {
-        g.creeps[ci].shred.amt
-    } else {
-        0.0
-    };
-    // Hellfire: the multiplier is read from the health bar at the moment of the
-    // hit, so a board that chips a target down hands it a finisher.
-    let execute = if ti < g.towers.len() {
-        let frac = g.creeps[ci].hp_frac();
-        g.towers[ti]
-            .specials()
-            .iter()
-            .find_map(|s| match *s {
-                Special::Execute { below, mult } if frac <= below => Some(mult),
-                _ => None,
-            })
-            .unwrap_or(1.0)
-    } else {
-        1.0
-    };
-    let mut dealt = base * mult * (1.0 + shred) * execute;
 
-    // One-strike kill. Rolled before anything else, because a monster this
-    // lands on does not care about armour, shields or health. Never on a boss:
-    // a boss deleted by a coin flip is not a boss.
-    if ti < g.towers.len() && g.creeps[ci].armour_type != ArmourType::Boss {
-        let chance = g.towers[ti]
-            .specials()
-            .iter()
-            .find_map(|s| match *s {
-                Special::Instakill { chance } => Some(chance),
-                _ => None,
-            })
-            .unwrap_or(0.0);
-        if chance > 0.0 && g.rng.chance(chance) {
+    // The Corruption Tower strips armour off whatever it hits - fifteen points
+    // at the first level, seventy-five at the last. On a wave carrying seven
+    // hundred that is small; on the early waves it is most of their defence.
+    let armour = g.creeps[ci].armour - pen;
+    let armour_type = g.creeps[ci].armour_type;
+
+    // The outright kill. Rolled before anything else, because a monster this
+    // lands on does not care about armour or health. Never on a boss: a boss
+    // deleted by a coin flip is not a boss.
+    if ti < g.towers.len() {
+        let chance = g.towers[ti].abil().kill_chance;
+        if chance > 0.0 && !g.creeps[ci].is_boss() && g.rng.chance(chance) {
             let pos = g.creeps[ci].pos;
             let z = g.creeps[ci].height();
             let hp = g.creeps[ci].hp;
-            g.creeps[ci].hp = 0.0;
             g.towers[ti].damage += hp as f64;
             g.stats.damage += hp as f64;
             g.texts.push(FloatText {
@@ -793,7 +675,6 @@ pub fn damage_creep(g: &mut Game, ci: usize, base: f32, ti: usize, crit: bool) -
                 t: 1.1,
             });
             g.fx.burst(&mut g.rng, pos, 20, 2.4, [1.0, 0.95, 0.55, 1.0], 0.45, 0.22);
-            contagion(g, ci, ti);
             let c = g.creeps[ci].clone();
             g.on_creep_died(&c, Some(ti));
             g.creeps.swap_remove(ci);
@@ -801,13 +682,8 @@ pub fn damage_creep(g: &mut Game, ci: usize, base: f32, ti: usize, crit: bool) -
         }
     }
 
+    let dealt = damage_taken(base, attack, armour, armour_type);
     let c = &mut g.creeps[ci];
-    // Shields soak everything except Toxic, which is the point of Toxic.
-    if c.shield > 0.0 && dtype != Attack::Toxic {
-        let absorbed = dealt.min(c.shield);
-        c.shield -= absorbed;
-        dealt -= absorbed;
-    }
     c.hp -= dealt;
     c.flash = 1.0;
     let dead = c.hp <= 0.0;
@@ -819,8 +695,11 @@ pub fn damage_creep(g: &mut Game, ci: usize, base: f32, ti: usize, crit: bool) -
     }
     g.stats.damage += dealt as f64;
 
-    // Only the loud hits get a number, otherwise the board is unreadable.
-    if crit || dealt >= 60.0 {
+    // Only the loud hits get a number, otherwise the board is unreadable. The
+    // threshold rises with the wave, because a hit that is worth reading on
+    // wave three is noise on wave thirty.
+    let floor = (g.wave as f32).powi(2) * 12.0 + 40.0;
+    if crit || dealt >= floor {
         g.texts.push(FloatText {
             pos: [pos[0], pos[1], z + 0.35],
             value: dealt,
@@ -834,55 +713,11 @@ pub fn damage_creep(g: &mut Game, ci: usize, base: f32, ti: usize, crit: bool) -
     }
 
     if dead {
-        contagion(g, ci, ti);
         let c = g.creeps[ci].clone();
         g.on_creep_died(&c, Some(ti));
         g.creeps.swap_remove(ci);
     }
     dead
-}
-
-/// Blight: the damage-over-time jumps to whatever is standing near the corpse,
-/// which is what turns one kill in a packed lane into a chain of them.
-fn contagion(g: &mut Game, ci: usize, ti: usize) {
-    if ti >= g.towers.len() || ci >= g.creeps.len() {
-        return;
-    }
-    let Some(radius) = g.towers[ti].specials().iter().find_map(|s| match *s {
-        Special::Contagion { radius } => Some(radius),
-        _ => None,
-    }) else {
-        return;
-    };
-    let (pos, burn, poison) = {
-        let c = &g.creeps[ci];
-        (c.pos, c.burn, c.poison)
-    };
-    if burn.t <= 0.0 && poison.t <= 0.0 {
-        return;
-    }
-    let uid = g.creeps[ci].uid;
-    for c in g.creeps.iter_mut() {
-        if c.uid == uid || dist2(c.pos, pos) > radius * radius {
-            continue;
-        }
-        if burn.t > 0.0 {
-            c.burn.apply(burn.amt * 0.75, burn.t.max(1.5));
-        }
-        if poison.t > 0.0 {
-            c.poison.amt = (c.poison.amt + poison.amt * 0.6).min(poison.amt * 4.0);
-            c.poison.t = c.poison.t.max(poison.t);
-        }
-    }
-    g.fx.burst_at(
-        &mut g.rng,
-        [pos[0], pos[1], 0.4],
-        22,
-        radius * 2.2,
-        [0.7, 1.0, 0.4, 1.0],
-        0.45,
-        0.20,
-    );
 }
 
 // ---------------------------------------------------------------- math
@@ -903,16 +738,4 @@ fn mag(v: [f32; 2]) -> f32 {
 fn norm(v: [f32; 2]) -> [f32; 2] {
     let m = mag(v).max(1e-5);
     [v[0] / m, v[1] / m]
-}
-
-/// Squared distance from point `p` to segment `a`-`b`.
-fn point_seg_dist2(p: [f32; 2], a: [f32; 2], b: [f32; 2]) -> f32 {
-    let abx = b[0] - a[0];
-    let aby = b[1] - a[1];
-    let len2 = abx * abx + aby * aby;
-    if len2 < 1e-6 {
-        return dist2(p, a);
-    }
-    let t = (((p[0] - a[0]) * abx + (p[1] - a[1]) * aby) / len2).clamp(0.0, 1.0);
-    dist2(p, [a[0] + abx * t, a[1] + aby * t])
 }

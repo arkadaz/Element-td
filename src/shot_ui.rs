@@ -20,14 +20,20 @@ use crate::game::Game;
 use crate::game::board::{BH, BW};
 use crate::gfx::draw::DrawList;
 use crate::gfx::{Quality, Renderer};
-use crate::math::{Camera, shadow_view_proj};
+use crate::math::{Rig, shadow_view_proj};
 use crate::shot::Shot;
 use crate::ui::{self, UiState};
 use crate::view;
 
 const LIGHT_DIR: [f32; 3] = [-0.42, -0.62, 0.66];
-/// egui wants a gamma-space target; the board's composite writes gamma too.
-const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+/// The offscreen target, in **sRGB**.
+///
+/// With a plain `Rgba8Unorm` target the scene pass encodes sRGB itself and egui
+/// writes its own gamma - two different conventions into one texture - and the
+/// HUD came out about a third as bright as the game draws it. A carved wooden
+/// console rendered as near-black, which made every judgement about the
+/// interface's colour from a screenshot wrong.
+const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 
 /// Lays out one frame of the real HUD and returns the paint jobs plus the rect
 /// the board should be drawn into.
@@ -138,14 +144,16 @@ pub fn capture(g: &mut Game, decor: &Decor, width: u32, height: u32, quality: Qu
 
             let bw = (board_rect.width().max(8.0)) as u32;
             let bh = (board_rect.height().max(8.0)) as u32;
-            let camera = Camera::frame_board(
-                BW,
-                BH,
+            // The same rig the app builds, from the rect the HUD left for the
+            // board. It used to frame the arena from a yaw of zero, a quarter
+            // turn away from the way the game actually plays, so every HUD
+            // capture judged the interface against a board nobody sees.
+            let rig = Rig::new(
                 bw as f32 / bh as f32,
                 crate::CAM_PITCH_DEG.to_radians(),
-                0.0,
-                crate::CAM_ZOOM,
+                crate::CAM_YAW_DEG.to_radians(),
             );
+            let camera = rig.camera(crate::lane_middle(), crate::CAM_SPAN);
             let light = shadow_view_proj(BW, BH, LIGHT_DIR);
 
             let mut egui_renderer =

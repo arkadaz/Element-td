@@ -5,6 +5,7 @@ pub mod combat;
 pub mod defs;
 pub mod fx;
 pub mod greentd;
+pub mod greentd_map;
 #[cfg(test)]
 mod greentd_tests;
 pub mod greentd_types;
@@ -32,18 +33,19 @@ pub const MAX_CREEPS: usize = 4000;
 /// tower that shoves monsters backwards, because backwards is the same
 /// direction. And it makes every wave's leftovers a debt carried into the next
 /// one, which is what makes the pressure cumulative rather than per-wave.
-pub const FLOOD_LIMIT: usize = 320;
+pub use defs::FLOOD_LIMIT;
 
-/// How long each wave takes to arrive, in seconds. The whole of a wave's count
-/// streams in evenly across this window, and then the next wave starts - there
-/// is no build phase and no gap. Taken from Green Circle TD, which spreads
-/// every wave over exactly one period this way.
-pub const WAVE_PERIOD: f32 = 42.0;
+/// The longest a wave ever takes to arrive, in seconds.
+///
+/// The real gap is per-wave and comes out of the map's own triggers - `call
+/// PolledWait(50.)` at the top of every wave's script - so this is only the
+/// bound the HUD's countdown bar is drawn against.
+pub const WAVE_PERIOD: f32 = 50.0;
 
-/// Quiet time before the first wave, to place an opening tower or two.
-pub const PREP_TIME: f32 = 22.0;
-pub const START_GOLD: i64 = 260;
-pub const SELL_REFUND: f32 = 0.75;
+/// Quiet time before the first wave. The map waits twenty seconds, prints a
+/// fifteen second warning, and then waits fifteen more.
+pub const PREP_TIME: f32 = 35.0;
+pub use defs::START_GOLD;
 /// How much stun resistance one stun adds, and the ceiling it climbs to.
 /// At the ceiling a stun still lands, but briefly - hard control should be
 /// strong, never absolute.
@@ -79,22 +81,6 @@ pub const KNOCKBACK_CD: f32 = 0.75;
 /// never ended. A per-monster budget makes forward progress provable: once it
 /// is spent, the road is a one-way street whatever the board does.
 pub const PUSHBACK_BUDGET: f32 = 5.0;
-/// How long one touch of Mire keeps healing switched off. Longer than a Mire
-/// tick, so standing in the swamp is continuous suppression rather than a
-/// flicker, and short enough that walking out of it restores healing quickly.
-pub const SUPPRESS_TIME: f32 = 1.5;
-
-/// Interest paid on gold in hand at the end of every wave.
-pub const INTEREST_RATE: f32 = 0.05;
-/// The most interest can ever reach, however many Treasuries are built.
-///
-/// Compound interest with no ceiling is not an economy, it is a runaway. Each
-/// Treasury used to add `0.04 * utility_scale(tier)`, which at level 10 is
-/// +23.8% *each* - four of them put the rate over 100% and gold doubled every
-/// wave. A real game reached 813 billion gold at wave 89 and, with every tower
-/// maxed forever, ran to wave 136 without difficulty. Infinite money is the
-/// same thing as no game.
-pub const INTEREST_MAX: f32 = 0.20;
 
 // ---------------------------------------------------------------- small types
 
@@ -185,7 +171,9 @@ pub struct Creep {
     /// are the whole counter system - see `greentd_types::damage_taken`.
     pub armour: i32,
     pub armour_type: ArmourType,
-    pub kind: Kind,
+    /// Which Warcraft III unit this wave is wearing.
+    pub model: Model,
+    pub flying: bool,
     pub radius: f32,
     pub bounty: u32,
     pub slow: Timed,
@@ -221,7 +209,11 @@ impl Creep {
         if self.stun > 0.0 {
             return 0.0;
         }
-        let slow = if self.slow.active() { self.slow.amt } else { 0.0 };
+        let slow = if self.slow.active() {
+            self.slow.amt
+        } else {
+            0.0
+        };
         self.base_speed * (1.0 - slow).max(0.15)
     }
     #[inline]
@@ -231,9 +223,9 @@ impl Creep {
     /// Height of the body's centre above the ground, for the 3D view.
     #[inline]
     pub fn height(&self) -> f32 {
-        // Flyers ride at their kind's altitude, drifting gently so a formation
-        // of them does not look like a decal sheet.
-        let alt = self.kind.altitude();
+        // Flyers ride above the road, drifting gently so a formation of them
+        // does not look like a decal sheet.
+        let alt = if self.flying { 1.7 } else { 0.0 };
         let drift = if alt > 0.0 {
             (self.bob * 0.9).sin() * 0.16
         } else {
@@ -241,8 +233,9 @@ impl Creep {
         };
         alt + drift + self.radius * 1.4 + (self.bob.sin() * 0.5 + 0.5) * 0.10
     }
-    pub fn flying(&self) -> bool {
-        self.kind.flying()
+    /// Whether this is one of the map's banner waves - Immune, Hero or Boss.
+    pub fn is_boss(&self) -> bool {
+        self.max_hp >= 100_000.0
     }
 }
 
@@ -256,7 +249,13 @@ pub struct Tower {
     pub cooldown: f32,
     pub angle: f32,
     pub target_uid: u32,
+    /// Seconds of self-frenzy left. Only the Troll Tower uses it.
     pub ramp: f32,
+    /// Counts down to the next frenzy.
+    pub frenzy_cd: f32,
+    /// Counts down to the next tick of a standing aura - a Slow Tower's chill
+    /// or a Fire Tower's immolation.
+    pub aura_timer: f32,
     pub kills: u32,
     pub damage: f64,
     pub invested: u32,
@@ -285,6 +284,13 @@ impl Tower {
     pub fn ladder_len(&self) -> u32 {
         ladder_len(self.family())
     }
+    /// How far up its family it stands, from 0 at the first rung to 1 at the
+    /// last. A Siege Tower has twenty rungs and a Chaos tower five, so the
+    /// step number alone says nothing about how far along you are.
+    pub fn progress(&self) -> f32 {
+        let n = self.ladder_len().max(2) - 1;
+        (self.def().step as f32 / n as f32).clamp(0.0, 1.0)
+    }
     pub fn full_name(&self) -> &'static str {
         self.def().name
     }
@@ -294,49 +300,60 @@ impl Tower {
     pub fn targets(&self) -> Targets {
         self.def().targets
     }
-    pub fn flags(&self) -> Flag {
-        self.def().flags
+    pub fn abil(&self) -> &'static Abil {
+        &self.def().abil
     }
     /// Damage of one hit, with any aura bonus.
     pub fn dmg(&self) -> f32 {
         self.def().damage * (1.0 + self.buff_dmg)
     }
-    /// Attacks per second, with any aura bonus.
+    /// Attacks per second, with any aura bonus and any frenzy running.
     pub fn rate(&self) -> f32 {
         let cd = self.def().cooldown.max(0.05);
-        (1.0 / cd) * (1.0 + self.buff_rate)
+        let frenzy = if self.ramp > 0.0 {
+            self.abil().frenzy
+        } else {
+            0.0
+        };
+        (1.0 / cd) * (1.0 + self.buff_rate + frenzy)
     }
     pub fn range(&self) -> f32 {
         self.def().range + self.buff_range
     }
-    pub fn splash(&self) -> f32 {
-        self.def().splash
-    }
     pub fn is_support(&self) -> bool {
         !self.def().attacks()
     }
+    /// What selling pays. The map's own point value, which is nearly always
+    /// everything sunk into the tower - `UpgradeRefundRate=1.0` - and less at
+    /// the very top of a path.
     pub fn sell_value(&self) -> u32 {
-        (self.invested as f32 * SELL_REFUND).round() as u32
+        self.def().refund
     }
-    /// The rung above, and what it costs. `None` at the top of a ladder - and
-    /// on a Single shot Tower, whose next step is a choice of six families.
+    /// Everything this tower can become, and what each costs.
+    pub fn upgrades(&self) -> Vec<(usize, u32)> {
+        upgrades_of(self.def)
+    }
+    /// The next step, when there is exactly one. `None` at the top of a path
+    /// and at every fork.
     pub fn upgrade_target(&self) -> Option<(usize, u32)> {
         next_level(self.def).map(|i| (i, TOWERS[i].gold))
     }
-    /// Whether this tower is the ten gold seed, and so offers a choice rather
-    /// than a next level.
-    pub fn needs_specialisation(&self) -> bool {
-        self.family() == Family::Single
+    /// Whether upgrading is a choice rather than a single next level. True for
+    /// the ten gold seed, for every rung of the Aura Tower, and for the King.
+    pub fn has_choice(&self) -> bool {
+        self.def().upgrades.len() > 1
     }
-    /// How tall it stands, in tiles - taller the further up its ladder.
+    /// How tall it stands, in tiles. The map scales its models up as they
+    /// climb, so this follows the map rather than the level number.
     pub fn height(&self) -> f32 {
-        0.55 + 0.16 * (self.def().step.min(12) as f32)
+        0.55 + 0.14 * (self.def().step.min(10) as f32)
     }
     pub fn muzzle_height(&self) -> f32 {
         self.height() + 0.16
     }
+    #[allow(dead_code)]
     pub fn scale(&self) -> f32 {
-        1.0 + 0.10 * self.def().step as f32
+        (0.85 + 0.06 * self.def().step as f32) * self.def().scale.clamp(0.6, 2.0)
     }
 }
 
@@ -354,17 +371,15 @@ pub struct Proj {
     pub kind: ProjKind,
     pub tower: usize,
     pub def: usize,
-    pub tier: u32,
     pub dmg: f32,
     pub splash: f32,
+    /// How many further targets this shot may leap to.
+    pub bounces: u32,
     pub crit: bool,
     pub target_idx: usize,
     pub target_uid: u32,
     pub life: f32,
     pub trail: f32,
-    /// Creeps a lance has already passed through.
-    pub hit: [u32; 16],
-    pub hit_n: u8,
 }
 
 #[derive(Clone, Copy)]
@@ -382,8 +397,6 @@ pub enum TextKind {
     Damage,
     Crit,
     Gold,
-    Life,
-    Leak,
 }
 
 #[derive(Clone, Copy)]
@@ -484,34 +497,12 @@ pub struct RunStats {
     pub peak_circling: u32,
 }
 
-/// A patch of road claimed by a zone tower - Magma's fire or Mire's swamp.
-///
-/// Zones are the only thing in the game that damages by *position* rather than
-/// by targeting, which is what makes where a Magma stands matter more than what
-/// its stats say.
-#[derive(Clone)]
-pub struct Zone {
-    pub pos: [f32; 2],
-    pub radius: f32,
-    pub life: f32,
-    pub max_life: f32,
-    /// Damage per second to everything standing in it.
-    pub dps: f32,
-    /// Extra damage everything inside takes from every other source.
-    pub shred: f32,
-    pub tower: usize,
-    pub def: usize,
-    /// Counts down to the next damage tick.
-    pub tick: f32,
-}
-
 #[derive(Clone, Copy, PartialEq)]
 pub enum Cue {
     Build,
     Sell,
     Error,
     WaveStart,
-    Leak,
     Boss,
     Victory,
     Defeat,
@@ -525,8 +516,6 @@ pub struct Game {
     pub towers: Vec<Tower>,
     pub projs: Vec<Proj>,
     pub beams: Vec<Beam>,
-    /// Burning patches of road. See [`Zone`].
-    pub zones: Vec<Zone>,
     pub texts: Vec<FloatText>,
     pub fx: Fx,
     pub rng: Rng,
@@ -585,7 +574,6 @@ impl Game {
             towers: Vec::with_capacity(128),
             projs: Vec::with_capacity(512),
             beams: Vec::with_capacity(64),
-            zones: Vec::with_capacity(32),
             texts: Vec::with_capacity(64),
             fx: Fx::default(),
             rng: Rng::new(0x5eed_1234_abcd_9876),
@@ -644,9 +632,6 @@ impl Game {
         *self = Game::new();
         self.rng = Rng::new(seed);
         self.seed = seed;
-        // Wave 1 owes an essence, so the run opens on the draft rather than on
-        // an empty build panel with nothing in it.
-        self.maybe_offer_draft();
     }
 
     /// The scoreboard line shared with the rest of the room.
@@ -679,27 +664,35 @@ impl Game {
         self.wave_def(self.wave + 1)
     }
 
-    /// Every tower is buildable; gold is the only gate. Kept under the old
-    /// name because the HUD reads naturally with it.
-    pub fn unlocked(&self, _def: usize) -> bool {
-        true
+    /// Everything this tower can become, with prices. One entry for most
+    /// towers, six for the Single shot seed, three for an Aura Tower and five
+    /// for the King.
+    pub fn upgrade_choices(&self, ti: usize) -> Vec<(usize, u32)> {
+        self.towers
+            .get(ti)
+            .map(|t| t.upgrades())
+            .unwrap_or_default()
     }
 
-    /// What upgrading this tower costs, if its ladder goes any higher.
-    pub fn upgrade_cost_of(&self, ti: usize) -> Option<u32> {
-        self.towers.get(ti)?.upgrade_target().map(|(_, g)| g)
+    /// Gold in hand plus everything sunk into towers.
+    pub fn net_worth(&self) -> i64 {
+        self.gold + self.towers.iter().map(|t| t.invested as i64).sum::<i64>()
     }
 
-    /// The six families a Single shot Tower can be turned into, with prices.
-    pub fn specialisation_choices(&self, ti: usize) -> Vec<(usize, u32)> {
-        let Some(t) = self.towers.get(ti) else {
-            return Vec::new();
-        };
-        if !t.needs_specialisation() {
-            return Vec::new();
-        }
-        specialisations().into_iter().map(|i| (i, TOWERS[i].gold)).collect()
+    pub fn can_afford(&self, cost: u32) -> bool {
+        self.gold >= cost as i64
     }
+
+    /// The tower standing on a pad, if any.
+    pub fn tower_in_slot(&self, slot: usize) -> Option<usize> {
+        self.board.slots.get(slot).and_then(|s| s.tower)
+    }
+
+    pub fn toast(&mut self, msg: impl Into<String>) {
+        self.toast = Some((msg.into(), 2.2));
+    }
+
+    // ------------------------------------------------ player actions
 
     pub fn try_build(&mut self, slot: usize) -> bool {
         let Some((def, _)) = self.build_choice else {
@@ -736,6 +729,8 @@ impl Game {
             angle: 0.0,
             target_uid: 0,
             ramp: 0.0,
+            frenzy_cd: 0.0,
+            aura_timer: 0.0,
             kills: 0,
             damage: 0.0,
             invested: cost,
@@ -752,8 +747,15 @@ impl Game {
         self.selected = Some(ti);
         self.sound_cues.push(Cue::Build);
         let c = level.color();
-        self.fx
-            .burst(&mut self.rng, pos, 22, 3.0, [c[0], c[1], c[2], 1.0], 0.5, 0.30);
+        self.fx.burst(
+            &mut self.rng,
+            pos,
+            22,
+            3.0,
+            [c[0], c[1], c[2], 1.0],
+            0.5,
+            0.30,
+        );
         true
     }
 
@@ -797,21 +799,23 @@ impl Game {
         }
     }
 
-    /// Buys the next rung of this tower's ladder.
+    /// Buys this tower's next step, when it has exactly one.
     ///
-    /// A Single shot Tower has no next rung - what it has is a *choice* of six
-    /// families, which is [`Game::specialise`].
+    /// Three towers do not: the Single shot seed offers six families, an Aura
+    /// Tower offers Damage, Speed or the next Aura, and the King offers four
+    /// Super towers as well as its own next level. Those go through
+    /// [`Game::upgrade_into`].
     pub fn upgrade(&mut self, ti: usize) {
         if ti >= self.towers.len() {
             return;
         }
-        if self.towers[ti].needs_specialisation() {
+        if self.towers[ti].has_choice() {
             self.toast("Choose what it becomes");
             self.sound_cues.push(Cue::Error);
             return;
         }
         let Some((next, cost)) = self.towers[ti].upgrade_target() else {
-            self.toast("Top of the ladder");
+            self.toast("Nothing above this");
             self.sound_cues.push(Cue::Error);
             return;
         };
@@ -823,16 +827,17 @@ impl Game {
         self.pay_and_replace(ti, next, cost);
     }
 
-    /// Turns a Single shot Tower into one of the six families that cannot be
-    /// bought any other way.
-    pub fn specialise(&mut self, ti: usize, into: usize) {
-        if ti >= self.towers.len() || !self.towers[ti].needs_specialisation() {
+    /// Takes one of the branches a forking tower offers.
+    pub fn upgrade_into(&mut self, ti: usize, into: usize) {
+        if ti >= self.towers.len() {
             return;
         }
-        let Some(level) = TOWERS.get(into) else { return };
-        if level.step != 0 || level.family.buildable() {
+        if !self.towers[ti].def().upgrades.contains(&(into as u16)) {
             return;
         }
+        let Some(level) = TOWERS.get(into) else {
+            return;
+        };
         let cost = level.gold;
         if !self.can_afford(cost) {
             self.toast("Not enough gold");
@@ -853,30 +858,48 @@ impl Game {
         // target is no longer necessarily something it can hurt.
         t.target_uid = 0;
         t.ramp = 0.0;
+        t.frenzy_cd = 0.0;
+        t.aura_timer = 0.0;
         let pos = t.pos;
         let c = TOWERS[into].color();
         self.rebuild_auras();
         self.sound_cues.push(Cue::Build);
-        self.fx
-            .burst(&mut self.rng, pos, 30, 3.6, [c[0], c[1], c[2], 1.0], 0.6, 0.34);
+        self.fx.burst(
+            &mut self.rng,
+            pos,
+            30,
+            3.6,
+            [c[0], c[1], c[2], 1.0],
+            0.6,
+            0.34,
+        );
     }
 
     /// Recomputes every tower's aura bonus. Only runs when the board changes.
+    ///
+    /// Three towers hand these out: the Damage Tower (+30/50/80% damage), the
+    /// Speed Tower (+30/50/80% attack rate) and the Fire Tower, which carries a
+    /// smaller damage aura on top of its own attack. The Slow Tower gives
+    /// attack speed as well - the map's own tooltip says so.
     pub fn rebuild_auras(&mut self) {
-        for i in 0..self.towers.len() {
-            self.towers[i].buff_dmg = 0.0;
-            self.towers[i].buff_rate = 0.0;
-            self.towers[i].buff_range = 0.0;
+        for t in &mut self.towers {
+            t.buff_dmg = 0.0;
+            t.buff_rate = 0.0;
+            t.buff_range = 0.0;
         }
         // Collect the auras first so the loop below can stay a simple scan.
-        let beacons: Vec<([f32; 2], f32, f32, f32, f32)> = self
+        let beacons: Vec<([f32; 2], f32, f32, f32)> = self
             .towers
             .iter()
-            .filter_map(|t| {
-                let u = t.utility();
-                t.specials().find_buff().map(|(dmg, rate, range)| {
-                    (t.pos, t.stats().range, dmg * u, rate * u, range * u)
-                })
+            .filter(|t| t.abil().is_aura())
+            .map(|t| {
+                let a = t.abil();
+                (
+                    t.pos,
+                    a.aura_range.max(t.def().range),
+                    a.dmg_aura,
+                    a.speed_aura,
+                )
             })
             .collect();
         if beacons.is_empty() {
@@ -887,66 +910,14 @@ impl Game {
                 continue;
             }
             let p = self.towers[i].pos;
-            for (bp, br, dmg, rate, range) in &beacons {
+            for (bp, br, dmg, rate) in &beacons {
                 let d2 = (bp[0] - p[0]).powi(2) + (bp[1] - p[1]).powi(2);
                 if d2 <= br * br {
                     self.towers[i].buff_dmg += dmg;
                     self.towers[i].buff_rate += rate;
-                    self.towers[i].buff_range += range;
                 }
             }
         }
-    }
-
-    /// Gold every Tombstone pays at the end of a wave.
-    fn tower_income(&self) -> i64 {
-        self.towers
-            .iter()
-            .map(|t| {
-                let u = t.utility();
-                t.specials()
-                    .iter()
-                    .filter_map(|s| match *s {
-                        Special::Income { per_wave } => Some((per_wave as f32 * u) as i64),
-                        _ => None,
-                    })
-                    .sum::<i64>()
-            })
-            .sum()
-    }
-
-    /// Base interest plus anything a Treasury adds, capped at [`INTEREST_MAX`].
-    ///
-    /// Deliberately *not* scaled by tier. Interest compounds, so anything that
-    /// multiplies the rate multiplies an exponential - a Treasury pays for
-    /// itself through its flat income and a modest rate bump, not by bending
-    /// the curve.
-    pub fn interest_rate(&self) -> f32 {
-        let extra: f32 = self
-            .towers
-            .iter()
-            .map(|t| {
-                t.specials()
-                    .iter()
-                    .filter_map(|s| match *s {
-                        Special::Interest { extra } => Some(extra),
-                        _ => None,
-                    })
-                    .sum::<f32>()
-            })
-            .sum();
-        (INTEREST_RATE + extra).min(INTEREST_MAX)
-    }
-
-    /// The most gold that earns interest.
-    ///
-    /// Banking a wave or two of income is a real strategy and should pay. An
-    /// unbounded pile earning compound interest is an exponential with nothing
-    /// on the other side of it, so above this ceiling gold simply sits there.
-    /// The ceiling rises with the wave, so it never stops being relevant.
-    pub fn interest_ceiling(&self) -> i64 {
-        let purse = wave_clear_bonus(self.wave.max(1)) as i64;
-        (purse * 12).max(2_000)
     }
 
     /// Call the next wave now; pays a bonus for the time skipped.
@@ -958,11 +929,6 @@ impl Game {
     /// that your board can take it.
     pub fn send_wave(&mut self) {
         if matches!(self.phase, Phase::Defeat | Phase::Victory) {
-            return;
-        }
-        if self.pending_draft.is_some() {
-            self.toast("Choose an essence first");
-            self.sound_cues.push(Cue::Error);
             return;
         }
         if self.wave >= self.last_wave() {
@@ -1003,18 +969,19 @@ impl Game {
         self.wave += 1;
         self.prep = false;
         self.phase = Phase::Combat;
-        self.wave_timer = WAVE_PERIOD;
+        // The map sets its own gap at the top of every wave's trigger: fifty
+        // seconds early on, forty-five once the waves get big.
+        self.wave_timer = self.wave_def(self.wave + 1).lead_in;
         let w = self.wave_def(self.wave);
         self.spawn_left = w.count;
-        self.escort_left = w.escort.map_or(0, |e| e.count);
+        self.escort_left = 0;
         self.spawn_timer = 0.0;
         self.escort_timer = 0.0;
         self.pay_wave_stipend();
-        self.maybe_offer_draft();
         // A wave boundary is the only moment worth checkpointing: no monster is
         // mid-spawn, so a resumed run never starts half a wave in.
         self.wants_save = true;
-        self.sound_cues.push(if w.kind.is_boss() {
+        self.sound_cues.push(if w.tag == "Boss" {
             Cue::Boss
         } else {
             Cue::WaveStart
@@ -1027,33 +994,18 @@ impl Game {
         self.pay_wave_stipend();
     }
 
-    /// The per-wave income: a flat stipend, interest on gold in hand, and
-    /// whatever the economy towers pay.
+    /// The per-wave stipend, paid when a wave is called.
     ///
     /// It is paid when a wave *starts*, because on a circuit no wave ever ends.
-    /// The stipend exists for the same reason it always did - a board that
-    /// falls behind still needs the money to climb back out, or one bad wave
-    /// quietly decides the whole run.
+    /// There is no interest and no income tower in this map - gold comes from
+    /// kills, and this exists for one reason: a board that has fallen behind
+    /// still needs the money to climb back out, or one bad wave quietly decides
+    /// the whole run.
     fn pay_wave_stipend(&mut self) {
         let stipend = wave_clear_bonus(self.wave) as i64;
-        let earning = self.gold.clamp(0, self.interest_ceiling());
-        let interest = (earning as f64 * self.interest_rate() as f64).floor() as i64;
-        let income = self.tower_income();
-        for i in 0..self.towers.len() {
-            let u = self.towers[i].utility();
-            let paid: i64 = self.towers[i]
-                .specials()
-                .iter()
-                .filter_map(|sp| match *sp {
-                    Special::Income { per_wave } => Some((per_wave as f32 * u) as i64),
-                    _ => None,
-                })
-                .sum();
-            self.towers[i].gold_earned += paid.max(0) as u64;
-        }
-        self.last_interest = interest;
-        self.gold += stipend + interest + income;
-        self.stats.gold_earned += (stipend + interest + income) as u64;
+        self.last_interest = 0;
+        self.gold += stipend;
+        self.stats.gold_earned += stipend.max(0) as u64;
     }
 
     /// Checks the two ways a run can end.
@@ -1083,11 +1035,6 @@ impl Game {
     /// How full the ring is, 0 to 1. The gauge the HUD draws.
     pub fn flood(&self) -> f32 {
         self.creeps.len() as f32 / FLOOD_LIMIT as f32
-    }
-
-    /// How many more monsters the ring will hold.
-    pub fn headroom(&self) -> usize {
-        FLOOD_LIMIT.saturating_sub(self.creeps.len())
     }
 
     // ------------------------------------------------ update
@@ -1132,13 +1079,10 @@ impl Game {
     fn step(&mut self, dt: f32) {
         self.time += dt;
 
-        // The wave clock never stops except for a draft. There is no build
-        // phase to hide in: the only quiet stretch in a run is before wave one.
-        //
-        // The draft is the exception because a player reading three cards is
-        // not idling, and a wave that arrived during the decision would turn
-        // the decision into a penalty.
-        if self.pending_draft.is_none() && self.wave < self.last_wave() {
+        // The wave clock never stops. There is no build phase to hide in: the
+        // only quiet stretch in a run is before wave one, exactly as the map
+        // plays it.
+        if self.wave < self.last_wave() {
             self.wave_timer -= dt;
             if self.wave_timer <= 0.0 {
                 self.begin_wave();
@@ -1149,99 +1093,26 @@ impl Game {
         }
 
         self.spatial.rebuild(&self.creeps);
-        self.step_menders(dt);
         self.step_creeps(dt);
         combat::step_towers(self, dt);
         combat::step_projectiles(self, dt);
-        self.step_zones(dt);
         self.check_end();
     }
 
-    /// Burning road. Zones tick a few times a second rather than every step -
-    /// a hundred floating combat numbers a second is unreadable, and the total
-    /// damage is identical either way.
-    fn step_zones(&mut self, dt: f32) {
-        const TICK: f32 = 0.25;
-        if self.zones.is_empty() {
-            return;
-        }
-        for z in &mut self.zones {
-            z.life -= dt;
-            z.tick -= dt;
-        }
-        let mut hits: Vec<(usize, usize, f32)> = Vec::new();
-        for zi in 0..self.zones.len() {
-            if self.zones[zi].tick > 0.0 {
-                continue;
-            }
-            self.zones[zi].tick += TICK;
-            let z = self.zones[zi].clone();
-            let r2 = z.radius * z.radius;
-            for (ci, c) in self.creeps.iter_mut().enumerate() {
-                // The fire is on the road. Anything above it is untouched.
-                if c.kind.flying() {
-                    continue;
-                }
-                let dx = c.pos[0] - z.pos[0];
-                let dy = c.pos[1] - z.pos[1];
-                if dx * dx + dy * dy > r2 {
-                    continue;
-                }
-                // Shred is refreshed while they stand in it, and lingers just
-                // long enough after they leave to be worth chasing them out.
-                if z.shred > 0.0 {
-                    c.shred.apply(z.shred, TICK + 0.9);
-                }
-                hits.push((ci, z.tower, z.dps * TICK));
-            }
-        }
-        for (ci, ti, dmg) in hits {
-            if ci < self.creeps.len() && ti < self.towers.len() {
-                combat::damage_creep(self, ci, dmg, ti, false);
-            }
-        }
-        self.zones.retain(|z| z.life > 0.0);
-    }
-
-    /// Streams the current wave in evenly across one [`WAVE_PERIOD`].
-    ///
-    /// A wave is not a burst any more; it is a rate. A count of a hundred and
-    /// fifty over forty-two seconds is one monster every third of a second, so
-    /// the road is never empty and the board is never idle - which is the
-    /// difference between defending a gate and defending a throughput.
     fn spawn_step(&mut self, dt: f32) {
-        if self.spawn_left == 0 && self.escort_left == 0 {
+        if self.spawn_left == 0 {
             return;
         }
         let w = self.wave_def(self.wave);
-        let total = w.count.max(1);
-
         self.spawn_timer -= dt;
-        let gap = (WAVE_PERIOD / total as f32).max(0.04);
+        // The map spreads every wave evenly over forty-five seconds however
+        // many creeps it holds, so a wave of a hundred and sixty arrives in a
+        // stream and a wave of fifteen arrives in ones.
+        let gap = w.spawn_gap.max(0.04);
         while self.spawn_left > 0 && self.spawn_timer <= 0.0 {
             self.spawn_creep(&w, w.hp, 1.0, 0.0);
             self.spawn_left -= 1;
             self.spawn_timer += gap;
-        }
-
-        // The escort arrives on its own clock across the same window, so the
-        // two types are genuinely mixed rather than queued one after the other
-        // - which would just be two easier waves.
-        let Some(e) = w.escort else { return };
-        self.escort_timer -= dt;
-        let egap = (WAVE_PERIOD / e.count.max(1) as f32).max(0.04);
-        while self.escort_left > 0 && self.escort_timer <= 0.0 {
-            let mut sub = w;
-            sub.kind = e.kind;
-            sub.speed = kind_speed(e.kind);
-            sub.shield = 0.0;
-            sub.heal = if e.kind == Kind::Mender { w.heal } else { 0.0 };
-            sub.phasing = e.kind == Kind::Phaser;
-            sub.split = false;
-            sub.escort = None;
-            self.spawn_creep(&sub, e.hp, 1.0, 0.0);
-            self.escort_left -= 1;
-            self.escort_timer += egap;
         }
     }
 
@@ -1253,7 +1124,6 @@ impl Game {
         self.next_uid = self.next_uid.wrapping_add(1).max(1);
         let lane = self.rng.range(-0.28, 0.28);
         let dist = at_dist - self.rng.range(0.0, 0.35);
-        let shield = w.shield * scale;
         let mut c = Creep {
             uid,
             dist,
@@ -1263,10 +1133,12 @@ impl Game {
             hp,
             max_hp: hp,
             base_speed: w.speed,
-            armor: w.armor(),
-            kind: w.kind,
-            radius: w.kind.radius() * scale,
-            bounty: w.bounty,
+            armour: w.armour,
+            armour_type: w.armour_type,
+            model: w.model,
+            flying: w.flying,
+            radius: w.model.radius() * w.scale.clamp(0.7, 1.35) * scale,
+            bounty: bounty_of(w),
             slow: Timed::default(),
             burn: Timed::default(),
             poison: Timed::default(),
@@ -1278,13 +1150,6 @@ impl Game {
             stun_immune: 0.0,
             push_left: PUSHBACK_BUDGET,
             laps: 0,
-            regen: if w.regen { hp * 0.02 } else { 0.0 },
-            splits: if w.split { 1 } else { 0 },
-            shield,
-            max_shield: shield,
-            heal: w.heal,
-            phasing: w.phasing,
-            slow_off: false,
             flash: 0.0,
             bob: self.rng.range(0.0, std::f32::consts::TAU),
         };
@@ -1292,55 +1157,12 @@ impl Game {
         self.creeps.push(c);
     }
 
-    /// Menders top up everything around them, so they have to die first.
-    fn step_menders(&mut self, dt: f32) {
-        let healers: Vec<([f32; 2], f32)> = self
-            .creeps
-            .iter()
-            .filter(|c| c.heal > 0.0)
-            .map(|c| (c.pos, c.heal))
-            .collect();
-        if healers.is_empty() {
-            return;
-        }
-        const RADIUS: f32 = 2.6;
-        // Healing from several Menders is capped, not summed.
-        //
-        // Menders arrive ten at a time and walk in a clump, so summing meant a
-        // wave healed itself for thirty percent of its own health every second
-        // - a number no board can out-damage, and one that grows with the wave
-        // rather than with the difficulty curve. Wave 43 was an outright wall
-        // in every playthrough because of it. Capped, a pack of Menders is a
-        // burst check: kill one at a time and the rest cannot cover it.
-        const HEAL_CAP: f32 = 2.0;
-        for c in &mut self.creeps {
-            if c.suppress > 0.0 {
-                continue;
-            }
-            let mut rate_sum = 0.0;
-            let mut strongest = 0.0f32;
-            for (hp_pos, rate) in &healers {
-                let d2 = (hp_pos[0] - c.pos[0]).powi(2) + (hp_pos[1] - c.pos[1]).powi(2);
-                if d2 <= RADIUS * RADIUS {
-                    rate_sum += rate;
-                    strongest = strongest.max(*rate);
-                }
-            }
-            let rate = rate_sum.min(strongest * HEAL_CAP);
-            if rate > 0.0 {
-                c.hp = (c.hp + c.max_hp * rate * dt).min(c.max_hp);
-            }
-        }
-    }
-
     fn step_creeps(&mut self, dt: f32) {
         let mut died: Vec<usize> = Vec::new();
 
         for i in 0..self.creeps.len() {
             {
-                let phase_window = (self.time * 1.4).fract() < 0.5;
                 let c = &mut self.creeps[i];
-                c.slow_off = c.phasing && phase_window;
                 c.flash = (c.flash - dt * 6.0).max(0.0);
                 c.bob += dt * 6.0;
                 c.stun_immune = (c.stun_immune - dt).max(0.0);
@@ -1368,9 +1190,6 @@ impl Game {
                     c.poison.tick(dt);
                 }
                 c.suppress = (c.suppress - dt).max(0.0);
-                if c.regen > 0.0 && c.hp > 0.0 && c.suppress <= 0.0 {
-                    c.hp = (c.hp + c.regen * dt).min(c.max_hp);
-                }
                 if c.hp <= 0.0 {
                     died.push(i);
                     continue;
@@ -1404,42 +1223,20 @@ impl Game {
 
     pub(crate) fn on_creep_died(&mut self, c: &Creep, killer: Option<usize>) {
         self.stats.kills += 1;
-        let mut bounty = c.bounty as i64;
-
+        let bounty = c.bounty as i64;
         if let Some(ti) = killer {
             if ti < self.towers.len() {
                 self.towers[ti].kills += 1;
-                for s in self.towers[ti].specials().iter() {
-                    match *s {
-                        Special::Bounty {
-                            flat,
-                            chance,
-                            bonus,
-                        } => {
-                            let mut extra = flat as i64;
-                            if self.rng.chance(chance) {
-                                extra += bonus as i64;
-                            }
-                            bounty += extra;
-                            self.towers[ti].gold_earned += extra.max(0) as u64;
-                        }
-                        _ => {}
-                    }
-                }
+                self.towers[ti].gold_earned += bounty.max(0) as u64;
             }
         }
-
         self.gold += bounty;
         self.stats.gold_earned += bounty.max(0) as u64;
 
-        let col = c.armor.color();
-        let n = match c.kind {
-            Kind::Boss => 140,
-            Kind::Brute | Kind::Bulwark => 46,
-            Kind::Swarm => 12,
-            _ => 20,
-        };
-        let spread = if c.kind == Kind::Boss { 7.0 } else { 4.0 };
+        let col = c.armour_type.color();
+        let big = c.is_boss();
+        let n = if big { 120 } else { 20 };
+        let spread = if big { 6.0 } else { 4.0 };
         self.fx.burst_at(
             &mut self.rng,
             [c.pos[0], c.pos[1], c.height()],
@@ -1449,34 +1246,8 @@ impl Game {
             0.6,
             c.radius * 1.1,
         );
-        if c.kind == Kind::Boss {
+        if big {
             self.shake = 1.0;
-        }
-
-        // Splitters leave two smaller copies behind.
-        if c.splits > 0 {
-            let w = WaveDef {
-                kind: Kind::Swarm,
-                count: 2,
-                hp: c.max_hp * 0.35,
-                speed: c.base_speed * 1.2,
-                bounty: (c.bounty / 2).max(1),
-                shield: 0.0,
-                heal: 0.0,
-                phasing: c.phasing,
-                regen: false,
-                split: false,
-                escort: None,
-            };
-            for k in 0..2 {
-                if self.creeps.len() >= MAX_CREEPS {
-                    break;
-                }
-                self.spawn_creep(&w, w.hp, 0.7, c.dist);
-                if let Some(nc) = self.creeps.last_mut() {
-                    nc.lane = if k == 0 { -0.26 } else { 0.26 };
-                }
-            }
         }
     }
 }
@@ -1490,10 +1261,6 @@ fn place(board: &Board, c: &mut Creep) {
     // Lane offset is perpendicular to the heading. Flyers follow the same road
     // - this is a fixed-path game and a straight line over the walls would make
     // the whole board meaningless - they simply do it out of reach.
-    let lane = if c.kind.flying() {
-        c.lane * 2.2
-    } else {
-        c.lane
-    };
+    let lane = if c.flying { c.lane * 2.2 } else { c.lane };
     c.pos = [p[0] - h[1] * lane, p[1] + h[0] * lane];
 }

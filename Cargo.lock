@@ -805,26 +805,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "252afb9ae5eaa683babdc6a068b3f5726eb19e05070c731f9b2a23a7c3e8ed34"
 
 [[package]]
-name = "elemental_td"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "eframe",
- "egui",
- "env_logger",
- "epaint",
- "ewebsock",
- "log",
- "serde",
- "serde_json",
- "td-proto",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "web-sys",
- "wgpu",
-]
-
-[[package]]
 name = "emath"
 version = "0.36.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1175,6 +1155,26 @@ dependencies = [
  "presser",
  "thiserror 2.0.20",
  "windows",
+]
+
+[[package]]
+name = "green_circle_td"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "eframe",
+ "egui",
+ "env_logger",
+ "epaint",
+ "ewebsock",
+ "log",
+ "serde",
+ "serde_json",
+ "td-proto",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+ "wgpu",
 ]
 
 [[package]]

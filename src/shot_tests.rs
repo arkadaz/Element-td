@@ -17,7 +17,7 @@ use crate::shot;
 
 /// Waves to photograph. Chosen to show the arc: an opening board, the roster
 /// opening up, the ring starting to fill, and the endgame under real pressure.
-const AT: [u32; 4] = [3, 25, 55, 68];
+const AT: [u32; 4] = [4, 13, 24, 33];
 
 const W: u32 = 1280;
 const H: u32 = 720;
@@ -43,9 +43,6 @@ fn capture_a_playthrough() {
     for target in AT {
         // Play forward to the wave we want a picture of.
         while g.wave < target && !matches!(g.phase, Phase::Defeat | Phase::Victory) {
-            while g.pending_draft.is_some() {
-                super::game::tests::draft_for_shot(&mut g);
-            }
             super::game::tests::spend_for_shot(&mut g, &mut built);
             let dt = 1.0 / 60.0;
             let mut t = 0.0;
@@ -62,10 +59,13 @@ fn capture_a_playthrough() {
             println!("  run ended on wave {} before wave {target}", g.wave);
             break;
         }
-        // Let the wave get going so the picture has monsters in it.
+        // Let the wave get going so the picture has monsters in it. Nothing is
+        // selected: a selected tower paints its range ring across the board,
+        // and a screenshot of that is a screenshot of the range ring.
         for _ in 0..(WAVE_PERIOD * 0.55 * 60.0) as u32 {
             g.update(1.0 / 60.0);
         }
+        g.selected = None;
 
         let shot = shot::capture(&g, &decor, W, H, Quality::Ultra);
         let path = dir.join(format!("wave{:02}.png", g.wave));
@@ -91,12 +91,10 @@ fn capture_a_playthrough() {
 fn a_captured_frame_actually_has_a_board_in_it() {
     let mut g = Game::new();
     g.start_run(7);
-    g.pending_draft = None;
-    g.essence = [(MAX_TIER - FREE_TIERS) as u8; 6];
     g.gold = 500_000;
     let mut n = 0;
     for slot in 0..g.board.slots.len() {
-        g.build_choice = Some((n % TOWERS.len(), 4));
+        g.build_choice = Some((n % TOWERS.len(), 1));
         if g.try_build(slot) {
             n += 1;
         }
@@ -188,9 +186,6 @@ fn what_is_drawing_all_those_rings() {
     let decor = Decor::build(&g.board);
     let mut built = 0usize;
     while g.wave < 55 && !matches!(g.phase, Phase::Defeat | Phase::Victory) {
-        while g.pending_draft.is_some() {
-            super::game::tests::draft_for_shot(&mut g);
-        }
         super::game::tests::spend_for_shot(&mut g, &mut built);
         let was = g.wave;
         let mut t = 0.0;
@@ -205,11 +200,10 @@ fn what_is_drawing_all_those_rings() {
 
     println!();
     println!(
-        "wave {}: {} creeps, {} beams, {} zones, {} projectiles, {} towers",
+        "wave {}: {} creeps, {} beams, {} projectiles, {} towers",
         g.wave,
         g.creeps.len(),
         g.beams.len(),
-        g.zones.len(),
         g.projs.len(),
         g.towers.len()
     );
@@ -256,15 +250,11 @@ fn capture_the_interface() {
     let mut g = Game::new();
     g.start_run(0x5CA1_AB1E);
     let decor = Decor::build(&g.board);
-    assert!(g.pending_draft.is_some(), "a run should open on a draft");
     save(&dir, "ui_draft", &mut g, &decor);
 
     // 2. Mid-game: a full build palette, the essence strip, a live wave.
     let mut built = 0usize;
     while g.wave < 30 && !matches!(g.phase, Phase::Defeat | Phase::Victory) {
-        while g.pending_draft.is_some() {
-            super::game::tests::draft_for_shot(&mut g);
-        }
         super::game::tests::spend_for_shot(&mut g, &mut built);
         let was = g.wave;
         let mut t = 0.0;
@@ -284,9 +274,6 @@ fn capture_the_interface() {
 
     // 3. Under pressure, with the ring most of the way full.
     while g.wave < 66 && !matches!(g.phase, Phase::Defeat | Phase::Victory) {
-        while g.pending_draft.is_some() {
-            super::game::tests::draft_for_shot(&mut g);
-        }
         super::game::tests::spend_for_shot(&mut g, &mut built);
         let was = g.wave;
         let mut t = 0.0;
@@ -314,4 +301,192 @@ fn save(dir: &std::path::Path, name: &str, g: &mut Game, decor: &Decor) {
         g.gold,
         path.display()
     );
+}
+
+/// Prints what is actually in one frame's draw list, by shape. Used to find a
+/// stray ring or a runaway glow:
+///     cargo test --release what_is_in_the_frame -- --ignored --nocapture
+#[test]
+#[ignore = "diagnostic"]
+fn what_is_in_the_frame() {
+    let mut g = Game::new();
+    g.start_run(0x5CA1_AB1E);
+    let decor = Decor::build(&g.board);
+    let mut built = 0usize;
+    while g.wave < 13 && !matches!(g.phase, crate::game::Phase::Defeat) {
+        super::game::tests::spend_for_shot(&mut g, &mut built);
+        let was = g.wave;
+        let mut t = 0.0;
+        while g.wave == was && t < 150.0 {
+            g.update(1.0 / 60.0);
+            t += 1.0 / 60.0;
+        }
+    }
+    for _ in 0..(45.0 * 0.55 * 60.0) as u32 {
+        g.update(1.0 / 60.0);
+    }
+    println!(
+        "wave {}  creeps {}  towers {}  beams {}  projs {}  selected {:?}  build {:?}",
+        g.wave,
+        g.creeps.len(),
+        g.towers.len(),
+        g.beams.len(),
+        g.projs.len(),
+        g.selected,
+        g.build_choice
+    );
+    let widths: Vec<f32> = g.beams.iter().map(|b| b.width).collect();
+    println!("  beam widths: {widths:?}");
+    let mut d = crate::gfx::draw::DrawList::default();
+    crate::view::draw_scene(&g, &decor, &mut d, g.time);
+    println!("  glows {}  solids {}", d.glow.len(), d.solid_count());
+    for t in &g.towers {
+        println!(
+            "  tower {} range {:.1} model {:?} burn {:.0}/{:.1} aura {:.1}",
+            t.full_name(),
+            t.range(),
+            t.def().model,
+            t.abil().burn_dps,
+            t.abil().burn_range,
+            t.abil().aura_range
+        );
+    }
+}
+
+/// Prints the average colour of a patch of the frame, so the lighting can be
+/// tuned against a number rather than against an impression.
+///
+///     cargo test --release what_colour_is_the_grass -- --ignored --nocapture
+#[test]
+#[ignore = "diagnostic"]
+fn what_colour_is_the_grass() {
+    let mut g = Game::new();
+    g.start_run(7);
+    g.prep = false;
+    let decor = Decor::build(&g.board);
+    let shot = shot::capture(&g, &decor, 640, 360, Quality::Ultra);
+    let px = |x: usize, y: usize| {
+        let i = (y * 640 + x) * 4;
+        (
+            shot.rgba[i] as u32,
+            shot.rgba[i + 1] as u32,
+            shot.rgba[i + 2] as u32,
+        )
+    };
+    let mut patch = |name: &str, x0: usize, y0: usize, w: usize, h: usize| {
+        let (mut r, mut gg, mut b) = (0u32, 0u32, 0u32);
+        for y in y0..y0 + h {
+            for x in x0..x0 + w {
+                let p = px(x, y);
+                r += p.0;
+                gg += p.1;
+                b += p.2;
+            }
+        }
+        let n = (w * h) as u32;
+        println!("  {name:<10} rgb({:>3}, {:>3}, {:>3})", r / n, gg / n, b / n);
+    };
+    println!();
+    println!("frame averages:");
+    patch("sky", 40, 20, 60, 30);
+    patch("field-mid", 300, 200, 60, 30);
+    patch("field-low", 300, 300, 60, 30);
+    patch("left", 90, 220, 40, 40);
+}
+
+/// How bright a *busy* frame actually is, as a distribution.
+///
+///     cargo test --release how_bright_is_a_busy_frame -- --ignored --nocapture
+///
+/// `what_colour_is_the_grass` measures an empty board, which is why the field
+/// could be measured correct against a screenshot while the game still looked
+/// bleached: everything that was too bright was a unit, and there were no units
+/// in the frame it sampled. This plays to a wave with three hundred monsters on
+/// the lane and reports percentiles.
+///
+/// What to aim at, read off the Warcraft III screenshot this port is matched
+/// to: a median around 90-110, a 99th percentile below about 210, and under a
+/// couple of percent of the frame above 240. A 99th percentile pinned at 255
+/// means the units are blowing out, whatever the average says.
+#[test]
+#[ignore = "diagnostic"]
+fn how_bright_is_a_busy_frame() {
+    let mut g = Game::new();
+    g.start_run(0x5CA1_AB1E);
+    let decor = Decor::build(&g.board);
+    let mut built = 0usize;
+    while g.wave < 13 && !matches!(g.phase, Phase::Defeat | Phase::Victory) {
+        super::game::tests::spend_for_shot(&mut g, &mut built);
+        let was = g.wave;
+        let mut t = 0.0;
+        while g.wave == was && t < WAVE_PERIOD * 3.0 {
+            g.update(1.0 / 60.0);
+            t += 1.0 / 60.0;
+        }
+    }
+    for _ in 0..(WAVE_PERIOD * 0.55 * 60.0) as u32 {
+        g.update(1.0 / 60.0);
+    }
+    g.selected = None;
+
+    let (w, h) = (640usize, 360usize);
+    let shot = shot::capture(&g, &decor, w as u32, h as u32, Quality::Ultra);
+    let lum = |i: usize| {
+        (shot.rgba[i] as u32 * 54 + shot.rgba[i + 1] as u32 * 183 + shot.rgba[i + 2] as u32 * 19)
+            / 256
+    };
+
+    let mut hist = [0u32; 256];
+    for i in (0..shot.rgba.len()).step_by(4) {
+        hist[lum(i) as usize] += 1;
+    }
+    let total: u32 = hist.iter().sum();
+    let pct = |want: f32| {
+        let target = (total as f32 * want) as u32;
+        let mut acc = 0u32;
+        for (v, n) in hist.iter().enumerate() {
+            acc += n;
+            if acc >= target {
+                return v;
+            }
+        }
+        255
+    };
+    let hot: u32 = hist[240..].iter().sum();
+
+    println!();
+    println!("wave {}  {} creeps in frame", g.wave, g.creeps.len());
+    println!(
+        "  luminance  p50 {:>3}   p90 {:>3}   p99 {:>3}   max {:>3}",
+        pct(0.50),
+        pct(0.90),
+        pct(0.99),
+        hist.iter().rposition(|&n| n > 0).unwrap_or(0)
+    );
+    println!(
+        "  above 240: {:.2}% of the frame   (aim under 2%)",
+        hot as f32 * 100.0 / total as f32
+    );
+
+    // Band means: the lane runs across the upper third, the open field below.
+    let mut band = |name: &str, y0: usize, y1: usize| {
+        let (mut r, mut gg, mut b, mut n) = (0u64, 0u64, 0u64, 0u64);
+        for y in y0..y1 {
+            for x in 0..w {
+                let i = (y * w + x) * 4;
+                r += shot.rgba[i] as u64;
+                gg += shot.rgba[i + 1] as u64;
+                b += shot.rgba[i + 2] as u64;
+                n += 1;
+            }
+        }
+        println!(
+            "  {name:<12} rgb({:>3}, {:>3}, {:>3})",
+            r / n,
+            gg / n,
+            b / n
+        );
+    };
+    band("lane band", h / 8, h * 2 / 5);
+    band("open field", h * 3 / 5, h - 1);
 }

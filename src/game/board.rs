@@ -1,42 +1,43 @@
-//! The board: one fixed road the monsters walk, and the pads you may build on.
+//! The board: Green Circle TD's own terrain, and the lane one player defends.
 //!
-//! There is no mazing - the route never changes - so a creep's whole position is
-//! a single scalar: how far along the road it has travelled.
+//! The map is a ninety-six by ninety-six field cut into eight identical arenas
+//! by three-tile corridors, with a spawn box in every corner and on every edge.
+//! All of that comes out of `war3map.w3e` and lives in [`super::greentd_map`];
+//! nothing about the shape is invented here.
+//!
+//! What one player defends is a lane: the map orders their creeps along four
+//! regions and then shuttles them between the last two forever, so the lane is
+//! a corridor walked down and back. Written as a closed loop - down one half of
+//! the corridor and up the other, which is how two streams pass each other in a
+//! three-tile passage - it means a creep's whole position is a single scalar:
+//! how far along the lane it has travelled. There is no exit and no mazing.
 
-/// Board size in tiles.
-pub const BW: f32 = 30.0;
-pub const BH: f32 = 18.0;
+use super::greentd_map::{ARENA, LAP, MAP_H, MAP_W, TEXTURE};
 
-/// Half-width of the road surface, in tiles.
+/// Board size in tiles. The whole map is drawn; only [`ARENA`] is played.
+pub const BW: f32 = MAP_W as f32;
+pub const BH: f32 = MAP_H as f32;
+
+/// The ground texture index the map paints its corridors in.
+pub const ROCK: u8 = 2;
+
+/// Half-width of the lane surface, in tiles. The corridor itself is three tiles
+/// across and the two directions of travel share it.
 pub const ROAD_HALF: f32 = 0.62;
 
-/// Corner rounding radius.
-const CORNER_R: f32 = 1.0;
+/// Corner rounding radius. The map's corners are square; a short arc is what
+/// stops a monster spinning on the spot as it turns.
+const CORNER_R: f32 = 0.8;
 
-/// A tile is buildable when its centre sits in this band beside the road:
-/// far enough not to overlap the surface, near enough for a tower to reach it.
-pub const BUILD_NEAR: f32 = 1.05;
-pub const BUILD_FAR: f32 = 3.05;
+/// How close to the lane a plot may be. A tower stands on its own tile and the
+/// corridor is the tile beside it, which is exactly how Warcraft III places
+/// them; nothing further out is excluded, because in Green Circle TD the whole
+/// field is yours to build on.
+#[allow(dead_code)]
+pub const BUILD_NEAR: f32 = 0.9;
 
-/// The corners of the circuit, in order. It closes back onto the first, so this
-/// is a ring rather than a route. Edit this to redraw the level.
-///
-/// A rounded rectangle rather than a true circle: the straights give towers
-/// long clean firing lines and give the eye something to read, and the four
-/// corners are where monsters bunch up and where the area towers want to stand.
-const WAYPOINTS: [[f32; 2]; 8] = [
-    [7.5, 3.5],
-    [22.5, 3.5],
-    [26.5, 6.5],
-    [26.5, 11.5],
-    [22.5, 14.5],
-    [7.5, 14.5],
-    [3.5, 11.5],
-    [3.5, 6.5],
-];
-
-/// Where the monsters enter the circuit, as a distance along it. They keep
-/// walking from there and never leave.
+/// Where the monsters enter the lane, as a distance along it. They keep walking
+/// from there and never leave.
 pub const SPAWN_DIST: f32 = 0.0;
 
 #[derive(Clone, Copy)]
@@ -47,9 +48,9 @@ pub struct Slot {
 }
 
 pub struct Board {
-    /// The road as a dense polyline (corners already rounded).
+    /// The lane as a dense polyline (corners already rounded).
     pub path: Vec<[f32; 2]>,
-    /// Distance along the road at each polyline point.
+    /// Distance along the lane at each polyline point.
     pub cum: Vec<f32>,
     pub total: f32,
     pub slots: Vec<Slot>,
@@ -65,7 +66,7 @@ impl Default for Board {
 
 impl Board {
     pub fn new() -> Self {
-        let path = round_ring(&WAYPOINTS, CORNER_R);
+        let path = round_ring(LAP, CORNER_R);
         let mut cum = Vec::with_capacity(path.len());
         let mut total = 0.0;
         for (i, p) in path.iter().enumerate() {
@@ -80,43 +81,52 @@ impl Board {
             cum,
             total,
             slots: Vec::new(),
-            lookup: vec![-1; (BW * BH) as usize],
+            lookup: vec![-1; MAP_W * MAP_H],
         };
         b.slots = b.make_slots();
         for (i, s) in b.slots.iter().enumerate() {
             let tx = s.pos[0].floor() as usize;
             let ty = s.pos[1].floor() as usize;
-            b.lookup[ty * BW as usize + tx] = i as i32;
+            if tx < MAP_W && ty < MAP_H {
+                b.lookup[ty * MAP_W + tx] = i as i32;
+            }
         }
         b
     }
 
-    /// Build plots are a plain, regular grid: every tile that is clear of the road
-    /// and close enough to it to be useful. One tile, one plot, no exceptions -
-    /// so the buildable area reads as a field, not as scattered platforms.
-    /// The build plots, on a checkerboard inside the band beside the road.
+    /// The build plots: **every** tile of the player's arena that is not a
+    /// corridor.
     ///
-    /// Every tile in the band used to be a plot, which gave a hundred and
-    /// ninety-eight of them - so many that *where* a tower went never mattered
-    /// and filling the board with cheap towers beat levelling good ones. A
-    /// campaign purse that can cover two hundred plots is a campaign with no
-    /// placement decision in it. Half as many, on alternating tiles, makes each
-    /// one worth thinking about and leaves levels as the real sink for gold.
+    /// That is Green Circle TD's own rule and it is not a small one. Warcraft
+    /// III lets you put a tower on any buildable ground you own, so the whole
+    /// field between the corridors is yours - which is what makes the game a
+    /// question of *where* as well as *what*, and what makes an eight hundred
+    /// plot arena feel like a field rather than a row of sockets.
+    ///
+    /// The two rules that remain are both the map's. A plot must be inside the
+    /// player's arena, because the rest of the field belongs to the other seven
+    /// players. And it must not be corridor, because that is where the creeps
+    /// walk and nothing may be built in their way.
     fn make_slots(&self) -> Vec<Slot> {
         let mut out = Vec::new();
-        for ty in 0..BH as i32 {
-            for tx in 0..BW as i32 {
-                if (tx + ty) % 2 != 0 {
+        // Inset from the frame, so a tower on the outermost plot is still
+        // fully on screen at every window shape rather than half over the edge.
+        const INSET: f32 = 2.0;
+        let (x0, y0, x1, y1) = (
+            ARENA[0] + INSET,
+            ARENA[1] + INSET,
+            ARENA[2] - INSET,
+            ARENA[3] - INSET,
+        );
+        for ty in y0 as i32..=y1 as i32 {
+            for tx in x0 as i32..=x1 as i32 {
+                if !buildable_tile(tx, ty) {
                     continue;
                 }
-                let p = [tx as f32 + 0.5, ty as f32 + 0.5];
-                let d = self.dist_to_road(p);
-                if (BUILD_NEAR..=BUILD_FAR).contains(&d) {
-                    out.push(Slot {
-                        pos: p,
-                        tower: None,
-                    });
-                }
+                out.push(Slot {
+                    pos: [tx as f32 + 0.5, ty as f32 + 0.5],
+                    tower: None,
+                });
             }
         }
         out
@@ -129,20 +139,19 @@ impl Board {
         }
         let tx = p[0] as usize;
         let ty = p[1] as usize;
-        match self.lookup[ty * BW as usize + tx] {
+        match self.lookup[ty * MAP_W + tx] {
             -1 => None,
             i => Some(i as usize),
         }
     }
 
-    /// Where monsters appear on the circuit. There is no matching exit - see
-    /// the module docs.
+    /// Where monsters appear on the lane. There is no matching exit - see the
+    /// module docs.
     pub fn start(&self) -> [f32; 2] {
         *self.path.first().unwrap_or(&[0.0, 0.0])
     }
 
-    /// Position at `dist` tiles along the road.
-    /// Wraps a distance into the circuit. Everything that reads a position goes
+    /// Wraps a distance into the lap. Everything that reads a position goes
     /// through here, so a monster on its fourth lap is handled by exactly the
     /// same code as one on its first.
     #[inline]
@@ -176,11 +185,11 @@ impl Board {
         [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]
     }
 
-    /// Unit heading at `dist` tiles along the road.
+    /// Unit heading at `dist` tiles along the lane.
     pub fn heading(&self, dist: f32) -> [f32; 2] {
-        // No clamping: on a closed circuit the sample either side of a monster
-        // standing on the seam has to come from the other end of the ring, or
-        // everything crossing that point spins to face down the wrong axis.
+        // No clamping: on a closed lap the sample either side of a monster
+        // standing on the seam has to come from the other end, or everything
+        // crossing that point spins to face down the wrong axis.
         let a = self.sample(dist - 0.25);
         let b = self.sample(dist + 0.25);
         let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
@@ -192,7 +201,7 @@ impl Board {
         }
     }
 
-    /// Shortest distance from a point to the road centre line.
+    /// Shortest distance from a point to the lane centre line.
     pub fn dist_to_road(&self, p: [f32; 2]) -> f32 {
         let mut best = f32::MAX;
         for w in self.path.windows(2) {
@@ -201,16 +210,34 @@ impl Board {
         best
     }
 
-    /// Is this tile part of the road surface? Used only for rendering.
-    pub fn is_road_tile(&self, tx: i32, ty: i32) -> bool {
-        self.dist_to_road([tx as f32 + 0.5, ty as f32 + 0.5]) <= ROAD_HALF + 0.45
-    }
-
-    /// The build plot under a world position. Because plots are exactly the tile
-    /// grid, this is a straight floor - the cursor always snaps cleanly.
+    /// The build plot under a world position. Because plots are exactly the
+    /// tile grid, this is a straight floor - the cursor always snaps cleanly.
     pub fn slot_at(&self, p: [f32; 2]) -> Option<usize> {
         self.tile_slot(p)
     }
+}
+
+/// The map's own ground texture at a tile: 0 dirt, 1 grass, 2 corridor, 3 dark
+/// grass. Out of bounds reads as corridor, so nothing is ever built off the
+/// edge of the world.
+#[inline]
+pub fn texture(tx: i32, ty: i32) -> u8 {
+    if tx < 0 || ty < 0 || tx >= MAP_W as i32 || ty >= MAP_H as i32 {
+        return ROCK;
+    }
+    TEXTURE[ty as usize * MAP_W + tx as usize]
+}
+
+/// Whether this tile is one of the map's corridors.
+#[inline]
+pub fn is_corridor(tx: i32, ty: i32) -> bool {
+    texture(tx, ty) == ROCK
+}
+
+/// Whether a tower may stand here. A tower occupies its own tile, so the only
+/// tile it may not have is one the creeps walk down.
+pub fn buildable_tile(tx: i32, ty: i32) -> bool {
+    !is_corridor(tx, ty)
 }
 
 fn point_seg_dist(p: [f32; 2], a: [f32; 2], b: [f32; 2]) -> f32 {
@@ -226,14 +253,13 @@ fn point_seg_dist(p: [f32; 2], a: [f32; 2], b: [f32; 2]) -> f32 {
     ((p[0] - cx).powi(2) + (p[1] - cy).powi(2)).sqrt()
 }
 
-/// Replaces each interior corner with a short arc so creeps bank through turns.
 /// Rounds every corner of a **closed** polygon and returns the ring as a
 /// polyline whose last point repeats its first.
 ///
 /// The open version of this left the first and last vertices sharp, which is
-/// right for a route with two ends and wrong for a ring: run over a rounded
-/// rectangle it produced a circuit with a thirty-four tile chord across it,
-/// and monsters walked that chord straight through the middle of the board.
+/// right for a route with two ends and wrong for a ring: it produced a lap with
+/// a long chord across it, and monsters walked that chord straight through the
+/// middle of the board.
 fn round_ring(pts: &[[f32; 2]], r: f32) -> Vec<[f32; 2]> {
     const ARC_STEPS: usize = 6;
     let n = pts.len();

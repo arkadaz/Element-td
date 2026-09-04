@@ -54,21 +54,27 @@ impl Material {
         roughness: 0.78,
         metallic: 0.0,
     };
+    // Warcraft III armour is a painted texture, not a mirror. Full metallic
+    // zeroes the diffuse term, so a metal part's whole colour came from the
+    // specular lobe: a blown white highlight on every rounded surface and the
+    // pale blue sky probe everywhere else. That is what turned an army of
+    // orcs, skeletons and demons into one crowd of identical blue-grey
+    // figurines. Rough it right down and let most of the colour be diffuse.
     pub const METAL: Material = Material {
-        roughness: 0.34,
-        metallic: 1.0,
+        roughness: 0.62,
+        metallic: 0.30,
     };
     pub const DARK_METAL: Material = Material {
-        roughness: 0.52,
-        metallic: 0.9,
+        roughness: 0.74,
+        metallic: 0.25,
     };
     pub const GEM: Material = Material {
         roughness: 0.14,
         metallic: 0.2,
     };
     pub const CHITIN: Material = Material {
-        roughness: 0.55,
-        metallic: 0.1,
+        roughness: 0.72,
+        metallic: 0.0,
     };
     pub const WATER: Material = Material {
         roughness: 0.08,
@@ -344,15 +350,19 @@ impl DrawList {
             let a = i as f32 * step;
             let (s, co) = a.sin_cos();
             self.shape(
-                Shape::Box,
+                // A flat quad, not a box: a ring painted on the ground should
+                // never catch a specular highlight, and a sixty-segment ring of
+                // boxes is most of a frame's instance count on a board of aura
+                // towers.
+                Shape::Quad,
                 // Above the plot surface, or the ring disappears under it.
                 [c[0] + co * r, c[1] + s * r, 0.17],
-                [seg_len, w, 0.04],
+                [seg_len, w, 1.0],
                 a + std::f32::consts::FRAC_PI_2,
                 0.0,
                 color,
                 Material::GEM,
-                0.85,
+                0.45,
             );
         }
     }

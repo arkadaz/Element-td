@@ -1,10 +1,14 @@
 // Physically based shading for the instanced shape library.
 //
 // Cook-Torrance GGX with a shadow-mapped key light, a hemisphere ambient term
-// standing in for image-based lighting, and a cheap horizon-occlusion specular
-// ambient. Materials come in per instance as (roughness, metallic), so stone,
-// wood, foliage, polished metal and gems all respond differently to the same
-// light instead of looking like tinted plastic.
+// standing in for image-based lighting, and an analytic split-sum environment
+// BRDF for the ambient specular. Materials come in per instance as (roughness,
+// metallic), so stone, wood, foliage, polished metal and gems all respond
+// differently to the same light instead of looking like tinted plastic.
+//
+// Two terms here exist purely to make the scene read rather than to be correct:
+// a wide sky-coloured rim along every silhouette, and an ambient occlusion
+// approximated from the shadow map. Both are called out where they are applied.
 
 struct Uniforms {
     view_proj: mat4x4<f32>,
@@ -20,8 +24,10 @@ struct Uniforms {
 @group(0) @binding(1) var shadow_map: texture_depth_2d;
 @group(0) @binding(2) var shadow_samp: sampler_comparison;
 
-/// Shadow filter width. Overridden per quality preset when the shader is built,
-/// so the cheap preset pays for one comparison per pixel instead of four.
+/// Shadow filter tier, overridden per quality preset when the shader is built.
+/// It names a filter rather than counting taps: 0 skips the lookup outright, 1
+/// takes a single comparison, and 4 takes the nine-tap box. So the cheap preset
+/// pays one comparison per pixel where the dear one pays nine.
 const SHADOW_TAPS: i32 = 4;
 
 struct VsIn {
@@ -113,11 +119,63 @@ fn shadow_at(light_pos: vec4<f32>, ndl: f32) -> f32 {
     if (SHADOW_TAPS == 1) {
         return textureSampleCompare(shadow_map, shadow_samp, uv, proj.z - bias);
     }
+    // A nine tap box, wider than the old four. Four taps on a hard edge is a
+    // stair; nine across a wider kernel is a soft edge, and soft edges are most
+    // of what separates a lit scene from a diagram.
     var sum = 0.0;
-    sum = sum + textureSampleCompare(shadow_map, shadow_samp, uv + vec2<f32>(-0.7, -0.7) * t, proj.z - bias);
-    sum = sum + textureSampleCompare(shadow_map, shadow_samp, uv + vec2<f32>(0.7, -0.7) * t, proj.z - bias);
-    sum = sum + textureSampleCompare(shadow_map, shadow_samp, uv + vec2<f32>(-0.7, 0.7) * t, proj.z - bias);
-    sum = sum + textureSampleCompare(shadow_map, shadow_samp, uv + vec2<f32>(0.7, 0.7) * t, proj.z - bias);
+    for (var i = -1; i <= 1; i = i + 1) {
+        for (var j = -1; j <= 1; j = j + 1) {
+            let o = vec2<f32>(f32(i), f32(j)) * t * 1.35;
+            sum = sum + textureSampleCompare(shadow_map, shadow_samp, uv + o, proj.z - bias);
+        }
+    }
+    return sum / 9.0;
+}
+
+/// How much of the sky this point can see, approximated from the shadow map.
+///
+/// There is no depth prepass, so there is nothing to run a real screen-space
+/// occlusion against; the only occluder geometry the frame has already
+/// rasterised is the shadow map. So the ambient is attenuated by how much of a
+/// wide neighbourhood around this point is in shadow. That buys the one thing
+/// the frame was missing most: a dark skirt where a tower, a tuft or a monster
+/// meets the ground. Without it every model sat on the field with a hard,
+/// evenly lit seam and read as pasted on rather than standing there.
+///
+/// Where it is a lie, and it is worth being clear about it: this only knows
+/// about occlusion along the sun's direction, so the skirt leans the way the
+/// shadow leans instead of wrapping the whole base.
+///
+/// Tiered on `SHADOW_TAPS` exactly as the shadow filter is, so Performance -
+/// which never renders a shadow map at all - folds the whole function to a
+/// constant, Balanced pays two extra comparisons for a diagonal pair, and Ultra
+/// pays four for the full ring.
+fn sky_occlusion(light_pos: vec4<f32>) -> f32 {
+    if (SHADOW_TAPS == 0 || light_pos.w <= 0.0) {
+        return 1.0;
+    }
+    let proj = light_pos.xyz / light_pos.w;
+    let uv = vec2<f32>(proj.x * 0.5 + 0.5, 0.5 - proj.y * 0.5);
+    if (uv.x < 0.001 || uv.x > 0.999 || uv.y < 0.001 || uv.y > 0.999 || proj.z > 1.0) {
+        return 1.0;
+    }
+    // Half a tile, held in UV rather than in texels so the skirt is the same
+    // width on the 1024 map and the 2048 one. A radius in texels would have
+    // made Balanced's contact shadow twice as wide as Ultra's, which is the
+    // wrong way round and would have shown up as the preset changing the shape
+    // of the scene rather than its fidelity.
+    let r = 0.0034;
+    // Deliberately blunt next to the shadow's own bias: this is asking whether
+    // anything stands *near* the point, not whether the point is lit, and a
+    // tight bias turns the answer into a second copy of the shadow.
+    let z = proj.z - 0.0035;
+    var sum = textureSampleCompare(shadow_map, shadow_samp, uv + vec2<f32>(r, r), z);
+    sum = sum + textureSampleCompare(shadow_map, shadow_samp, uv + vec2<f32>(-r, -r), z);
+    if (SHADOW_TAPS == 1) {
+        return sum * 0.5;
+    }
+    sum = sum + textureSampleCompare(shadow_map, shadow_samp, uv + vec2<f32>(-r, r), z);
+    sum = sum + textureSampleCompare(shadow_map, shadow_samp, uv + vec2<f32>(r, -r), z);
     return sum * 0.25;
 }
 
@@ -144,11 +202,28 @@ fn fresnel_schlick(cos_theta: f32, f0: vec3<f32>) -> vec3<f32> {
     return f0 + (vec3<f32>(1.0) - f0) * pow(clamp(1.0 - cos_theta, 0.0, 1.0), 5.0);
 }
 
-/// Roughness-aware Fresnel, used for the ambient specular so rough surfaces do
-/// not pick up a rim of environment reflection they should not have.
+/// Roughness-aware Fresnel. Used to work out how much light is *left* for the
+/// diffuse term after the environment has taken its specular share, so rough
+/// surfaces do not lose energy they never reflected.
 fn fresnel_roughness(cos_theta: f32, f0: vec3<f32>, rough: f32) -> vec3<f32> {
     let inv = vec3<f32>(1.0 - rough);
     return f0 + (max(inv, f0) - f0) * pow(clamp(1.0 - cos_theta, 0.0, 1.0), 5.0);
+}
+
+/// The split-sum environment BRDF, Karis's analytic fit to the lookup table.
+///
+/// This replaces a hand-tuned `fresnel * (1 - roughness * 0.72)` fudge. The
+/// fudge got the shape roughly right but scaled everything by one factor, so
+/// polished metal reflected far too little of its surroundings and grass a
+/// little too much - the exact reason the sun never showed on a blade edge and
+/// the field had a faint sheen it should not have had. The real curve is four
+/// more instructions and no texture.
+fn env_brdf(f0: vec3<f32>, rough: f32, ndv: f32) -> vec3<f32> {
+    let c0 = vec4<f32>(-1.0, -0.0275, -0.572, 0.022);
+    let c1 = vec4<f32>(1.0, 0.0425, 1.04, -0.04);
+    let r = vec4<f32>(rough) * c0 + c1;
+    let a004 = min(r.x * r.x, exp2(-9.28 * ndv)) * r.x + r.y;
+    return f0 * (a004 * -1.04 + r.z) + vec3<f32>(a004 * 1.04 + r.w);
 }
 
 // ---------------------------------------------------------------- fragment
@@ -165,7 +240,17 @@ fn fs(o: VsOut) -> @location(0) vec4<f32> {
     let ndh = max(dot(n, h), 0.0);
     let vdh = max(dot(v, h), 0.0);
 
-    let rough = clamp(o.material.x, 0.045, 1.0);
+    // Widen the specular lobe by however far the normal swings inside this one
+    // pixel. A gem at roughness 0.14 on a sphere six pixels across has a
+    // highlight narrower than a pixel, so it landed on a fragment or it did
+    // not: the tower sparkled as the board turned, and the bloom pass smeared
+    // that sparkle over half the model. Kaplanyan's filter, applied to the
+    // alpha the GGX distribution actually uses.
+    let dnx = dpdx(o.nrm);
+    let dny = dpdy(o.nrm);
+    let smear = min(0.5 * (dot(dnx, dnx) + dot(dny, dny)), 0.20);
+    let mat_rough = clamp(o.material.x, 0.045, 1.0);
+    let rough = min(sqrt(mat_rough * mat_rough + smear), 1.0);
     let metal = clamp(o.material.y, 0.0, 1.0);
 
     let albedo = o.color.rgb * o.tint;
@@ -178,12 +263,11 @@ fn fs(o: VsOut) -> @location(0) vec4<f32> {
     if (ndl > 0.0) {
         shade = shadow_at(o.light_pos, ndl);
     }
-    // Measured, not guessed: with the old values 93% of every frame sat below
-    // 96 of 255 and a grass tile whose albedo is (0.118, 0.168, 0.140) came out
-    // as (45, 54, 84) - blue, and darker than the stone wall behind it. The key
-    // light is the only term that carries a surface's own colour, so it has to
+    // Midday, warm. Warcraft III lights its outdoor tilesets with a strong
+    // near-white key and lets the terrain's own colour carry the scene; the key
+    // light is the only term here that carries a surface's albedo, so it has to
     // beat the ambient rather than lose to it.
-    let sun = vec3<f32>(1.00, 0.945, 0.86) * 4.4;
+    let sun = vec3<f32>(1.00, 0.96, 0.88) * 2.25;
     let d = distribution_ggx(ndh, rough);
     let g = geometry_smith(ndv, ndl, rough);
     let f = fresnel_schlick(vdh, f0);
@@ -191,19 +275,41 @@ fn fs(o: VsOut) -> @location(0) vec4<f32> {
     let kd = (vec3<f32>(1.0) - f) * (1.0 - metal);
     let direct = (kd * albedo / 3.14159265 + spec) * sun * ndl * shade;
 
-    // --- ambient: sky above, warm bounce below, standing in for an IBL probe
+    // --- ambient: sky above, bounce below, standing in for an IBL probe
     //
-    // Much less blue than it was, and weaker. A strongly tinted ambient is a
-    // multiplier on every albedo in the scene, so a saturated one does not read
-    // as atmosphere - it reads as everything being made of the same material.
-    let sky = vec3<f32>(0.30, 0.34, 0.43) * 0.95;
-    let ground = vec3<f32>(0.24, 0.19, 0.15) * 0.9;
+    // Daylight: a blue sky overhead and green bounce off the field, which is
+    // what a grass level actually looks like and what makes a tower's shaded
+    // side read as *in shadow on grass* rather than as grey.
+    let sky = vec3<f32>(0.42, 0.54, 0.74) * 0.40;
+    let ground = vec3<f32>(0.26, 0.30, 0.16) * 0.40;
     let irradiance = mix(ground, sky, n.z * 0.5 + 0.5);
     let fa = fresnel_roughness(ndv, f0, rough);
     let kda = (vec3<f32>(1.0) - fa) * (1.0 - metal);
-    // A rough surface scatters the environment; a smooth one mirrors it.
-    let amb_spec = mix(sky, irradiance, rough) * fa * (1.0 - rough * 0.72);
-    let ambient = kda * albedo * irradiance + amb_spec;
+    // The probe is read along the reflection vector, not along the normal, so a
+    // metal face tilted up catches sky and one tilted down catches the field.
+    // Reading it at the normal gave every face of a cube the same reflection,
+    // which is most of why polished metal came out looking like painted
+    // plastic; a rough surface scatters the lobe back towards the normal, which
+    // is what the mix by roughness does.
+    let refl = reflect(-v, n);
+    let mirror = mix(ground, sky, clamp(refl.z * 0.5 + 0.5, 0.0, 1.0));
+    let amb_spec = mix(mirror, irradiance, rough * rough) * env_brdf(f0, rough, ndv);
+
+    // A wide Fresnel in the sky's own colour along the silhouette. Looking
+    // almost straight down at a green field, a unit standing on it is within a
+    // few percent of the grass in value and reads as a flat shape cut out of
+    // the ground; this is the cheapest thing that puts an edge back.
+    //
+    // Weighted towards upright surfaces because the ground is one enormous
+    // plane which grazes the camera near the top of the frame - an ungated rim
+    // paints a bright band right across the far half of the field, and the
+    // field's colour is measured against a screenshot and may not move.
+    let rim = pow(1.0 - ndv, 3.0) * (1.0 - abs(n.z));
+
+    // Occlusion belongs on the ambient only: the key light already has a shadow
+    // and darkening it twice turns every shaded face to mud.
+    let ao = mix(1.0, sky_occlusion(o.light_pos), 0.60);
+    let ambient = (kda * albedo * irradiance + amb_spec + sky * rim * 0.45) * ao;
 
     var col = direct + ambient;
     // Emissive parts ignore lighting entirely - cores, runes, flames.
@@ -211,7 +317,7 @@ fn fs(o: VsOut) -> @location(0) vec4<f32> {
 
     // Distance fog, so the far edge of the board recedes.
     let dist = length(U.cam_pos.xyz - o.world);
-    let fog_amount = 1.0 - exp(-max(dist - 26.0, 0.0) * U.fog.a);
+    let fog_amount = 1.0 - exp(-max(dist - 44.0, 0.0) * U.fog.a);
     col = mix(col, U.fog.rgb, clamp(fog_amount, 0.0, 0.85));
 
     return vec4<f32>(col, o.color.a);

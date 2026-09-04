@@ -204,13 +204,17 @@ fn fences(d: &mut DrawList, board: &Board, rng: &mut Rng) {
 
 /// Trees, rocks, bushes and grass over the open ground.
 fn scatter(d: &mut DrawList, board: &Board, rng: &mut Rng) {
-    for ty in 0..BH as i32 {
-        for tx in 0..BW as i32 {
+    // Only the arena the player can see. The rest of the field is corridors
+    // belonging to seven other players, and dressing it costs thousands of
+    // instances nobody will ever look at.
+    let a = crate::game::greentd_map::ARENA;
+    for ty in a[1] as i32 - 2..=a[3] as i32 + 2 {
+        for tx in a[0] as i32 - 2..=a[2] as i32 + 2 {
             let p = [
                 tx as f32 + 0.5 + rng.range(-0.30, 0.30),
                 ty as f32 + 0.5 + rng.range(-0.30, 0.30),
             ];
-            if !is_free(board, p, 0.55) {
+            if crate::game::board::is_corridor(tx, ty) || !is_free(board, p, 0.55) {
                 continue;
             }
             let roll = rng.unit();

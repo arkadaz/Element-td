@@ -16,7 +16,7 @@
 use std::time::Instant;
 
 use crate::decor::Decor;
-use crate::game::defs::{FREE_TIERS, MAX_TIER, TOWERS};
+use crate::game::defs::TOWERS;
 use crate::game::{Game, Phase};
 use crate::gfx::draw::DrawList;
 use crate::view;
@@ -26,23 +26,32 @@ use crate::view;
 /// this runs on whatever machine CI happens to give it.
 const BUDGET_MS: f64 = 2.0;
 
+/// The same, for the simulation on a board with a tower on *every* one of a
+/// thousand plots and the ring at its limit. That is not a board any real run
+/// reaches - it is the worst frame the game can be asked to produce - so it
+/// gets a budget of its own rather than dragging the draw-list one up.
+const SIM_BUDGET_MS: f64 = 8.0;
+
 /// A board with a tower on every pad and a wave walking the road.
 fn busy_board(wave: u32) -> Game {
     let mut g = Game::new();
     g.start_run(7);
     g.gold = i64::MAX / 4;
-    g.essence = [(MAX_TIER - FREE_TIERS) as u8; 6];
-    g.pending_draft = None;
 
     for slot in 0..g.board.slots.len() {
         let def = slot % TOWERS.len();
         g.build_choice = Some((def, 1));
         if g.try_build(slot) {
             let ti = g.towers.len() - 1;
-            while g.towers[ti].tier < 6 {
-                let before = g.towers[ti].tier;
-                g.upgrade(ti);
-                if g.towers[ti].tier == before {
+            // Six steps up whatever path this tower is on, taking the first
+            // branch at a fork - the worst frame the game can be asked to draw.
+            for _ in 0..6 {
+                let before = g.towers[ti].def;
+                let Some(&(into, _)) = g.upgrade_choices(ti).first() else {
+                    break;
+                };
+                g.upgrade_into(ti, into);
+                if g.towers[ti].def == before {
                     break;
                 }
             }
@@ -74,14 +83,21 @@ fn the_ring_and_its_pads_are_the_size_the_design_says() {
         b.slots.len(),
         crate::game::FLOOD_LIMIT
     );
-    // Long enough that a lap takes real time, short enough that a tower on one
-    // side is not irrelevant to the other.
+    // The map's own lane: down a three-tile corridor and back, plus the run
+    // that reaches it. Long enough that a lap takes real time, short enough
+    // that a tower at one end is not irrelevant to the other.
     assert!(
-        (40.0..80.0).contains(&b.total),
-        "circuit is {:.1} tiles",
+        (60.0..120.0).contains(&b.total),
+        "lane is {:.1} tiles",
         b.total
     );
-    assert!((60..140).contains(&b.slots.len()), "{} pads", b.slots.len());
+    // Every tile of the arena that is not corridor, which is the map's own
+    // rule: in Green Circle TD the whole field is yours to build on.
+    assert!(
+        (600..1600).contains(&b.slots.len()),
+        "{} pads",
+        b.slots.len()
+    );
 }
 
 #[test]
@@ -116,7 +132,7 @@ fn a_packed_board_costs_almost_nothing_on_the_cpu() {
             sim.creeps.len(),
         );
         assert!(
-            draw_ms + sim_ms < BUDGET_MS,
+            draw_ms < BUDGET_MS && sim_ms < SIM_BUDGET_MS,
             "wave {wave}: {draw_ms:.3} ms to build the draw list and {sim_ms:.3} ms to simulate - \
              the CPU side has become something a frame has to wait for"
         );

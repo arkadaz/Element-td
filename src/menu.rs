@@ -111,9 +111,14 @@ pub fn show(ctx: &Context, m: &mut MenuState, net: &mut Net, dt: f32) -> Action 
 fn heading(ui: &mut egui::Ui) {
     ui.vertical_centered(|ui| {
         ui.add_space(6.0);
-        ui.label(RichText::new("ELEMENTAL TD").size(30.0).strong().color(pal::GOLD));
         ui.label(
-            RichText::new("Eight towers. Six levels. Fifty waves, then it stops being fair.")
+            RichText::new("GREEN CIRCLE TD")
+                .size(30.0)
+                .strong()
+                .color(pal::GOLD),
+        );
+        ui.label(
+            RichText::new("A port of the Warcraft III map. Eleven towers, a hundred and thirty-one, and thirty-six waves.")
                 .size(13.0)
                 .color(pal::DIM),
         );
@@ -149,8 +154,17 @@ fn title(ui: &mut egui::Ui, m: &mut MenuState) -> Action {
             action = Action::Resume;
         }
     }
-    let solo = if m.saved.is_some() { "New game" } else { "Single player" };
-    if big_button(ui, solo, "Eighty waves. About an hour if you earn it.", pal::ACC) {
+    let solo = if m.saved.is_some() {
+        "New game"
+    } else {
+        "Single player"
+    };
+    if big_button(
+        ui,
+        solo,
+        "Eighty waves. About an hour if you earn it.",
+        pal::ACC,
+    ) {
         action = Action::SinglePlayer;
     }
     if big_button(
@@ -182,14 +196,17 @@ fn connect(ui: &mut egui::Ui, m: &mut MenuState, net: &mut Net) {
     ui.horizontal(|ui| {
         for (mode, label) in [(Mode::Host, "Create a room"), (Mode::Join, "Join a room")] {
             let on = m.mode == mode;
-            let btn = egui::Button::new(
-                RichText::new(label)
-                    .strong()
-                    .color(if on { pal::INK } else { pal::DIM }),
-            )
+            let btn = egui::Button::new(RichText::new(label).strong().color(if on {
+                pal::INK
+            } else {
+                pal::DIM
+            }))
             .fill(if on { pal::CARD_HOVER } else { pal::CARD })
             .corner_radius(6.0);
-            if ui.add_sized(Vec2::new(ui.available_width() * 0.5, 32.0), btn).clicked() {
+            if ui
+                .add_sized(Vec2::new(ui.available_width() * 0.5, 32.0), btn)
+                .clicked()
+            {
                 m.mode = mode;
             }
         }
@@ -258,9 +275,7 @@ fn connect(ui: &mut egui::Ui, m: &mut MenuState, net: &mut Net) {
                 let name = td_proto::clean_name(&m.name);
                 m.name = name.clone();
                 match m.mode {
-                    Mode::Host => {
-                        net.create(&m.server, &name, &m.password, 0)
-                    }
+                    Mode::Host => net.create(&m.server, &name, &m.password, 0),
                     Mode::Join => net.join(&m.server, &m.room, &m.password, &name),
                 }
             }
@@ -285,7 +300,13 @@ fn lobby(ui: &mut egui::Ui, m: &mut MenuState, net: &mut Net) -> Action {
     let id = net.room_id().to_string();
     ui.label(RichText::new("Room code").size(12.0).color(pal::DIM));
     ui.horizontal(|ui| {
-        ui.label(RichText::new(&id).size(15.0).strong().color(pal::GOLD).monospace());
+        ui.label(
+            RichText::new(&id)
+                .size(15.0)
+                .strong()
+                .color(pal::GOLD)
+                .monospace(),
+        );
         if ui
             .button(RichText::new(if m.copied > 0.0 { "Copied" } else { "Copy" }).size(12.0))
             .clicked()
@@ -357,7 +378,8 @@ fn lobby(ui: &mut egui::Ui, m: &mut MenuState, net: &mut Net) -> Action {
 
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             if net.is_host() {
-                let everyone = players.len() > 1 && players.iter().all(|p| p.ready || p.slot == host);
+                let everyone =
+                    players.len() > 1 && players.iter().all(|p| p.ready || p.slot == host);
                 let label = if everyone { "Start" } else { "Start anyway" };
                 if ui
                     .add(
@@ -404,7 +426,9 @@ pub fn room_scoreboard(ctx: &Context, net: &Net, compact: bool) {
     if !net.is_online() {
         return;
     }
-    let Some(room) = net.room.as_ref() else { return };
+    let Some(room) = net.room.as_ref() else {
+        return;
+    };
     if !room.started {
         return;
     }
@@ -469,7 +493,11 @@ mod tests {
         m.ready = true;
         net.status = Status::Failed("gone".into());
         run(&ctx, &mut m, &mut net);
-        assert_eq!(m.screen, Screen::Connect, "a dropped room returns to the form");
+        assert_eq!(
+            m.screen,
+            Screen::Connect,
+            "a dropped room returns to the form"
+        );
         assert!(!m.ready, "ready must not survive the room it belonged to");
     }
 

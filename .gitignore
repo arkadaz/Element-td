@@ -4,3 +4,7 @@
 # Warcraft III maps kept alongside for reference. Not ours to redistribute.
 *.w3x
 *.w3m
+
+# ...and the unpacked contents of one, for the same reason. `tools/extract.py`
+# recreates this directory from a map you supply yourself.
+/tools/greentd/

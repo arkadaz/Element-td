@@ -244,6 +244,13 @@ impl Mat4 {
     }
 }
 
+/// Vertical field of view, in radians. Every camera the game builds shares it,
+/// so a distance solved by one framing means the same thing to another.
+const FOV_Y: f32 = 42.0 * std::f32::consts::PI / 180.0;
+/// How much slack a fitted framing leaves around what it was asked to fit, so
+/// nothing sits exactly on the edge of the screen.
+const FIT_MARGIN: f32 = 1.06;
+
 /// A tilted diorama camera looking down at the board.
 #[derive(Clone, Copy, Debug)]
 pub struct Camera {
@@ -286,9 +293,19 @@ impl Camera {
     /// each corner gives a lower bound on `d` directly and the answer is the
     /// largest of them. One pass, no iteration, correct at every aspect.
     pub fn frame_board(w: f32, h: f32, aspect: f32, pitch: f32, yaw: f32, zoom: f32) -> Self {
-        let fov_y = 42f32.to_radians();
+        Self::frame_rect([0.0, 0.0, w, h], aspect, pitch, yaw, zoom)
+    }
+
+    /// Frames an arbitrary rectangle of the board: min x, min y, max x, max y.
+    ///
+    /// The map is ninety-six tiles square and one player defends a corner of
+    /// it, so the camera frames that corner rather than the whole field - the
+    /// other seven arenas are scenery, and framing them would put this
+    /// player's lane in a twelfth of the screen.
+    pub fn frame_rect(r: [f32; 4], aspect: f32, pitch: f32, yaw: f32, zoom: f32) -> Self {
+        let (x0, y0, x1, y1) = (r[0], r[1], r[2], r[3]);
         let aspect = aspect.clamp(0.20, 8.0);
-        let target = v3(w * 0.5, h * 0.5, 0.0);
+        let target = v3((x0 + x1) * 0.5, (y0 + y1) * 0.5, 0.0);
 
         let (sp, cp) = pitch.sin_cos();
         let (sy, cy) = yaw.sin_cos();
@@ -301,20 +318,20 @@ impl Camera {
         let right = fwd.cross(world_up).norm();
         let up = right.cross(fwd).norm();
 
-        let ty = (fov_y * 0.5).tan();
+        let ty = (FOV_Y * 0.5).tan();
         let tx = ty * aspect;
 
         // Tall enough to keep a maxed tower and the gate arches in frame.
         const TOP: f32 = 3.6;
         let corners = [
-            v3(0.0, 0.0, 0.0),
-            v3(w, 0.0, 0.0),
-            v3(0.0, h, 0.0),
-            v3(w, h, 0.0),
-            v3(0.0, 0.0, TOP),
-            v3(w, 0.0, TOP),
-            v3(0.0, h, TOP),
-            v3(w, h, TOP),
+            v3(x0, y0, 0.0),
+            v3(x1, y0, 0.0),
+            v3(x0, y1, 0.0),
+            v3(x1, y1, 0.0),
+            v3(x0, y0, TOP),
+            v3(x1, y0, TOP),
+            v3(x0, y1, TOP),
+            v3(x1, y1, TOP),
         ];
         let mut dist = 1.0f32;
         for c in corners {
@@ -325,11 +342,25 @@ impl Camera {
             dist = dist.max(x / tx - z).max(y / ty - z);
         }
         // Margin so nothing touches the edge, then the requested zoom.
-        dist = (dist * 1.06 / zoom.clamp(0.2, 4.0)).max(2.0);
+        dist = (dist * FIT_MARGIN / zoom.clamp(0.2, 4.0)).max(2.0);
+        Self::at(target, dist, aspect, pitch, yaw)
+    }
 
-        let eye = target.add(dir.mul(dist));
+    /// Puts the camera `dist` tiles from `target`, tilted `pitch` radians down
+    /// from the horizon and turned to `yaw`.
+    ///
+    /// Both framings end here. One solves for a distance that fits a rectangle
+    /// on screen; the pannable one is told the distance outright, because what
+    /// it fits is a window the player chose rather than the whole board.
+    pub fn at(target: Vec3, dist: f32, aspect: f32, pitch: f32, yaw: f32) -> Self {
+        let aspect = aspect.clamp(0.20, 8.0);
+        let dist = dist.max(0.01);
+        let (sp, cp) = pitch.sin_cos();
+        let (sy, cy) = yaw.sin_cos();
+        let world_up = v3(0.0, 0.0, 1.0);
+        let eye = target.add(v3(-sy * cp, -cy * cp, sp).mul(dist));
         let view = Mat4::look_at(eye, target, world_up);
-        let proj = Mat4::perspective(fov_y, aspect, (dist * 0.05).max(0.5), dist * 3.0 + 200.0);
+        let proj = Mat4::perspective(FOV_Y, aspect, (dist * 0.05).max(0.5), dist * 3.0 + 200.0);
         let view_proj = proj.mul(&view);
         // Rows 0 and 1 of the view matrix are the camera's right and up axes.
         let m = &view.0;
@@ -368,6 +399,218 @@ impl Camera {
     }
 }
 
+/// The fixed half of the camera: how far it tilts, which way it faces, and the
+/// shape of the viewport it draws into.
+///
+/// A tilted camera does not see a rectangle of ground. It sees a trapezium,
+/// narrow along the bottom of the screen and wide along the top, and that
+/// footprint scales exactly with how far back the camera sits, because it is
+/// the frustum cut by the plane the camera aims at. Measuring the footprint
+/// once, at unit distance, therefore answers both of the questions a scrolling
+/// camera has to ask: how far back to sit to take in a wanted span of board,
+/// and how far the player may scroll before the footprint slides off their own
+/// arena.
+///
+/// The measurements assume the board runs square to the screen, which is the
+/// quarter turn the game frames the lane with; a rig turned to some other yaw
+/// still produces the right camera, but its footprint would need the corners
+/// of a rotated rectangle rather than its sides.
+#[derive(Clone, Copy, Debug)]
+pub struct Rig {
+    aspect: f32,
+    pitch: f32,
+    yaw: f32,
+    /// Ground on screen at unit distance, relative to the point the camera
+    /// aims at: min x, min y, max x, max y.
+    foot: [f32; 4],
+    /// Ground *guaranteed* on screen at unit distance, whatever else is in
+    /// frame. The trapezium is narrowest along its near edge, so this is that
+    /// width carried the whole depth of the footprint.
+    inner: [f32; 4],
+    /// Ground crossed per viewport width and per viewport height at unit
+    /// distance, so a drag can put the patch of board it grabbed back under
+    /// the cursor.
+    grad: [[f32; 2]; 2],
+}
+
+impl Rig {
+    /// Measures the footprint once, by casting the corners of the viewport at
+    /// the ground, so that everything asked of the rig afterwards is
+    /// arithmetic on the answer.
+    ///
+    /// The pitch is held steep enough to keep the horizon off the top of the
+    /// screen: a camera that can see the horizon sees infinitely far, its
+    /// footprint has no far edge, and there is nothing finite left to clamp a
+    /// pan against.
+    pub fn new(aspect: f32, pitch: f32, yaw: f32) -> Self {
+        let aspect = aspect.clamp(0.20, 8.0);
+        let pitch = pitch.clamp(FOV_Y * 0.5 + 0.12, 1.55);
+        let unit = Camera::at(Vec3::default(), 1.0, aspect, pitch, yaw);
+        let ground = |u: f32, v: f32| {
+            unit.ground_pick(u, v).expect(
+                "the horizon is above the viewport, so every ray through it meets the ground",
+            )
+        };
+
+        let bbox = |pts: &[[f32; 2]]| {
+            let mut b = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
+            for p in pts {
+                b[0] = b[0].min(p[0]);
+                b[1] = b[1].min(p[1]);
+                b[2] = b[2].max(p[0]);
+                b[3] = b[3].max(p[1]);
+            }
+            b
+        };
+        let (near_l, near_r) = (ground(0.0, 1.0), ground(1.0, 1.0));
+        let foot = bbox(&[near_l, near_r, ground(0.0, 0.0), ground(1.0, 0.0)]);
+        // As wide as the near edge and as deep as the footprint: the far edge
+        // only ever widens the trapezium, so the middle of it is enough to
+        // carry the guaranteed rectangle the whole way back.
+        let inner = bbox(&[near_l, near_r, ground(0.5, 0.0)]);
+
+        // Measured across the middle quarter of the screen rather than corner
+        // to corner: a drag then tracks the ground exactly where the cursor
+        // usually is, and only drifts near the top of the screen where
+        // perspective is stretching the ground away anyway.
+        let mid = ground(0.5, 0.5);
+        let across = ground(0.75, 0.5);
+        let down = ground(0.5, 0.75);
+        let grad = [
+            [(across[0] - mid[0]) * 4.0, (across[1] - mid[1]) * 4.0],
+            [(down[0] - mid[0]) * 4.0, (down[1] - mid[1]) * 4.0],
+        ];
+
+        Self {
+            aspect,
+            pitch,
+            yaw,
+            foot,
+            inner,
+            grad,
+        }
+    }
+
+    /// The longer side of the footprint at unit distance, which is what `span`
+    /// is measured against.
+    fn reach(&self) -> f32 {
+        (self.foot[2] - self.foot[0])
+            .max(self.foot[3] - self.foot[1])
+            .max(1e-3)
+    }
+
+    /// How far back the camera sits to take in `span` tiles of board.
+    fn distance(&self, span: f32) -> f32 {
+        span.max(1.0) / self.reach()
+    }
+
+    /// The camera for a view of `span` tiles centred on `centre`.
+    pub fn camera(&self, centre: [f32; 2], span: f32) -> Camera {
+        let target = v3(centre[0], centre[1], 0.0);
+        Camera::at(
+            target,
+            self.distance(span),
+            self.aspect,
+            self.pitch,
+            self.yaw,
+        )
+    }
+
+    /// The span at which all of `bounds` is in frame, which is as far out as
+    /// zooming is worth allowing.
+    ///
+    /// It is deliberately the framing the game used before it could scroll at
+    /// all: every corner of the arena on screen at once, and a tower standing
+    /// on the far corner still under the top edge.
+    pub fn widest_span(&self, bounds: [f32; 4]) -> f32 {
+        // Handing the margin back as the zoom cancels it, so the arena ends up
+        // touching the edges of the screen: anything further out is the border
+        // and the seven arenas beyond it, which is not a view worth offering.
+        let fitted = Camera::frame_rect(bounds, self.aspect, self.pitch, self.yaw, FIT_MARGIN);
+        fitted.eye.sub(fitted.target).len() * self.reach()
+    }
+
+    /// Holds the zoom between the tightest the player asked for and the widest
+    /// that shows anything new.
+    pub fn clamp_span(&self, span: f32, tightest: f32, bounds: [f32; 4]) -> f32 {
+        let widest = self.widest_span(bounds).max(tightest);
+        span.clamp(tightest, widest)
+    }
+
+    /// Where the pan centre may sit: min x, min y, max x, max y.
+    ///
+    /// Two rules meet here and they pull against each other. The footprint
+    /// should stay inside `bounds`, because this player defends one corner of a
+    /// ninety-seven tile map and the other seven arenas are not theirs to
+    /// scroll around. But every build pad inside `reach` also has to be
+    /// *lookable at*: hold the first rule strictly and the pads in the corners
+    /// of the arena can never be brought on screen, so they cannot be clicked
+    /// and nothing on screen says they are there - which is the defect the pad
+    /// test in this module was written to catch in the first place.
+    ///
+    /// So the view is allowed to overhang the arena, but by no more than
+    /// reaching the outermost pads takes: three or four tiles at the zoom the
+    /// game plays at, a few more when it is most of the way out, and none at
+    /// all once the whole arena is in frame. Nothing it lets the player reach
+    /// is ground the fully zoomed-out shot was not already showing them, which
+    /// is what a check in this module's tests holds it to.
+    pub fn pan_range(&self, span: f32, bounds: [f32; 4], reach: [f32; 4]) -> [f32; 4] {
+        let d = self.distance(span);
+        let axis = |lo: f32, hi: f32, want: (f32, f32), foot: (f32, f32), inner: (f32, f32)| {
+            let low = (lo - foot.0 * d).min(want.0 - inner.0 * d);
+            let high = (hi - foot.1 * d).max(want.1 - inner.1 * d);
+            if low > high {
+                // Zoomed out far enough that one view already holds everything
+                // this axis has to offer, so there is nothing left to scroll
+                // towards: sit in the middle of it.
+                let mid = (low + high) * 0.5;
+                return (mid, mid);
+            }
+            (low, high)
+        };
+        let (x0, x1) = axis(
+            bounds[0],
+            bounds[2],
+            (reach[0], reach[2]),
+            (self.foot[0], self.foot[2]),
+            (self.inner[0], self.inner[2]),
+        );
+        let (y0, y1) = axis(
+            bounds[1],
+            bounds[3],
+            (reach[1], reach[3]),
+            (self.foot[1], self.foot[3]),
+            (self.inner[1], self.inner[3]),
+        );
+        [x0, y0, x1, y1]
+    }
+
+    /// Pulls a pan centre back into [`Rig::pan_range`].
+    pub fn clamp_pan(
+        &self,
+        centre: [f32; 2],
+        span: f32,
+        bounds: [f32; 4],
+        reach: [f32; 4],
+    ) -> [f32; 2] {
+        let r = self.pan_range(span, bounds, reach);
+        [centre[0].clamp(r[0], r[2]), centre[1].clamp(r[1], r[3])]
+    }
+
+    /// How far the pan centre has to move for the ground under a cursor
+    /// dragged `du` across the viewport and `dv` down it to stay under it.
+    ///
+    /// Both are fractions of the viewport, not pixels, so the same call serves
+    /// a drag, a key held down and the cursor sitting on the screen edge.
+    pub fn drag(&self, span: f32, du: f32, dv: f32) -> [f32; 2] {
+        let d = self.distance(span);
+        [
+            -(self.grad[0][0] * du + self.grad[1][0] * dv) * d,
+            -(self.grad[0][1] * du + self.grad[1][1] * dv) * d,
+        ]
+    }
+}
+
 fn unproject(inv: &Mat4, x: f32, y: f32, z: f32) -> Option<Vec3> {
     let m = &inv.0;
     let px = m[0] * x + m[4] * y + m[8] * z + m[12];
@@ -403,18 +646,17 @@ mod tests {
     /// magnified corner of the map and looked like a broken renderer.
     #[test]
     fn the_board_is_framed_at_every_aspect() {
-        const W: f32 = 30.0;
-        const H: f32 = 18.0;
+        let a = crate::game::greentd_map::VIEW;
         for &aspect in &[0.35, 0.55, 0.75, 1.0, 1.33, 1.78, 2.4, 3.2, 5.0] {
             for &pitch_deg in &[35.0f32, 52.0, 70.0] {
                 for &yaw in &[-0.3f32, 0.0, 0.3] {
-                    let cam = Camera::frame_board(W, H, aspect, pitch_deg.to_radians(), yaw, 1.06);
+                    let cam = Camera::frame_rect(a, aspect, pitch_deg.to_radians(), yaw, 1.06);
                     for &(x, y, z) in &[
-                        (0.0, 0.0, 0.0),
-                        (W, 0.0, 0.0),
-                        (0.0, H, 0.0),
-                        (W, H, 0.0),
-                        (W * 0.5, H * 0.5, 3.5),
+                        (a[0], a[1], 0.0),
+                        (a[2], a[1], 0.0),
+                        (a[0], a[3], 0.0),
+                        (a[2], a[3], 0.0),
+                        ((a[0] + a[2]) * 0.5, (a[1] + a[3]) * 0.5, 3.5),
                     ] {
                         let n = cam
                             .view_proj
@@ -438,52 +680,128 @@ mod tests {
         }
     }
 
-    /// And it must not be framed so loosely that the board is a stamp in the
-    /// middle of the screen - a fit that is always "safe" is a useless fit.
-    #[test]
-    /// Every build pad must be on screen at every window shape.
+    /// Every build pad must be reachable, and scrolling must never take the
+    /// player anywhere the wide shot does not already show them.
     ///
-    /// This is the constraint that decides how far the camera can be pushed in.
-    /// The board carries a wide decorative stone frame, and cropping *that* is
-    /// free - the play area is what the camera is for. Cropping a **pad** is
-    /// not: an off-screen pad is a pad the player cannot click, and there is
-    /// nothing on screen to tell them it exists.
+    /// This used to assert that every pad was on screen *at once*, which was
+    /// the right test while the camera framed the whole arena from one fixed
+    /// position. It cannot be right now that the camera shows about
+    /// twenty-six tiles and the player scrolls: being on screen is no longer a
+    /// property of a pad at all. What has to survive is the reason the old
+    /// assertion existed - a pad the player cannot get to is a plot they cannot
+    /// build on, and nothing on screen says it is there - so the same claim is
+    /// made about the camera they can move: for every pad there is a legal pan
+    /// that puts it in frame, at every zoom and every window shape.
+    ///
+    /// The second half is the constraint panning brought with it. Scrolling
+    /// must stay in this player's own arena, so nothing a legal pan can reach
+    /// may show ground that the fully zoomed-out framing - the fixed camera the
+    /// game used to have - was not already showing. The two tiles of slack are
+    /// for the corner pads: the picture is at its narrowest along the bottom
+    /// edge, and reaching the pads in the corners of the arena means letting
+    /// the view hang a little way over its border.
+    ///
+    /// The pad is checked on the ground rather than at tower height. A tower
+    /// standing at the very top of the screen has its head cropped, in this
+    /// game and in the one it copies; what must never happen is the *plot*
+    /// being unclickable.
     #[test]
-    fn every_build_pad_is_on_screen_at_every_aspect() {
+    fn every_build_pad_is_reachable_and_the_view_stays_in_the_arena() {
         use crate::game::board::Board;
         let board = Board::new();
         assert!(!board.slots.is_empty());
+        let view = crate::game::greentd_map::VIEW;
+        let pads = crate::pad_bounds(&board);
+        let middle = [(view[0] + view[2]) * 0.5, (view[1] + view[3]) * 0.5];
+        const SLACK: f32 = 2.0;
+        // The ground in shot, read off the camera the player is actually given
+        // rather than out of the rig's own workings.
+        let on_screen = |cam: &Camera| {
+            let mut b = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
+            for (u, v) in [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)] {
+                let g = cam
+                    .ground_pick(u, v)
+                    .expect("the viewport meets the ground");
+                b = [
+                    b[0].min(g[0]),
+                    b[1].min(g[1]),
+                    b[2].max(g[0]),
+                    b[3].max(g[1]),
+                ];
+            }
+            b
+        };
+
         for &aspect in &[0.6, 1.0, 1.4, 1.78, 2.6] {
-            let cam = Camera::frame_board(
-                30.0,
-                18.0,
+            let rig = Rig::new(
                 aspect,
                 crate::CAM_PITCH_DEG.to_radians(),
-                0.0,
-                crate::CAM_ZOOM,
+                crate::CAM_YAW_DEG.to_radians(),
             );
-            for s in &board.slots {
-                // Towers stand on the pad, so the top of one has to fit too.
-                let n = cam
-                    .view_proj
-                    .project(v3(s.pos[0], s.pos[1], 1.2))
-                    .expect("pad is behind the camera");
-                assert!(
-                    n[0].abs() <= 1.0 && n[1].abs() <= 1.0,
-                    "pad at {:?} is off screen at aspect {aspect}: ndc {:.2},{:.2}",
-                    s.pos,
-                    n[0],
-                    n[1]
-                );
+            let widest = rig.widest_span(view);
+            // What the player is looking at with the wheel rolled all the way
+            // back: the whole arena, and the border it sits in.
+            let outer = on_screen(&rig.camera(rig.clamp_pan(middle, widest, view, pads), widest));
+            for step in 0..=12 {
+                let span =
+                    crate::CAM_SPAN_MIN + (widest - crate::CAM_SPAN_MIN) * step as f32 / 12.0;
+                let span = rig.clamp_span(span, crate::CAM_SPAN_MIN, view);
+
+                for s in &board.slots {
+                    // Scrolling towards a pad and letting the clamp have its
+                    // say is exactly what a player does to reach one.
+                    let cam = rig.camera(rig.clamp_pan(s.pos, span, view, pads), span);
+                    let n = cam
+                        .view_proj
+                        .project(v3(s.pos[0], s.pos[1], 0.0))
+                        .expect("pad is behind the camera");
+                    assert!(
+                        n[0].abs() <= 1.0 && n[1].abs() <= 1.0,
+                        "pad at {:?} cannot be scrolled to at aspect {aspect}, span {span:.1}: \
+                         ndc {:.2},{:.2}",
+                        s.pos,
+                        n[0],
+                        n[1]
+                    );
+                }
+
+                let r = rig.pan_range(span, view, pads);
+                for c in [[r[0], r[1]], [r[2], r[1]], [r[0], r[3]], [r[2], r[3]]] {
+                    let seen = on_screen(&rig.camera(c, span));
+                    assert!(
+                        seen[0] >= outer[0] - SLACK
+                            && seen[1] >= outer[1] - SLACK
+                            && seen[2] <= outer[2] + SLACK
+                            && seen[3] <= outer[3] + SLACK,
+                        "panning to {c:?} at aspect {aspect}, span {span:.1} shows {seen:?}, \
+                         which is outside the arena view {outer:?}"
+                    );
+                }
             }
         }
     }
 
+    /// And it must not be framed so loosely that the arena is a stamp in the
+    /// middle of the screen - a fit that is always "safe" is a useless fit.
+    ///
+    /// The `#[test]` this needs had drifted up onto the pad test above, so the
+    /// assertion was not running at all and the compiler reported the whole
+    /// function as dead code. Restored here, and pointed at the arena the
+    /// camera is really asked to frame rather than a board shape the game no
+    /// longer has.
+    #[test]
     fn the_board_actually_fills_the_frame() {
+        let a = crate::game::greentd_map::VIEW;
         for &aspect in &[0.6, 1.0, 1.78, 2.6] {
-            let cam = Camera::frame_board(30.0, 18.0, aspect, 52f32.to_radians(), 0.0, 1.06);
+            let cam = Camera::frame_rect(
+                a,
+                aspect,
+                crate::CAM_PITCH_DEG.to_radians(),
+                crate::CAM_YAW_DEG.to_radians(),
+                1.06,
+            );
             let mut extent = 0.0f32;
-            for &(x, y) in &[(0.0, 0.0), (30.0, 0.0), (0.0, 18.0), (30.0, 18.0)] {
+            for &(x, y) in &[(a[0], a[1]), (a[2], a[1]), (a[0], a[3]), (a[2], a[3])] {
                 let n = cam.view_proj.project(v3(x, y, 0.0)).expect("in front");
                 extent = extent.max(n[0].abs()).max(n[1].abs());
             }

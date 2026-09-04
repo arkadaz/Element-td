@@ -1,440 +1,366 @@
-# Elemental TD - design
+# Green Circle TD - the design, and where it came from
 
-This document is the specification. Where the code and this file disagree, the
-file is wrong and should be fixed.
+This game is a port. It does not have a design of its own to defend: the design
+is `GREEN TD 9.3c PEIN.w3x`, a Warcraft III custom map, and almost every number
+in the build is that map's own.
 
----
+So this document is not a specification. **The map is the specification.** This
+is the record of what was taken out of it, what had to be worked out before the
+numbers meant anything, the one thing that had to be invented, and the handful
+of oddities that were copied rather than corrected. Where this file and the map
+disagree, this file is wrong.
 
-## 1. What was wrong with the old design
-
-The previous version was a competent tower defense that stopped being a game
-around wave 20. Eight towers, all available from wave 1, all affordable by wave
-15. After that the only decision left was *which tower do I pour gold into*,
-answered once and then repeated sixty times. Length was added by raising health
-numbers, which is not the same thing as depth.
-
-Three specific failures:
-
-- **No scarcity.** Everything unlocked immediately, so there was never a build
-  to discover, only a build to execute.
-- **No variance.** Every run drew the same towers against the same waves on the
-  same road. Nothing to learn on run two.
-- **One axis of growth.** Gold in, damage out. A single scalar cannot carry an
-  hour.
-
-The fix is not more waves. It is a second resource that the player spends on
-*what they are allowed to build* rather than on how much of it.
+How the numbers are got out is in [`../tools/README.md`](../tools/README.md).
 
 ---
 
-## 2. The circuit
+## 1. The source
 
-> **There is no exit, and there are no lives. You are defending a rate.**
+Green Circle TD is an eight-player Warcraft III map: a 96 by 96 field cut into
+eight identical arenas by three-tile corridors, with a spawn box in every corner
+and on every edge. Each player defends one arena against their own stream of
+creeps, which walk a corridor and never leave it. There are no lives and no
+exit. The map's own leaderboard states the loss condition in five words:
 
-The road is a **closed ring**. Monsters enter it and walk, and nothing ever
-reaches an end, because there is no end. What the towers cannot kill comes round
-again, and again, and the ring fills up. The run is lost when more than
-**320 monsters** are circling at once.
+> When enemies > 700, game over.
 
-This replaced a twenty-life counter, and it is a better gauge for four reasons:
-
-- **It moves continuously.** A life counter jumps in whole lives, so a player
-  learns they are in trouble at the moment it becomes unrecoverable. The ring
-  fills over a dozen waves, visibly.
-- **It makes leftovers a debt.** A wave you only three-quarters killed is
-  carried into the next one, and the one after. Pressure is cumulative instead
-  of per-wave, which is what makes the back half of a run feel like a run.
-- **It cannot be gamed by displacement.** A tower that shoves monsters backwards
-  used to buy free distance from the exit. On a ring, backwards is the same
-  direction.
-- **It gives every monster more than one pass.** A survivor is not a loss, it is
-  a second chance at it - so a board slightly behind the curve degrades
-  gracefully instead of falling off a cliff.
-
-Waves arrive on a **fixed 42-second clock** whether the last one is dead or not,
-and each wave's whole count streams in evenly across its own period. There is no
-build phase: gold is spent while the road is busy. The only quiet stretch in a
-run is the twenty-two seconds before wave one.
-
-Taken from Green Circle TD, which does all of this - a closed circle, no lives,
-a loss condition of 700 living monsters, and 36 waves on a 45-second clock. What
-is not taken from it is the wave *content*: this keeps its own elements, armour
-table and draft.
+The port is one arena, single player. Everything else - the roster, the waves,
+the terrain, the lane, the purse and that loss condition - is the map's.
 
 ---
 
-## 2b. The core loop
+## 2. What was taken verbatim
 
-> **Draft an element. Elements combine into towers. Towers hold the ring.**
+| | |
+| --- | --- |
+| **131 towers**, in 24 families | name, gold cost, refund, damage, cooldown, range, splash radius, attack type, targets allowed, model, scale |
+| **the upgrade graph** | every edge, exactly as the map's `uupt` field wires it |
+| **every ability** | crit chance and multiplier, multishot count, the bouncing glaive, poison damage and slow and duration, the standing slow, both auras and their radii, immolation, root chance, the outright kill chance, armour stripping, the Troll's self-frenzy |
+| **36 waves** | creep, count, health, armour value, armour type, movement speed, whether it flies, and the coloured banner the map prints - Air, Immune, Hero, Boss |
+| **the wave clock** | the map's own `PolledWait` at the top of each wave trigger: fifty seconds through the first act, forty-five from wave 11 |
+| **the spawn window** | `450./count` on a tenth-second timer, so a wave's whole count arrives evenly across forty-five seconds however many there are |
+| **the terrain** | the ground texture and cliff level at every corner of the field, out of `war3map.w3e` |
+| **the lane** | traced through the four regions the map orders the Red player's creeps along |
+| **1000 starting gold** | `SetPlayerStateBJ(GetEnumPlayer(), PLAYER_STATE_RESOURCE_GOLD, 1000)` |
+| **700 living creeps** | `return(udg_integer11>700)`, the map's whole lose condition |
 
-The player never buys a tower from an open shop. They earn **essences**, one
-element at a time, and their collection of essences decides which of the
-twenty-one towers they may build and how far each may be upgraded.
+Eleven of the 131 towers can be bought. The other 120 are reached by upgrading,
+and a shop tower is defined as exactly one that nothing upgrades into, which is
+computed rather than listed.
 
-Every run therefore has three interleaved decisions:
-
-1. **Draft** - which element to take, from three offered.
-2. **Build** - which of the towers that unlocked to actually put on the road.
-3. **Invest** - upgrade what is there, build wider, or bank for interest.
-
-The first is the new one, and it is the one that makes runs differ.
+The cheapest is a **ten gold Single shot Tower**, and it is a seed: it becomes a
+Slow, Poison, Critical, Troll or Fire Tower, or the forty-thousand gold
+One-Strike Kill Tower, and none of those six families can be bought at any
+price. The **Aura Tower** offers Damage or Speed at every rung, both free, and
+lets you cross back. The **King Tower** opens the four Super towers, a hundred
+thousand gold each. That is the whole shape of the roster: eleven doors, and a
+graph behind them.
 
 ---
 
-## 3. Essences
+## 3. What had to be understood
 
-There are six elements:
+The map's numbers are meaningless on their own. Two of Warcraft III's rules sit
+underneath them, one of which this map rewrites wholesale, and four things about
+the map's own data are not written down anywhere in it.
 
-| Element | Colour | Temperament |
-|---|---|---|
-| **Nature** | green | poison, decay, things that get worse over time |
-| **Fire** | orange | burst, burn, area |
-| **Water** | blue | slow, chain, control |
-| **Earth** | brown | weight, armour-breaking, ground only |
-| **Light** | gold | precision, range, buffs |
-| **Dark** | violet | debuffs, execution, gold |
+### 3.1 The attack table, which the map throws away
 
-**Twenty essences** are awarded over a campaign, at waves
+Warcraft III ships a seven-by-seven table of attack types against armour types:
+Piercing shreds unarmoured and bounces off fortified, Magic beats heavy armour,
+and so on. This map replaces all of it, in `war3mapMisc.txt`:
 
-```
-1, 2, 3, 5, 7, 9, 12, 15, 18, 21, 25, 29, 33, 37, 42, 47, 52, 58, 64, 71
+```text
+DamageBonusNormal=1.00,1.00,1.00,1.00,1.00,1.00,0.05,1.00
+DamageBonusPierce=1.00,1.00,1.00,1.00,1.00,1.00,0.05,1.00
+DamageBonusSiege =1.00,1.00,1.00,1.00,1.00,1.00,0.05,1.00
+DamageBonusMagic =1.00,1.00,1.00,1.00,1.00,1.00,0.05,1.00
+DamageBonusSpells=1.00,1.00,1.00,1.00,1.00,1.00,0.05,1.00
+DamageBonusHero  =100.00,100.00,100.00,100.00,100.00,100.00,100.00,100.00
 ```
 
-front-loaded so the opening has choices, thinning out so the late game is about
-using what you built rather than still being handed new toys.
+The seventh column is Divine, which the map's waves call **Immune**. So:
 
-At each award the player is offered **three of the six**, and takes one. The
-offer is drawn from the run seed, and is constrained so that - whenever both are
-possible - it contains **at least one element already held** (so you can always
-deepen) and **at least one not held** (so you can always broaden). Without that
-rule a draft can be a non-choice, which is worse than no draft at all.
+- every ordinary attack does **full damage to everything**, and **five percent**
+  to an Immune wave;
+- **Chaos** is not in the file, because Warcraft III hard-codes it at 1.0 and no
+  file can change it, so Chaos does full damage to Immune as well;
+- **Hero** damage is multiplied by **a hundred**, against anything at all.
 
-Combat does not start until the pending draft is taken. It is a decision, not a
-notification.
+There is no rock, paper, scissors in this map. There is armour, and there is
+every fifth wave. That single table is why the roster looks the way it does: the
+Chaos and Destruction families, the Troll Tower, the four Super towers and the
+One-Strike Kill Tower all exist because they are the only answers to Immune, and
+pricing them as though attack types were a counter system would misprice the
+whole game.
 
-### What essences buy
+It lives in `greentd_types::type_mult`, written out rather than generated,
+because it is six lines that apply to the whole game rather than data belonging
+to any one unit.
 
-Let `e[X]` be how many essences of element `X` are held.
+### 3.2 Armour is a value, not a class
 
-- **Pure tower X** is buildable when `e[X] >= 1`.
-  Its ceiling is `min(8, 2 + e[X])`.
-- **Dual tower XY** is buildable when `e[X] >= 1` **and** `e[Y] >= 1`.
-  Its ceiling is `min(8, 2 + min(e[X], e[Y]))`.
+The armour *type* decides only what is resisted. The armour *number* is the real
+defence, and Warcraft III's curve is unchanged here: each point is worth six
+percent of a point, stacking with diminishing returns, so armour approaches
+immunity without ever reaching it.
 
-So six essences in one element max out that pure tower; six in each of two
-elements max out the dual between them.
+```
+taken = 1 / (1 + 0.06 * armour)
+```
 
-This is the whole strategic spine, and it is a genuine dilemma:
+The campaign runs that number from 0 on wave 1 to **700 on wave 33**, which
+takes 2.3% of a hit. Wave 36 carries 200 armour and is Immune as well, so a
+Siege Tower lands under four parts in a thousand of the number on its card,
+while a Chaos tower lands seven and a half parts in a hundred.
 
-| Spread over 20 essences | What you get |
-|---|---|
-| 20 in one | one maxed pure tower and nothing else - a losing build |
-| 10 / 10 | two pures and one dual, all at ceiling 8 |
-| 7 / 7 / 6 | three pures, three duals, all at 8 |
-| 4 / 4 / 4 / 4 / 4 | five pures, ten duals, all capped at 6 |
-| 3 each of six, plus 2 | everything unlocked, nothing above 5 |
+That is the whole reason the ladders climb into six figures of damage. A tower
+dealing 39,999 a shot is not absurd; it is a tower built to put a few hundred
+damage through 200 armour.
 
-Breadth buys answers. Depth buys numbers. The waves are built so that neither
-extreme survives: a narrow board meets an armour class it cannot hurt, and a
-wide board of tier-5 towers cannot out-damage a wave-70 health bar.
+### 3.3 Upgrading is a graph
 
-Essences are never refunded and never respecced. Towers sell back at 75%.
+A tower defence's upgrade path is usually a ladder, and modelling this map as
+ladders quietly loses three of the most interesting decisions in it. `uupt` is a
+list, not a value: the Single shot Tower names six successors, the Aura Tower
+three, the King Tower five. `TowerLevel::upgrades` is therefore a slice, and a
+tower with more than one way up takes over the command card rather than being
+served by an "upgrade" button that could only pick one.
 
----
+### 3.4 There is no family field
 
-## 4. The twenty-one towers
+The map has no notion of a tower family. It has a naming convention it keeps
+rigidly - every rung of a ladder starts with the same words - and the family is
+read off the longest matching name prefix. That is also where the rung number
+comes from: the digits at the tail of the name, or "Perfect" meaning the top.
+Sorting by price instead would put five rungs in the wrong place across four
+different ladders, because the prices are not monotonic.
 
-Six pure, fifteen dual - every unordered pair of elements. Each owns exactly one
-role; no two share both a delivery and a special.
+### 3.5 The texture grid is the level
 
-### Pure - cheap, immediate, always relevant
+The pathing map says the whole field is walkable. Nothing in the map file
+describes a maze at all. What describes it is the **ground texture**: the
+corridors are painted in rock and everything else is grass or dirt, and that
+grid, one byte a tile, is the only thing that says where a creep can walk and
+where a tower can stand. `greentd_map::TEXTURE` is that grid, and
+`board::is_corridor` is the whole of the level geometry.
 
-| Tower | Element | Damage | Targets | Role |
-|---|---|---|---|---|
-| **Bramble** | Nature | Toxic | air + ground | stacking poison, the reliable opener |
-| **Ember** | Fire | Fire | air + ground | small fast splash |
-| **Tide** | Water | Magic | air + ground | slow; buys every other tower more shots |
-| **Boulder** | Earth | Physical | **ground only** | one heavy shot, knocks back |
-| **Prism** | Light | Magic | air + ground | long range, crits |
-| **Shade** | Dark | Toxic | air + ground | **one-strike kill** chance, pays gold per kill |
+### 3.6 The lane is a shuttle
 
-### Dual - expensive, specialised, the reason to broaden
+The map orders the Red player's creeps through four regions: the spawn box in
+the corner, the foot of the entry corridor, the junction where it meets the long
+run, and the far end of the north-south corridor. Reaching the last one sends
+them back to the one before it, forever.
 
-| Tower | Pair | Damage | Targets | Role |
-|---|---|---|---|---|
-| **Wildfire** | N+F | Fire | air + ground | fire arcs from target to target |
-| **Mire** | N+W | Toxic | **ground only** | swamp: heavy slow, poison, **suppresses healing** |
-| **Thornwall** | N+E | Physical | **ground only** | roots: hard slow with splash |
-| **Grove** | N+L | - | none | aura: damage, rate and range to neighbours |
-| **Blight** | N+D | Toxic | air + ground | ramps on one target, spreads on kill |
-| **Steam** | F+W | Fire | air + ground | untargeted nova, hits both layers |
-| **Magma** | F+E | Fire | **ground only** | sets the road alight, shreds armour |
-| **Solar** | F+L | Fire | air + ground | piercing lance down a whole lane |
-| **Hellfire** | F+D | Fire | air + ground | **executes** anything under a third health |
-| **Silt** | W+E | Physical | **ground only** | widest splash, slows, shreds |
-| **Mirror** | W+L | Magic | air + ground | longest chain in the game |
-| **Abyss** | W+D | Magic | air + ground | **drags monsters back down the road** |
-| **Bastion** | E+L | Physical | air + ground | **multishot** - three targets at once |
-| **Tombstone** | E+D | - | none | economy: pays every wave, raises interest |
-| **Eclipse** | L+D | Magic | air + ground | stuns and shreds - the boss answer |
-
-Five towers cannot shoot upwards (Boulder, Mire, Thornwall, Magma, Silt). Two do
-not shoot at all (Grove, Tombstone). Both facts are load-bearing: they are what
-stops "build the highest-DPS thing everywhere" from being correct.
-
-### Two effects the circuit made necessary
-
-A hundred and fifty monsters on the road at once is a different problem from a
-dozen, and two of Green Circle TD's towers answer it directly:
-
-- **Multishot** (Bastion) fires a full hit at three targets at a time. On a
-  circuit, targets-per-second matters more than damage-per-target, and this is
-  the only effect that buys it outright. Bastion used to be the
-  highest-single-target tower, which is an identity worth almost nothing here.
-- **One-strike kill** (Shade) has a small chance to delete a non-boss outright,
-  whatever its health. It is a lottery rather than a damage source, so it is
-  worth exactly as much as the number of things walking past - the one effect
-  in the game that gets *better* as the ring fills up. Never on a boss: a boss
-  deleted by a coin flip is not a boss.
-
-### Levels
-
-Eight levels. No forks - the branching decision now lives in the draft, and
-forty-two fork variants on top of twenty-one towers would be noise rather than
-choice. Instead there are two visible milestones:
-
-- **Level 4 - Attuned.** The tower's special effect strengthens sharply.
-- **Level 7 - Ascendant.** Damage takes a step up and the model changes shape.
-
-Damage per level multiplies by **1.76**, cost by **1.62**. Upgrading is about 9%
-more gold-efficient than building another copy, which is small enough that the
-choice stays live at every level instead of being settled at level 2.
+So the lane is a corridor walked down and back, and it is written here as a
+closed loop - down one half of the three-tile passage and up the other, which is
+how two streams pass each other in Warcraft III. A creep's entire position is
+then one scalar, how far along the loop it has walked, and a creep on its fourth
+lap is handled by exactly the same code as one on its first.
 
 ---
 
-## 5. Damage and armour
+## 4. What had to be invented
 
-Four damage types against five armour classes. This table is the reason a wide
-board beats a tall one at least some of the time.
+**The kill bounty, and nothing else.**
 
-|              | Unarmoured | Plated | Warded | Ethereal | Boss |
-|---|---|---|---|---|---|
-| **Physical** | 1.00 | 0.55 | 1.25 | 0.70 | 0.85 |
-| **Magic**    | 1.00 | 1.25 | 0.55 | 1.30 | 0.85 |
-| **Fire**     | 1.15 | 0.85 | 0.85 | 0.60 | 0.90 |
-| **Toxic**    | 1.00 | 1.00 | 1.00 | 1.00 | 1.00 |
+Warcraft III keeps its bounty formula in the game's own gameplay constants
+rather than in the map file, and this map leaves them at their defaults. Those
+defaults are footman-sized. They are meaningless against a tower that costs a
+hundred thousand gold, and there is nothing in the archive to read instead.
 
-Toxic is never resisted and never bonused. It is the honest answer to anything,
-and it is why the Nature and Dark pures stay worth a pad into the late game
-while being the worst raw damage in the roster.
+So a kill pays a fixed share of what it took to kill: the creep's health scaled
+by its armour value, divided down.
 
-Fire is the swarm answer and nothing else's. It was briefly neutral against
-wards, which quietly made magic-plus-fire a board with no hole in it at all -
-magic beat plate and ghosts, fire beat crowds, and wards were the one thing left
-for the pair to fear. Now a board needs a third answer.
+```rust
+pub fn bounty_of(w: &WaveDef) -> u32 {
+    (w.payable_hp() / 900.0).round().max(1.0) as u32
+}
+```
 
----
+`payable_hp` deliberately ignores the Immune multiplier. The player is paid for
+the toughness of the creep, not for the toughness of having brought the wrong
+attack type - otherwise the Immune waves would pay twenty times what they should
+and the answer to them would fund itself.
 
-## 6. Monsters
+Keeping the bounty on the same exponential as the roster is the point. It means
+there is no hand-authored payout table to drift out of step with the extraction
+when the map is re-read. Across the campaign it pays about **3.7 million gold**,
+against 68,730 for a maxed Siege ladder, and
+`kill_money_keeps_pace_with_the_roster` checks it stays between one board of
+thirty such ladders and forty boards of them - loose bounds, because the point
+is to catch a bounty that has come adrift from the roster, not to pin a balance
+number nobody tuned.
 
-Fourteen types. Each one punishes exactly one lazy habit.
+Two payouts are expressed in terms of it, and are invented to the same extent:
 
-| Monster | Layer | Armour | Punishes |
-|---|---|---|---|
-| Grunt | ground | Unarmoured | - |
-| Runner | ground | Unarmoured | slow projectiles, no control |
-| Swarm | ground | Unarmoured | single-target boards |
-| Brute | ground | Plated | all-physical boards |
-| Warden | ground | Warded | all-magic boards |
-| **Wraith** | ground | **Ethereal** | all-physical boards, harder |
-| Mender | ground | Unarmoured | not focusing, no burst |
-| Bulwark | ground | Plated | chip damage - a flat shield absorbs it |
-| Phaser | ground | Warded | relying on slow |
-| Wisp | **air** | Unarmoured | no anti-air |
-| Drake | **air** | Plated | anti-air that is all physical |
-| **Seraph** | **air** | **Ethereal** | anti-air that is all physical, harder |
-| **Boss** | ground | Boss | thin damage, stun reliance |
-| **Skylord** | air | Boss | ground-only boards |
+- **A stipend of twelve kills' worth when a wave is called.** On a circuit no
+  wave ever ends, so there is no "wave cleared" moment to pay at. Without it a
+  board that falls behind can never buy its way back out, and one bad wave
+  quietly decides the whole run.
+- **Four gold a second for calling a wave early.** The only speed control in the
+  game that is also a decision: whatever you have not killed does not go
+  anywhere, so calling early stacks the new stream on top of the old one.
 
-Ethereal is new and deliberately nasty: it takes 70% from physical and 60% from
-fire, but 130% from magic. A board of Bastions and Silts meets a Wraith wave and
-finds out.
-
-### Escalation
-
-New types arrive on a schedule and **always debut at 55% count and 65% health**,
-so the first Wisp wave costs a life, not the run. The game teaches a mechanic
-before it tests it.
-
-Wave modifiers layer on from the midgame: regenerating (every 8th wave from 20),
-splitting (every 9th from 22), and escorts - a second monster type arriving
-alongside the first, from wave 25, always crossing layers from wave 45.
-
-Bosses at every tenth wave, alternating ground and air.
+Past wave 36 the run may continue: health climbs 35% a wave and armour by 20.
+The roster does not climb with it, because the top of every ladder has already
+been bought by then, so endless always ends. How far is the score.
 
 ---
 
-## 7. Length and pacing
+## 5. The quirks, kept rather than corrected
 
-**Eighty waves on a 42-second clock**, plus twenty-two seconds before the
-first. That is **58 minutes**, exactly, and the arithmetic is now trivial -
-which is itself worth having. The old version had to estimate how long each
-wave would take to walk a road, and got it wrong by a factor of 1.7.
+A port that tidies its source is no longer a port. Each of these is pinned by an
+assertion in `src/game/greentd_tests.rs`.
 
-The draft pauses are the load-bearing pacing. They are the only moments the
-clock stops, and therefore the only moments the player looks up.
-
-Calling a wave early pays **2 gold per second saved**, and on a circuit that is
-a genuine gamble rather than a free speed-up: whatever you have not killed yet
-does not go anywhere, so the new stream stacks on top of it. The gold is the
-reward for judging that your board can take it.
-
-Winning means surviving all eighty **and clearing the ring**. Outlasting the
-final stream is not the same as killing it. The run may continue into
-**endless**, where health climbs 7.5% and the purse 6.2% per wave - health
-outruns gold, so endless always ends eventually. The question is only how far.
-
-### What a wave is
-
-A wave is **not a burst**. Its whole count arrives one monster at a time, evenly
-spread across its own 42 seconds, so the road is never empty and no tower is
-ever idle.
-
-Counts are **eight times** what they were, and each monster is **an eighth** as
-tough - the same total health per wave, so the tuned difficulty curve carried
-over intact, but a completely different shape of problem. A dozen fat monsters
-is a game about single-target damage; a hundred thin ones is a game about area,
-throughput and coverage. With no exit to leak from, the second is the game worth
-having.
-
-Bosses are the exception: five of them per boss wave rather than a hundred, at
-a fifth of the wave's health each. A single unkillable boss on a circuit is not
-a threat, it is a nuisance occupying one slot of a three-hundred-slot gauge; a
-pack of five is a real damage sink, because every tower pointed at it is a tower
-not killing the stream arriving behind it.
-
-### The four acts
-
-| Act | Waves | What it is about |
-|---|---|---|
-| **I - The Ring** | 1-20 | Learning layers and armour. First air at 7, first Plated at 9. The gauge stays near empty. |
-| **II - Pressure** | 21-40 | Healers, swarms, wards. Focus fire and area damage. Leftovers start to be visible. |
-| **III - Attrition** | 41-60 | Ethereal, shields, splitting, phasing. The gauge begins to climb and does not come back down. |
-| **IV - The Deep** | 61-80 | Cross-layer escorts every wave. The ring sits at 85-95% full and every wave is the one that might overflow. |
-
-A measured run bears this out: a naive board keeps the ring under 70 of 320 for
-fifty waves, is at 194 by wave 59, and then spends waves 60 to 80 between 260
-and 310 - ten straight waves of not knowing whether it will hold. The old
-twenty-life version, by contrast, lost nothing at all for sixty-four waves and
-then died twice in the last fifteen.
+- **Eight waves write their creep count as a JASS character literal.** `set
+  udg_integer14='}'` is a hundred and twenty-five. Waves 7, 11, 12, 16, 22, 25,
+  28 and 36 are all written that way, and reading only the decimal form makes
+  them send nothing at all - which is how they first came out, eight silent
+  waves nobody noticed for a while.
+- **Siege Tower 1 costs 100 gold and Siege Tower 2 costs 50.** Four other rungs
+  do the same: Multi 1 to 2 drops from 400 to 300, Air 1 to 2 from 600 to 360,
+  and Poison 5 and 6 and Multi 9 and 10 are pairs at the same price. The upgrade
+  button follows the map's numbering, so the ladder is ordered by that and never
+  by cost.
+- **All twenty "Perfect" towers refund about half of what was sunk in them.**
+  Every rung below them refunds the lot, because the map's refund figure is
+  cumulative and `UpgradeRefundRate=1.0`: Siege Tower 2 costs 50 and refunds
+  150, the whole ladder up to it. The top of a path is deliberately a one-way
+  purchase.
+- **The five airborne waves are set to `hover`, not `fly`.** In Warcraft III
+  hovering leaves a unit targetable from the ground, so read literally the Air
+  Tower's ten rungs have nothing to shoot at and nine of them can hit nothing at
+  all. Every one of those five waves is a gyrocopter, a phoenix, a harpy, a
+  frost wyrm or a bronze dragon. They fly here.
+- **The names are the map's**, misspellings included: "Supper chaos tower",
+  "lllidan Evil", "Ereder Sorcerer".
 
 ---
 
-## 8. Economy
+## 6. The board
 
-- Start with **260 gold**. There are no lives; see section 2.
-- A wave's purse is fixed. **55%** rides on kills, **45%** is a stipend paid
-  when the wave *starts* - because on a circuit no wave ever ends. The stipend
-  exists so that a board which has fallen behind still has the money to climb
-  back out. Paying the whole purse on kills made the balance bimodal: cruise to
-  victory, or collapse at wave 60, with almost nothing between.
-- Escorts split the same purse across more monsters. They are a threat, not a
-  payday.
-- **Interest** pays 5% of gold in hand at each wave boundary, up to **20%** with
-  Tombstones, and only on gold up to a ceiling of twelve wave-purses. Uncapped
-  compound interest is not an economy, it is a runaway - the previous version
-  reached 813 billion gold by wave 89 and ran to wave 136 without difficulty.
-- Selling refunds **75%** of everything invested.
+The whole 96 by 96 field is drawn from the map's texture grid, so the other
+seven arenas and the corridors between them are there on screen. One quarter of
+it is played.
 
-### The ring, and its hundred and sixteen pads
+- The lane is **85 tiles** round, so a lap takes between twenty-one and
+  thirty-six seconds at the map's own walking speeds, and a good deal longer
+  under a Slow Tower.
+- The arena holds **816 build plots**, and they are every tile of it that is not
+  corridor. That is the map's own rule and it is not a small one: Warcraft III
+  lets you build on any ground you own, which is what makes this a question of
+  *where* as well as *what*, and what makes the field feel like a field rather
+  than a row of sockets.
+- A tower stands on its own tile and the corridor is the tile beside it. Nothing
+  else is excluded.
+- The camera frames the lane plus a tower's reach around it, which is roughly
+  what a Warcraft III camera sees from edge to edge.
 
-The circuit is a rounded rectangle roughly **59 tiles** round - so a lap takes
-about half a minute - with **116 build plots** on alternating tiles, inside the
-ring and outside it.
+There is no mazing. The corridors are painted into the terrain and the creeps
+walk them whatever is built.
 
-Both numbers matter more than they look. Pads were once on every tile in the
-band, which gave a hundred and ninety-eight of them, and a campaign purse that
-can cover two hundred plots is a campaign with no placement decision in it:
-filling the board with cheap towers beat levelling good ones, which is the
-opposite of what the cost curve is built to reward. A simulated run confirmed
-it - a bot that papered the board with level-one towers cleared eighty waves
-without losing a life. Alternating tiles makes each plot worth thinking about
-and leaves levels as the real sink for gold.
+---
 
-The lap time matters because it sets how many chances a board gets at each
-monster. Too short and the ring is a blur with no positional meaning; too long
-and a tower on the far side is irrelevant to what is happening on this one.
+## 7. The shape of a run
 
-### Nothing may pin a wave in place
+**Thirty-six waves.** Thirty-five seconds of quiet, then fifty seconds a wave
+through the first act and forty-five from wave 11: about twenty-eight minutes of
+clock, plus however long the last stream takes to die.
 
-Three separate stalls shipped in this game before the circuit existed, all the
-same bug wearing different clothes: a wave that can be held still forever
-neither dies nor leaks, so it never ends and the run hangs. Stun-lock did it,
-then knockback, then Abyss - whose pull briefly scaled with the *damage* curve
-and dragged monsters six tiles per hit at level eight.
+Each wave's whole count arrives evenly over forty-five seconds of that gap, so
+the lane is never empty and no tower is ever idle. The counts are the map's, and
+they are streams rather than bursts - sixty to a hundred and sixty creeps in
+most waves, and the few small ones are the ones with the health.
 
-The circuit removes the *hang* - the wave clock does not care whether anything
-moved - but the underlying problem is worse here, not better: a monster pinned
-in place is a monster occupying a slot in the flood gauge forever, so hard
-control that never expires is a slow way to lose.
+**Health climbs two thousandfold**, from a 250 health troll on wave 1 to half a
+million on wave 36, and armour climbs alongside it. Every fifth wave is
+**Immune**, and so is the last one.
 
-Cooldowns and diminishing returns are not enough on their own, because they only
-shorten each effect; they do nothing about how often it lands. Two hard bounds
-fix it, and both are stated as guarantees rather than tunings:
+**There are no lives, because there is no exit.** What the towers cannot kill
+comes round again, and again, and the lane fills up. The run is lost when more
+than seven hundred creeps are circling. That gauge is the map's, and it is a
+better one than a life counter for three reasons:
 
-- After a stun ends, a monster **cannot be stunned again for 1.2 seconds**. It
-  therefore moves for at least that long out of every stun-plus-window.
-- Every monster has a **pushback budget of 5 tiles per lap**, shared by
-  knockback and pull. Once spent, the ring turns one-way until it comes round.
+- it moves continuously, so trouble is visible a dozen waves before it is fatal;
+- a wave only three-quarters killed is a debt carried into the next one, which
+  is what makes the back half of a run feel like a run;
+- it cannot be gamed by shoving creeps backwards, because on a loop backwards is
+  the same direction.
 
-The harness asserts the wave clock actually advances, which is what catches the
-next one.
+Winning means the last wave has finished arriving **and** the ring is empty.
+Outlasting the final stream is not the same as clearing it.
+
+---
+
+## 8. What the player actually does
+
+Every decision in the game is one of three.
+
+**Which of eleven doors to open.** The ten gold seed is one of them, and it is
+the only way into six families. Chaos and Destruction are the only towers on the
+shop card that answer an Immune wave. And the Air Tower is the only one built
+*for* the sky - nine of its ten rungs can hit nothing else - while Siege, Chaos
+and Destruction cannot reach it at any rung, which is most of the splash damage
+in the game.
+
+**Where to put it.** Eight hundred and sixteen plots, one lane, and auras that
+only reach what is near them. A Damage Tower gives every tower within fifteen
+tiles up to eighty percent more damage and a Speed Tower does the same for
+attack rate, so tight clusters are worth more than the same gold spread thin -
+and neither of them fires a shot.
+
+**When to stop widening and start climbing.** A rung roughly doubles a tower's
+damage per second and costs about two thirds again what the rung below it cost,
+so climbing a good plot beats buying another copy nearly every time. What stops
+that from being the only answer is how long the ladders are - twenty rungs of
+Siege, fifteen of Poison, ten each of Bouncing, Multi, Air and Critical - and
+that a maxed ladder covers one lane position and one attack type. The campaign
+pays about fifty maxed ladders' worth in total, across thirty-six waves that get
+exponentially harder, so it is never enough to do both everywhere.
+
+The two ways to lose are both failures of coverage rather than of throughput.
+`a_ground_only_board_drowns_in_the_air` builds sixty maxed Siege towers and
+loses every single flyer of wave 7 regardless; a board with no Chaos on it does
+a twentieth of its damage every fifth wave, and what it fails to kill stays on
+the lane for the next one. `a_sensible_build_clears_the_campaign` plays the
+whole thirty-six with a bot that follows exactly two rules - cover what is
+coming next, otherwise buy the cheapest thing available - and wins.
 
 ---
 
 ## 9. Rendering
 
-The game is top-down, the camera is fixed, and the models are stylised low-poly
-solids. It was being drawn with a deferred-flavoured pipeline costing seven
-render passes a frame - shadow map, multisampled scene, separate effects buffer,
-three bloom blits, composite - and in a browser falling back to WebGL2 that is
-where the frame went. Measured on a packed board (198 towers, 5,300 instances)
-the CPU side costs **0.09 ms** to build the draw list and **0.08 ms** to step the
-simulation on the worst frame the game can produce - a full ring of 320 monsters
-against a full board of 116 towers, ten thousand instances. Nothing about the
-slowness was the simulation, and `a_packed_board_costs_almost_nothing_on_the_cpu`
-keeps that true.
+The map is Lordaeron Summer in daylight: a bright green field with tan corridors
+cut through it. The palette is the tileset's own texture names - `Agrs` and
+`Agrd` for the turf, `Adrt` for the corridors, `Arck` for the stone - as albedo
+values, so the lighting does its own work.
 
-The pipeline is therefore collapsed by quality tier:
+Nothing here loads a `.mdl`. The map dresses its towers and creeps in stock
+Warcraft III models, and each one is mapped to the archetype it reads as and
+rebuilt out of primitives in `view/towers.rs` and `view/monsters.rs`. Fifty-six
+archetypes cover all 131 towers and all 36 waves.
 
-| Quality | Passes | What runs |
-|---|---|---|
-| **Low** | 1 | scene straight to the screen, no shadows, no MSAA, no post |
-| **Medium** | 2 | 1024px shadow map, 1 tap, then scene to screen |
-| **High** | 3 | 2048px shadow, 4 taps, scene to HDR, tonemap composite |
-| **Ultra** | 7 | as before - 4x MSAA, bloom chain, the lot |
-
-Low and Medium write **directly to the swapchain** - no intermediate HDR
-texture, no resolve, no composite blit. Glows are drawn in the same pass as the
-solids with additive blending and depth-test-no-write, which removes the
-separate effects target entirely.
-
-The default is chosen by measuring the opening seconds of frames and stepping
-down until the frame budget is met, so a phone gets Low and a desktop with a
-discrete GPU gets High without anyone being asked.
+The frame is two render passes at Performance, three at Balanced and six at
+Ultra. Pass count is the number that decides whether this runs in a browser: the
+simulation costs hundredths of a millisecond even with the ring full and the
+board packed, so the frame is spent on framebuffer binds, and every one removed
+is worth more than any amount of culling. The preset is chosen by measuring the
+opening seconds and stepping down until the frame budget is met.
 
 ---
 
 ## 10. What is deliberately not here
 
-- **No mazing.** The circuit is fixed. A creep's position is one scalar - how
-  far round it has walked - which is what keeps three hundred of them cheap: the
-  worst frame the game can produce, a full ring against a full board, costs
-  0.09 ms to build and 0.08 ms to simulate.
-- **No difficulty menu.** One curve, tuned properly, beats three curves of which
-  one was ever tested.
-- **No ray tracing.** WebGPU does not expose it, so it cannot ship to a browser,
-  and the GPU was never the bottleneck the request assumed it was.
-- **No server-side simulation.** Every client runs its own board from a shared
+- **The other seven players.** The field is drawn whole because the map's
+  terrain is one grid, but only one arena is played and only one lane is walked.
+- **Mazing.** The corridors are painted into the terrain. There is nothing to
+  block.
+- **A difficulty menu.** The map has one curve. Adding two more would mean two
+  more that nobody has played through.
+- **Invented balance.** No tower is retuned, no wave is softened, no price is
+  made monotonic. If something is unfair, it is unfair in Green Circle TD, and
+  the fix is a better board rather than a better number.
+- **Server-side simulation.** Every client runs its own board from a shared
   seed. The server relays scoreboards and nothing else, which is what lets it
   hold a thousand players in a gigabyte.

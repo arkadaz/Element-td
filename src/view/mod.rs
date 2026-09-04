@@ -9,49 +9,70 @@
 //! This is the only place that decides what the board looks like; colours live in
 //! [`theme`] and the models live in the `towers` and `monsters` submodules.
 
+pub mod models;
 pub mod monsters;
 pub mod towers;
 
 use crate::decor::Decor;
-use crate::game::board::{self, BH, BW, ROAD_HALF};
+use crate::game::board::{self, ROAD_HALF};
+use crate::game::greentd_map::{ARENA, MAP_H, MAP_W};
 use crate::game::defs::*;
 use crate::game::{Game, Phase};
 use crate::gfx::draw::{Color, DrawList, Material, Shape, boost, mix, rgba};
 
+/// The map's own palette: Warcraft III's Lordaeron Summer tileset, in
+/// daylight.
+///
+/// The board used to be lit like a night level - a blue-grey field under a
+/// dark sky - and it looked nothing like the map it is a port of. Green Circle
+/// TD is a bright green field with tan dirt corridors cut through it, and these
+/// are those colours: `Agrs` and `Agrd` for the turf, `Adrt` for the corridors,
+/// `Arck` for the stone. Albedo values, so the lighting can do its work.
 pub mod theme {
     use super::Color;
-    pub const GRASS_A: [f32; 3] = [0.118, 0.168, 0.140];
-    pub const GRASS_B: [f32; 3] = [0.098, 0.145, 0.124];
-    pub const GRASS_EDGE: [f32; 3] = [0.074, 0.110, 0.096];
-    // A build plot is a SOCKET CUT INTO the ground, not a platform sitting on it.
-    // Every empty plot must be darker than the grass around it, or the board
-    // reads as a field of litter. Nothing empty is ever emissive.
-    /// Apron around the socket - warm, road-family, darker than turf.
-    pub const PAD_EARTH: [f32; 3] = [0.098, 0.094, 0.082];
-    /// Socket floor - the darkest thing on the field.
-    pub const PAD_SOIL: [f32; 3] = [0.072, 0.070, 0.062];
-    /// The stone kerb ring. Adjacent plots share a kerb, so the grid reads as
-    /// one deliberate lattice rather than scattered squares.
-    pub const PAD_KERB: [f32; 3] = [0.148, 0.150, 0.152];
+    /// `Agrs`, the lit grass. Mossy, not lime.
+    pub const GRASS_A: [f32; 3] = [0.105, 0.190, 0.075];
+    /// `Agrd`, the darker patches the tileset mixes through it.
+    pub const GRASS_B: [f32; 3] = [0.070, 0.135, 0.058];
+    pub const GRASS_EDGE: [f32; 3] = [0.048, 0.098, 0.045];
+    /// Buildable ground. In this map that is simply turf - every tile you own
+    /// takes a tower - so a plot is grass with a seam around it, not a socket
+    /// cut into the field.
+    pub const PAD_EARTH: [f32; 3] = [0.095, 0.170, 0.070];
+    pub const PAD_SOIL: [f32; 3] = [0.080, 0.145, 0.062];
+    /// The seam between one plot and the next.
+    pub const PAD_KERB: [f32; 3] = [0.055, 0.105, 0.048];
     /// Corner markers, lit only while you are holding a tower you can afford.
-    pub const PAD_ARM: [f32; 3] = [0.30, 0.62, 0.78];
+    pub const PAD_ARM: [f32; 3] = [0.40, 0.78, 0.95];
     /// "Your wallet is the problem", not "this plot is the problem".
-    pub const PAD_BROKE: [f32; 3] = [0.55, 0.44, 0.22];
-    pub const ROAD: [f32; 3] = [0.300, 0.252, 0.205];
-    pub const ROAD_EDGE: [f32; 3] = [0.180, 0.150, 0.122];
-    pub const STONE: [f32; 3] = [0.165, 0.175, 0.215];
-    pub const STONE_DARK: [f32; 3] = [0.105, 0.115, 0.150];
-    pub const WALL: [f32; 3] = [0.090, 0.100, 0.130];
-    pub const HP_BACK: Color = [0.05, 0.06, 0.09, 0.95];
-    pub const HP_FILL: Color = [0.38, 0.92, 0.44, 1.0];
-    pub const HP_LOW: Color = [0.98, 0.38, 0.32, 1.0];
+    pub const PAD_BROKE: [f32; 3] = [0.85, 0.62, 0.24];
+    /// `Adrt`, the corridors: dark trodden earth over stone, not sand.
+    pub const ROAD: [f32; 3] = [0.115, 0.118, 0.092];
+    pub const ROAD_EDGE: [f32; 3] = [0.072, 0.078, 0.062];
+    /// `Arck`.
+    pub const STONE: [f32; 3] = [0.230, 0.230, 0.215];
+    pub const STONE_DARK: [f32; 3] = [0.135, 0.138, 0.128];
+    pub const WALL: [f32; 3] = [0.105, 0.110, 0.098];
+    pub const HP_BACK: Color = [0.02, 0.02, 0.02, 0.95];
+    pub const HP_FILL: Color = [0.30, 0.86, 0.26, 1.0];
+    pub const HP_LOW: Color = [0.95, 0.28, 0.20, 1.0];
     pub const GHOST_OK: [f32; 3] = [0.42, 0.85, 1.00];
     pub const GHOST_BAD: [f32; 3] = [1.00, 0.32, 0.38];
     pub const SPAWN: [f32; 3] = [1.00, 0.30, 0.36];
 }
 
-/// Height of the buildable ground, so towers and highlights sit flush on it.
-pub const PLOT_TOP: f32 = 0.10;
+/// How many monsters may be on the ring before their models drop to the coarse
+/// build. Above this a wave is a crowd rather than a cast, and the detail is
+/// both invisible and expensive.
+const CROWD: usize = 40;
+
+/// Height of the ground plane. Everything on the board sits flush on it - the
+/// terrain is flat, as it is in the map, and relief comes from what stands on
+/// it rather than from the floor itself.
+pub const GROUND_Z: f32 = 0.10;
+
+/// Kept under its old name: where a tower's plinth starts.
+pub const PLOT_TOP: f32 = GROUND_Z;
 
 /// Cheap deterministic hash, for per-tile variation.
 fn hash2(x: i32, y: i32) -> f32 {
@@ -83,98 +104,160 @@ pub fn build_static(g: &Game, decor: &Decor) -> Statics {
     Statics { casters, flat }
 }
 
+/// The arena: min x, min y, max x, max y in tiles, with a tile of margin so the
+/// wall has something to stand on.
+fn field() -> (i32, i32, i32, i32) {
+    (
+        ARENA[0] as i32,
+        ARENA[1] as i32,
+        ARENA[2] as i32,
+        ARENA[3] as i32,
+    )
+}
+
 fn terrain(g: &Game, d: &mut DrawList, tall: &mut DrawList) {
-    // Which tiles are build plots - they get a flat, obviously regular surface.
-    let mut plot = vec![false; (BW * BH) as usize];
+    let (x0, y0, x1, y1) = field();
+
+    // Which tiles are plots. In this map that is every tile of the arena that
+    // is not corridor, so the grid is a seam in the turf rather than a field of
+    // sockets - the map has no sockets, it has grass.
+    let mut plot = vec![false; MAP_W * MAP_H];
     for s in &g.board.slots {
         let tx = s.pos[0].floor() as usize;
         let ty = s.pos[1].floor() as usize;
-        plot[ty * BW as usize + tx] = true;
+        plot[ty * MAP_W + tx] = true;
     }
 
-    for ty in 0..BH as i32 {
-        for tx in 0..BW as i32 {
-            let p = [tx as f32 + 0.5, ty as f32 + 0.5];
-            if g.board.dist_to_road(p) < ROAD_HALF + 0.30 {
-                continue; // the road covers this ground
-            }
-            let is_plot = plot[(ty * BW as i32 + tx) as usize];
-            let h = hash2(tx, ty);
+    // One flat plane under everything, so no gap between tiles can ever show
+    // the sky through the floor.
+    let (l, b0, r, t) = (x0 as f32, y0 as f32, x1 as f32 + 1.0, y1 as f32 + 1.0);
+    d.slab_mat(
+        [(l + r) * 0.5, (b0 + t) * 0.5],
+        [r - l, t - b0],
+        GROUND_Z - 0.02,
+        0.5,
+        rgba(theme::GRASS_EDGE, 1.0),
+        Material::EARTH,
+    );
 
-            if is_plot {
-                // Apron, then a kerb ring, then a recessed socket floor. The
-                // socket is the darkest thing on the board so an empty plot
-                // reads as "unfilled", never as clutter.
-                d.slab_mat(
-                    p,
-                    [1.0, 1.0],
-                    PLOT_TOP,
-                    PLOT_TOP + 0.44,
-                    rgba(theme::PAD_EARTH, 1.0),
-                    Material::EARTH,
-                );
-                for (dx, dy, sx, sy) in [
-                    (0.0, 0.455, 1.0, 0.09),
-                    (0.0, -0.455, 1.0, 0.09),
-                    (0.455, 0.0, 0.09, 1.0),
-                    (-0.455, 0.0, 0.09, 1.0),
-                ] {
-                    d.cube_mat(
-                        [p[0] + dx, p[1] + dy, PLOT_TOP + 0.03],
-                        [sx, sy, 0.12],
-                        0.0,
-                        rgba(theme::PAD_KERB, 1.0),
-                        Material::STONE,
-                    );
-                }
-                d.slab_mat(
-                    p,
-                    [0.86, 0.86],
-                    PLOT_TOP - 0.05,
-                    0.10,
-                    rgba(theme::PAD_SOIL, 1.0),
-                    Material::EARTH,
-                );
+    for ty in y0..=y1 {
+        for tx in x0..=x1 {
+            let p = [tx as f32 + 0.5, ty as f32 + 0.5];
+            let h = hash2(tx, ty);
+            let corridor = board::is_corridor(tx, ty);
+
+            // Terrain is drawn as **flat quads**, not as boxes.
+            //
+            // The box mesh is chamfered by twelve percent on every edge - which
+            // is right for a crate and wrong for a floor. Fifteen hundred of
+            // them side by side gave the field a quilted, corduroy surface with
+            // a bright bevel around every single tile, and that, more than any
+            // colour, is what stopped the board reading as ground.
+            let (z, base) = if corridor {
+                (
+                    GROUND_Z - 0.012,
+                    mix(theme::ROAD, theme::ROAD_EDGE, h * 0.55),
+                )
             } else {
-                // Wild ground: gentle height steps so the field has relief, and
-                // a few tufts so the turf is not a flat plane of one colour.
-                let top = 0.09 + (h * 3.0).floor() * 0.024;
-                let base = mix(theme::GRASS_A, theme::GRASS_B, h);
-                d.slab_mat(
-                    p,
-                    [1.0, 1.0],
-                    top,
-                    top + 0.45,
-                    rgba(base, 1.0),
-                    Material::EARTH,
-                );
-                if h > 0.80 {
-                    let j = hash2(tx * 7 + 3, ty * 11 + 5);
-                    tall.shape(
-                        Shape::Cone,
-                        [p[0] + (j - 0.5) * 0.5, p[1] + (h - 0.5) * 0.5, top + 0.09],
-                        [0.30, 0.30, 0.22],
-                        j * 6.0,
-                        0.12,
-                        rgba(mix(theme::GRASS_A, theme::GRASS_EDGE, j), 1.0),
-                        Material::FOLIAGE,
+                // Turf in patches rather than per-tile noise. White noise on a
+                // grid reads as graph paper; a low-frequency blend reads as a
+                // field, which is what Warcraft III's tilesets do with four
+                // variants of one texture.
+                let patch = (hash2(tx / 3, ty / 3) * 0.72 + h * 0.28).clamp(0.0, 1.0);
+                let c = if patch < 0.45 {
+                    mix(theme::GRASS_A, theme::GRASS_B, patch / 0.45)
+                } else {
+                    mix(theme::GRASS_B, theme::GRASS_EDGE, (patch - 0.45) / 0.55)
+                };
+                (GROUND_Z, c)
+            };
+            d.shape(
+                Shape::Quad,
+                [p[0], p[1], z],
+                [1.0, 1.0, 1.0],
+                0.0,
+                0.0,
+                rgba(base, 1.0),
+                Material::EARTH,
+                0.0,
+            );
+
+            // The edge where turf meets corridor, and only there: a couple of
+            // hundred strips rather than a bevel on every tile in the field.
+            if corridor {
+                for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                    if board::is_corridor(tx + dx, ty + dy) {
+                        continue;
+                    }
+                    d.shape(
+                        Shape::Quad,
+                        [p[0] + dx as f32 * 0.44, p[1] + dy as f32 * 0.44, z + 0.004],
+                        [
+                            if dx == 0 { 1.0 } else { 0.14 },
+                            if dy == 0 { 1.0 } else { 0.14 },
+                            1.0,
+                        ],
+                        0.0,
+                        0.0,
+                        rgba(theme::ROAD_EDGE, 1.0),
+                        Material::EARTH,
                         0.0,
                     );
                 }
+                continue;
+            }
+
+            if plot[ty as usize * MAP_W + tx as usize] {
+                // A seam on two sides only, so neighbouring plots share one
+                // line. Barely darker than the turf: a bright line turns the
+                // field into graph paper.
+                for (dx, dy, sx, sy) in [(0.0, 0.5, 1.0, 0.035), (0.5, 0.0, 0.035, 1.0)] {
+                    d.shape(
+                        Shape::Quad,
+                        [p[0] + dx, p[1] + dy, GROUND_Z + 0.003],
+                        [sx, sy, 1.0],
+                        0.0,
+                        0.0,
+                        rgba(mix(base, theme::PAD_KERB, 0.6), 0.55),
+                        Material::EARTH,
+                        0.0,
+                    );
+                }
+            }
+            // Tufts, so the turf is not a flat plane of one colour.
+            if h > 0.90 {
+                let j = hash2(tx * 7 + 3, ty * 11 + 5);
+                tall.shape(
+                    Shape::Cone,
+                    [
+                        p[0] + (j - 0.5) * 0.5,
+                        p[1] + (h - 0.5) * 0.5,
+                        GROUND_Z + 0.08,
+                    ],
+                    [0.32, 0.32, 0.24],
+                    j * 6.0,
+                    0.10,
+                    rgba(mix(theme::GRASS_A, theme::GRASS_EDGE, j), 1.0),
+                    Material::FOLIAGE,
+                    0.0,
+                );
             }
         }
     }
 
     // A low wall around the plot, so the board reads as a solid object: a
     // rusticated base, a chamfered course, then a rounded coping.
-    let (w, h) = (BW, BH);
+    let (fx0, fy0, fx1, fy1) = field();
+    let (l, b0, r, t) = (fx0 as f32, fy0 as f32, fx1 as f32 + 1.0, fy1 as f32 + 1.0);
+    let (w, h) = (r - l, t - b0);
+    let (mx, my) = ((l + r) * 0.5, (b0 + t) * 0.5);
     let wall = rgba(theme::WALL, 1.0);
     let cap = rgba(theme::STONE, 1.0);
     for (cx, cy, sx, sy) in [
-        (w * 0.5, -0.4, w + 1.6, 0.8),
-        (w * 0.5, h + 0.4, w + 1.6, 0.8),
-        (-0.4, h * 0.5, 0.8, h + 1.6),
-        (w + 0.4, h * 0.5, 0.8, h + 1.6),
+        (mx, b0 - 0.4, w + 1.6, 0.8),
+        (mx, t + 0.4, w + 1.6, 0.8),
+        (l - 0.4, my, 0.8, h + 1.6),
+        (r + 0.4, my, 0.8, h + 1.6),
     ] {
         tall.cube_mat([cx, cy, 0.20], [sx, sy, 0.56], 0.0, wall, Material::STONE);
         tall.cube_mat(
@@ -204,10 +287,10 @@ fn terrain(g: &Game, d: &mut DrawList, tall: &mut DrawList) {
     // Corner towers: a stone drum with a conical roof, so the board has corners
     // you can actually see rather than four more cubes.
     for (cx, cy) in [
-        (-0.4, -0.4),
-        (w + 0.4, -0.4),
-        (-0.4, h + 0.4),
-        (w + 0.4, h + 0.4),
+        (l - 0.4, b0 - 0.4),
+        (r + 0.4, b0 - 0.4),
+        (l - 0.4, t + 0.4),
+        (r + 0.4, t + 0.4),
     ] {
         tall.cylinder(
             [cx, cy, 0.45],
@@ -383,10 +466,12 @@ pub fn draw_scene(g: &Game, decor: &Decor, d: &mut DrawList, t: f32) {
     for (i, tw) in g.towers.iter().enumerate() {
         towers::draw(d, tw, g.selected == Some(i), g.time);
     }
+    // Fine detail while the ring is thin enough for it to be seen, and dropped
+    // once a wave fills the corridor - see `monsters::draw`.
+    let detail = g.creeps.len() <= CROWD;
     for c in &g.creeps {
-        monsters::draw(d, c);
+        monsters::draw(d, c, detail);
     }
-    zones(g, d, t);
     shots(g, d);
     beams(g, d);
     build_ghost(g, d, t);
@@ -466,7 +551,7 @@ fn chevrons(g: &Game, d: &mut DrawList, t: f32) {
 /// Build plots are part of the static terrain, so all that is drawn here is the
 /// state: which are free while you hold a tower, and which one you are pointing at.
 fn plots(g: &Game, d: &mut DrawList, t: f32) {
-    let Some((def_i, tier)) = g.build_choice else {
+    let Some((def_i, _)) = g.build_choice else {
         // Idle: the grid stays dark. Only the plot under the cursor answers.
         if let Some(i) = g.hover_slot {
             if let Some(s) = g.board.slots.get(i) {
@@ -480,7 +565,7 @@ fn plots(g: &Game, d: &mut DrawList, t: f32) {
 
     // Only plots you can actually afford light up. As gold drains, fewer plots
     // are lit - the board tells you what you can do without saying a word.
-    let affordable = g.can_afford(TOWERS[def_i].cost_at(tier));
+    let affordable = g.can_afford(TOWERS[def_i].gold);
     let pulse = 0.5 + 0.5 * (t * 2.2).sin();
 
     for (i, s) in g.board.slots.iter().enumerate() {
@@ -552,19 +637,19 @@ fn outline(d: &mut DrawList, p: [f32; 2], col: Color, w: f32) {
 }
 
 fn build_ghost(g: &Game, d: &mut DrawList, t: f32) {
-    let (Some((def_i, tier)), Some(slot)) = (g.build_choice, g.hover_slot) else {
+    let (Some((def_i, _)), Some(slot)) = (g.build_choice, g.hover_slot) else {
         return;
     };
     let Some(s) = g.board.slots.get(slot) else {
         return;
     };
     let def = &TOWERS[def_i];
-    let ok = s.tower.is_none() && g.can_afford(def.cost_at(tier));
+    let ok = s.tower.is_none() && g.can_afford(def.gold);
     let p = s.pos;
     let pulse = 0.55 + 0.25 * (t * 5.0).sin();
 
     if ok {
-        towers::draw_ghost(d, def_i, tier, p, t);
+        towers::draw_ghost(d, def_i, p, t);
         d.ground_ring(
             p,
             TOWERS[def_i].range,
@@ -582,72 +667,6 @@ fn build_ghost(g: &Game, d: &mut DrawList, t: f32) {
                 0.9,
             );
         }
-    }
-}
-
-/// Ground claimed by a zone tower - Magma's fire, Mire's swamp.
-///
-/// It has to read as *ground you do not want to walk on* from across the board,
-/// because its whole value is positional - so it gets a hard-edged scorch ring,
-/// a bed of embers and flames that lean, rather than a soft glow that could be
-/// mistaken for a range indicator.
-fn zones(g: &Game, d: &mut DrawList, t: f32) {
-    for z in &g.zones {
-        let fade = (z.life / z.max_life.max(0.01)).clamp(0.0, 1.0);
-        // Dies down rather than blinking out.
-        let heat = (fade * 1.6).min(1.0);
-        let col = mix([1.0, 0.35, 0.10], [1.0, 0.86, 0.42], heat * 0.5);
-
-        d.ground_ring(z.pos, z.radius, 0.10, rgba(col, 0.45 + 0.35 * heat), 28);
-        // Embers: a scatter of small hot discs on the road itself.
-        let n = (z.radius * 9.0) as i32;
-        for i in 0..n {
-            let a = i as f32 * 2.399 + z.pos[0];
-            let rr = z.radius * (0.15 + 0.75 * ((i * 7 % 11) as f32 / 11.0));
-            let p = [z.pos[0] + a.cos() * rr, z.pos[1] + a.sin() * rr];
-            let flick = ((t * 5.0 + i as f32 * 1.3).sin() * 0.5 + 0.5) * heat;
-            d.shape(
-                Shape::Quad,
-                [p[0], p[1], 0.21],
-                [0.30, 0.30, 1.0],
-                a,
-                0.0,
-                rgba(mix([0.35, 0.10, 0.04], col, flick), 0.55 + 0.4 * flick),
-                Material::EARTH,
-                0.7 * flick,
-            );
-        }
-        // Flames, leaning as they rise.
-        let flames = (z.radius * 5.0) as i32;
-        for i in 0..flames {
-            let a = i as f32 * 1.9 + t * 0.6;
-            let rr = z.radius * 0.62 * ((i % 3) as f32 / 3.0 + 0.35);
-            let wob = (t * 6.0 + i as f32 * 2.1).sin();
-            let h = (0.35 + 0.28 * (wob * 0.5 + 0.5)) * heat;
-            if h < 0.05 {
-                continue;
-            }
-            d.shape(
-                Shape::Cone,
-                [
-                    z.pos[0] + a.cos() * rr,
-                    z.pos[1] + a.sin() * rr,
-                    0.22 + h * 0.5,
-                ],
-                [0.26, 0.26, h],
-                a,
-                wob * 0.16,
-                rgba(col, 1.0),
-                Material::GEM,
-                1.0,
-            );
-        }
-        d.glow(
-            [z.pos[0], z.pos[1], 0.45],
-            z.radius * 2.2,
-            1.9,
-            rgba(col, 0.30 * heat),
-        );
     }
 }
 
@@ -770,22 +789,13 @@ mod tests {
     #[test]
     fn no_tower_is_just_a_pile_of_boxes() {
         let (mut g, _) = fresh();
-        g.gold = 5_000_000;
+        g.gold = 500_000_000;
+        // There are more towers in the roster than pads on the board, so each
+        // is built on the same pad, drawn, and sold again.
         for i in 0..TOWERS.len() {
-            let slot = g
-                .board
-                .slots
-                .iter()
-                .position(|s| s.tower.is_none())
-                .expect("a free pad");
-            // Every tower has to be buildable for this to draw it at all.
-            g.essence = [(MAX_TIER - FREE_TIERS) as u8; 6];
-            g.pending_draft = None;
-            // Tiers are 1-based; walk the whole ladder so every level is drawn.
-            let tier = (i as u32 % MAX_TIER) + 1;
-            g.build_choice = Some((i, tier));
-            assert!(g.try_build(slot), "could not build {}", TOWERS[i].id);
-            let tw = g.towers.last().unwrap().clone();
+            g.build_choice = Some((i, 1));
+            assert!(g.try_build(0), "could not build {}", TOWERS[i].name);
+            let tw = g.towers[0].clone();
 
             let mut d = DrawList::default();
             towers::draw(&mut d, &tw, false, 3.0);
@@ -794,20 +804,21 @@ mod tests {
             assert!(
                 used >= 3,
                 "{} uses only {used} primitive(s) - that is a box, not a model",
-                TOWERS[i].id
+                TOWERS[i].name
             );
             let boxes = d.solid[Shape::Box as usize].len();
             let total = d.solid_count();
             assert!(
                 boxes * 2 <= total,
                 "{} is {boxes}/{total} boxes",
-                TOWERS[i].id
+                TOWERS[i].name
             );
+            g.sell(0);
         }
         g.build_choice = None;
     }
 
-    fn dummy(kind: Kind) -> Creep {
+    fn dummy(model: Model, flying: bool) -> Creep {
         Creep {
             laps: 0,
             suppress: 0.0,
@@ -821,9 +832,11 @@ mod tests {
             hp: 60.0,
             max_hp: 100.0,
             base_speed: 1.0,
-            armor: Armor::Unarmoured,
-            kind,
-            radius: kind.radius(),
+            armour: 10,
+            armour_type: ArmourType::Unarmoured,
+            model,
+            flying,
+            radius: model.radius(),
             bounty: 5,
             slow: Timed::default(),
             burn: Timed::default(),
@@ -832,44 +845,35 @@ mod tests {
             stun: 0.0,
             stun_dr: 0.0,
             kb_cd: 0.0,
-            regen: 0.0,
-            splits: 0,
-            shield: 40.0,
-            max_shield: 80.0,
-            heal: 0.0,
-            phasing: false,
-            slow_off: false,
             flash: 0.0,
             bob: 1.3,
         }
     }
 
-    /// Silhouette is what tells two monsters apart at gameplay zoom, so no two
-    /// kinds may be assembled from the same primitives in the same amounts.
+    /// Every model the map actually uses has to be a *model*: several kinds of
+    /// primitive, assembled into something. A silhouette that is one sphere is
+    /// a placeholder, and this is the test that says so.
     #[test]
-    fn every_monster_has_its_own_silhouette() {
-        let kinds = [
-            Kind::Grunt,
-            Kind::Runner,
-            Kind::Brute,
-            Kind::Swarm,
-            Kind::Warden,
-            Kind::Mender,
-            Kind::Bulwark,
-            Kind::Phaser,
-            Kind::Boss,
-        ];
-        let mut prints: Vec<(Kind, Vec<usize>)> = Vec::new();
-        for k in kinds {
-            let c = dummy(k);
+    fn every_model_is_actually_built() {
+        for m in models_in_use() {
+            let c = dummy(m, m.airborne());
             let mut d = DrawList::default();
-            monsters::draw(&mut d, &c);
-            let counts: Vec<usize> = (0..SHAPE_COUNT).map(|i| d.solid[i].len()).collect();
-            assert!(
-                counts.iter().sum::<usize>() >= 5,
-                "{k:?} is too simple to read as a creature"
-            );
-            prints.push((k, counts));
+            monsters::draw(&mut d, &c, true);
+            let n: usize = (0..SHAPE_COUNT).map(|i| d.solid[i].len()).sum();
+            assert!(n >= 5, "{m:?} is too simple to read as anything");
+        }
+    }
+
+    /// Silhouette is what tells two things apart at gameplay zoom, so no two
+    /// models may be assembled from the same primitives in the same amounts.
+    #[test]
+    fn every_model_has_its_own_silhouette() {
+        let mut prints: Vec<(Model, Vec<usize>)> = Vec::new();
+        for m in models_in_use() {
+            let c = dummy(m, m.airborne());
+            let mut d = DrawList::default();
+            monsters::draw(&mut d, &c, true);
+            prints.push((m, (0..SHAPE_COUNT).map(|i| d.solid[i].len()).collect()));
         }
         for a in 0..prints.len() {
             for b in a + 1..prints.len() {
@@ -880,6 +884,22 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Every model referenced by the map's own data, towers and creeps alike.
+    fn models_in_use() -> Vec<Model> {
+        let mut v: Vec<Model> = Vec::new();
+        for t in TOWERS {
+            if !v.contains(&t.model) {
+                v.push(t.model);
+            }
+        }
+        for w in WAVES {
+            if !v.contains(&w.model) {
+                v.push(w.model);
+            }
+        }
+        v
     }
 }
 
@@ -916,7 +936,7 @@ mod budget {
         // A late-game board: every pad filled and maxed, a full wave on the road.
         g.gold = 50_000_000;
         for slot in 0..g.board.slots.len() {
-            g.build_choice = Some((slot % TOWERS.len(), MAX_TIER));
+            g.build_choice = Some((slot % TOWERS.len(), 1));
             g.try_build(slot);
         }
         g.build_choice = None;
@@ -934,7 +954,7 @@ mod budget {
 
         d.clear();
         for c in &g.creeps {
-            monsters::draw(&mut d, c);
+            monsters::draw(&mut d, c, true);
         }
         let (mn, mt) = cost(&d);
         println!("MONSTERS {mn:>6} inst  {mt:>8} tris");

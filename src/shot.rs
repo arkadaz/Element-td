@@ -22,17 +22,21 @@ use crate::game::Game;
 use crate::game::board::{BH, BW};
 use crate::gfx::draw::DrawList;
 use crate::gfx::{Quality, Renderer};
-use crate::math::{Camera, shadow_view_proj};
+use crate::math::{Rig, shadow_view_proj};
 use crate::view;
 
 /// Matches the live app, so a capture frames the board the way play does.
 const CAM_PITCH_DEG: f32 = crate::CAM_PITCH_DEG;
-/// Overridable so the framing can be swept and measured rather than eyeballed.
-fn cam_zoom() -> f32 {
-    std::env::var("TD_ZOOM")
+/// How many tiles of board a capture takes in.
+///
+/// Overridable so the framing can be swept and measured rather than eyeballed;
+/// there is nobody at the keyboard to scroll, so a capture takes the zoom play
+/// opens on and looks at the middle of the arena.
+fn cam_span() -> f32 {
+    std::env::var("TD_SPAN")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(crate::CAM_ZOOM)
+        .unwrap_or(crate::CAM_SPAN)
 }
 const LIGHT_DIR: [f32; 3] = [-0.42, -0.62, 0.66];
 
@@ -185,14 +189,12 @@ pub fn capture(game: &Game, decor: &Decor, width: u32, height: u32, quality: Qua
             let mut list = DrawList::default();
             view::draw_scene(game, decor, &mut list, game.time);
 
-            let camera = Camera::frame_board(
-                BW,
-                BH,
+            let rig = Rig::new(
                 width as f32 / height.max(1) as f32,
                 CAM_PITCH_DEG.to_radians(),
-                0.0,
-                cam_zoom(),
+                crate::CAM_YAW_DEG.to_radians(),
             );
+            let camera = rig.camera(crate::lane_middle(), cam_span());
             let light = shadow_view_proj(BW, BH, LIGHT_DIR);
 
             // Two frames: the particle ring and the effects buffer both carry state

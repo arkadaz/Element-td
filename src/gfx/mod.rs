@@ -31,7 +31,7 @@ use bytemuck::{Pod, Zeroable};
 use draw::{DrawList, Instance};
 
 use crate::game::fx::ParticleSpawn;
-use crate::math::{Camera, Mat4};
+use crate::math::{Camera, Mat4, v3};
 use mesh::{SHAPE_COUNT, Span};
 
 pub const STATIC_CAP: usize = 24_576;
@@ -178,6 +178,8 @@ struct PostU {
     dir: [f32; 2],
     texel: [f32; 2],
     params: [f32; 4],
+    /// xy = where the key light's bearing lands in composite UV, zw unused.
+    sun: [f32; 4],
 }
 
 #[repr(C)]
@@ -708,8 +710,14 @@ impl Renderer {
             glow_count: 0,
             live_particles: 0,
             quality,
-            bloom_strength: 0.72,
-            bloom_threshold: 0.78,
+            // Nothing in the palette is a bright albedo - the brightest stone
+            // is 0.23 and lit grass lands near 0.12 of scene radiance - so the
+            // threshold sits above anything the sun alone can produce and only
+            // emissives, glow sprites and a specular glint off metal clear it.
+            // A threshold low enough to catch lit ground is what turns a green
+            // field into a grey-green haze.
+            bloom_strength: 0.85,
+            bloom_threshold: 0.90,
             particle_drag: 2.4,
             particle_gravity: -3.2,
             light_dir: [-0.40, -0.52, 0.76],
@@ -1092,7 +1100,30 @@ impl Renderer {
         });
     }
 
-    fn write_post_uniforms(&self, queue: &wgpu::Queue, bw: f32, bh: f32) {
+    /// Where the key light's bearing lands in the composite's UV space, for the
+    /// backdrop's warm glow to sit on.
+    ///
+    /// Only the bearing survives the trip, not a position. At the pitch this
+    /// game is played at the whole frame sits below the horizon and the sun is
+    /// behind the viewer, so there is no screen point to put a sun at; what the
+    /// backdrop can honestly show is which side the light arrives from, which
+    /// is the light direction resolved onto the camera's own right and up axes.
+    fn sun_bearing_uv(camera: &Camera, light_dir: [f32; 3]) -> [f32; 2] {
+        let l = v3(light_dir[0], light_dir[1], light_dir[2]).norm();
+        let x = l.dot(camera.right);
+        let y = l.dot(camera.up);
+        let n = (x * x + y * y).sqrt().max(1e-4);
+        // Pushed to the frame edge, not clear of it. At the yaw the game is
+        // played at the bearing is almost entirely camera-right, so this lands
+        // the centre just past the right border - uv 1.03 at the shipping
+        // framing - and the top corner nearest the light is the brightest part
+        // of the backdrop. That is the intent: warmth on the lit side, spread
+        // over a corner rather than gathered into a disc, because a disc would
+        // be a sun drawn below the horizon.
+        [0.5 + x / n * 0.55, 0.30 - y / n * 0.30]
+    }
+
+    fn write_post_uniforms(&self, queue: &wgpu::Queue, camera: &Camera, bw: f32, bh: f32) {
         let srgb = if self.srgb_encode { 1.0 } else { 0.0 };
         let strength = if self.quality.bloom() {
             self.bloom_strength
@@ -1101,6 +1132,7 @@ impl Renderer {
         };
         let common = [self.bloom_threshold, strength, srgb, 0.0];
         let texel = [1.0 / bw, 1.0 / bh];
+        let bearing = Self::sun_bearing_uv(camera, self.light_dir);
         for (buf, dir) in [
             (&self.post_bright, [0.0, 0.0]),
             (&self.post_blur_h, [1.0 / bw, 0.0]),
@@ -1114,6 +1146,7 @@ impl Renderer {
                     dir,
                     texel,
                     params: common,
+                    sun: [bearing[0], bearing[1], 0.0, 0.0],
                 }),
             );
         }
@@ -1168,6 +1201,7 @@ impl Renderer {
         );
         self.write_post_uniforms(
             queue,
+            camera,
             (rw / BLOOM_DIV).max(4) as f32,
             (rh / BLOOM_DIV).max(4) as f32,
         );

@@ -34,11 +34,6 @@ fn lay_out_page(size: [f32; 2], page: usize) -> Layout {
     ui::install_style(&ctx);
 
     let mut game = Game::new();
-    // The palette only shows what the draft has unlocked, so a fresh game lays
-    // out zero cards. This test is about geometry, not about the draft, so it
-    // unlocks the lot - which is also the worst case for fitting them in.
-    game.essence = [6; 6];
-    game.pending_draft = None;
     let mut ust = UiState::default();
     ust.compact = ui::compact_for(size[0]);
     ust.palette_page = page;
@@ -254,7 +249,7 @@ fn every_build_card_is_inside_its_panel() {
         // so the palette pages. What must hold is that every tower is reachable
         // on *some* page - a card that is merely dropped is a tower that cannot
         // be built at all.
-        let total = crate::game::defs::TOWERS.len();
+        let total = crate::game::defs::shop_order().len();
         let mut reached: Vec<usize> = Vec::new();
         for page in 0..total {
             let l = lay_out_page(size, page);
@@ -384,17 +379,19 @@ fn labels_too_wide_for_their_box_are_shortened_not_cut() {
                     .width()
             };
 
-            // Every role on every build card, at the narrowest a card can get.
+            // Every name on every build card, at the narrowest a card can get.
             const MIN_CARD: f32 = 46.0 - 6.0;
             for d in crate::game::defs::TOWERS {
-                let short = ui::elide(ui, d.role, &font, MIN_CARD);
-                assert!(
-                    width(&short) <= MIN_CARD,
-                    "{:?} still {:.1}px wide in a {MIN_CARD}px card",
-                    short,
-                    width(&short)
-                );
-                assert!(!short.is_empty(), "{} elided away to nothing", d.role);
+                for label in [d.name, d.family.short(), d.family.role()] {
+                    let short = ui::elide(ui, label, &font, MIN_CARD);
+                    assert!(
+                        width(&short) <= MIN_CARD,
+                        "{:?} still {:.1}px wide in a {MIN_CARD}px card",
+                        short,
+                        width(&short)
+                    );
+                    assert!(!short.is_empty(), "{label} elided away to nothing");
+                }
             }
 
             // A string that already fits is left exactly alone.

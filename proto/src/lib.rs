@@ -187,7 +187,11 @@ mod tests {
             name: format!("p{slot}"),
             ready: true,
             connected: true,
-            snap: Snapshot { wave, alive, ..Default::default() },
+            snap: Snapshot {
+                wave,
+                alive,
+                ..Default::default()
+            },
         };
         let view = RoomView {
             id: "r".into(),

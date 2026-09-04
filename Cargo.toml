@@ -2,10 +2,10 @@
 members = ["proto", "server"]
 
 [package]
-name = "elemental_td"
+name = "green_circle_td"
 version = "0.1.0"
 edition = "2024"
-description = "Elemental TD - a GPU-accelerated element tower defense, in pure Rust"
+description = "Green Circle TD - the Warcraft III map, ported to Rust and wgpu"
 
 [dependencies]
 bytemuck = { version = "1.25.2", features = ["derive"] }

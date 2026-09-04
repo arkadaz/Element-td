@@ -17,19 +17,19 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::game::defs::{ESSENCE_WAVES, MAX_TIER, tier_cap};
 use crate::game::{Game, Phase, TargetMode};
 
 /// Bumped whenever the shape below changes. An older save is discarded rather
 /// than half-read, because a half-restored board is worse than a fresh start.
-const VERSION: u16 = 3;
+const VERSION: u16 = 4;
 
-const KEY: &str = "elemental_td_save_v3";
+const KEY: &str = "green_td_save_v4";
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SavedTower {
+    /// Index into `defs::TOWERS`, which is family *and* level together, so
+    /// nothing else about the tower's position on its path has to be stored.
     pub def: u16,
-    pub tier: u8,
     pub slot: u16,
     pub invested: u32,
     pub kills: u32,
@@ -52,8 +52,6 @@ pub struct Save {
     pub endless: bool,
     /// Essences held, by element index. Without these a resumed run could not
     /// rebuild the board it saved, let alone upgrade it.
-    pub essence: [u8; 6],
-    pub drafts_taken: u16,
     pub kills: u64,
     pub leaked: u32,
     pub gold_earned: u64,
@@ -90,8 +88,6 @@ impl Save {
             gold: g.gold,
             circling: g.creeps.len().min(u16::MAX as usize) as u16,
             endless: g.endless,
-            essence: g.essence,
-            drafts_taken: g.drafts_taken.min(u16::MAX as usize) as u16,
             kills: g.stats.kills,
             leaked: g.stats.leaked,
             gold_earned: g.stats.gold_earned,
@@ -103,7 +99,6 @@ impl Save {
                 .iter()
                 .map(|t| SavedTower {
                     def: t.def as u16,
-                    tier: t.tier as u8,
                     slot: t.slot as u16,
                     invested: t.invested,
                     kills: t.kills,
@@ -122,21 +117,13 @@ impl Save {
             return false;
         }
         let towers = crate::game::defs::TOWERS.len();
-        // A saved tower must be one this build can construct *at the level it
-        // was saved at*, which now depends on the essences saved beside it. A
-        // save claiming a level-8 Bastion with one Light essence describes a
-        // board the game would never have allowed, so it is refused whole.
-        let valid = self.towers.iter().all(|t| {
-            (t.def as usize) < towers
-                && (1..=MAX_TIER).contains(&(t.tier as u32))
-                && (t.slot as usize) < g.board.slots.len()
-                && t.tier as u32
-                    <= tier_cap(&self.essence, &crate::game::defs::TOWERS[t.def as usize])
-        });
-        let essence_sane = self.drafts_taken as usize <= ESSENCE_WAVES.len()
-            && self.essence.iter().map(|&n| n as usize).sum::<usize>()
-                == self.drafts_taken as usize;
-        if !valid || !essence_sane || self.circling as usize > crate::game::FLOOD_LIMIT {
+        // Every tower in the roster can be reached from the shop, so the only
+        // things worth refusing are indices this build does not have.
+        let valid = self
+            .towers
+            .iter()
+            .all(|t| (t.def as usize) < towers && (t.slot as usize) < g.board.slots.len());
+        if !valid || self.circling as usize > crate::game::FLOOD_LIMIT {
             return false;
         }
 
@@ -145,11 +132,6 @@ impl Save {
         g.gold = self.gold;
 
         g.endless = self.endless;
-        // Restored before the towers, because try_build reads the essence pool
-        // to decide whether each one is allowed to exist.
-        g.essence = self.essence;
-        g.drafts_taken = self.drafts_taken as usize;
-        g.pending_draft = None;
         g.stats.kills = self.kills;
         g.stats.leaked = self.leaked;
         g.stats.gold_earned = self.gold_earned;
@@ -164,7 +146,7 @@ impl Save {
             if g.board.slots[slot].tower.is_some() {
                 continue;
             }
-            g.build_choice = Some((t.def as usize, t.tier as u32));
+            g.build_choice = Some((t.def as usize, 1));
             let had = g.gold;
             g.gold = i64::MAX / 4; // the cost was already paid, before the save
             let ok = g.try_build(slot);
@@ -187,18 +169,16 @@ impl Save {
         g.wave_timer = crate::game::WAVE_PERIOD;
         g.prep = false;
         g.phase = Phase::Combat;
-        // A run saved mid-draft comes back owing the same draft.
-        g.offer_draft_if_due();
         true
     }
 
     /// A one-line summary for the menu button.
     pub fn label(&self) -> String {
         format!(
-            "Wave {} · {} towers · {} essences · {} circling",
+            "Wave {} of {} · {} towers · {} circling",
             self.wave,
+            crate::game::defs::CAMPAIGN_WAVES,
             self.towers.len(),
-            self.drafts_taken,
             self.circling
         )
     }
@@ -263,7 +243,7 @@ fn path() -> Option<std::path::PathBuf> {
         .or_else(|| std::env::var_os("HOME"))?;
     Some(
         std::path::PathBuf::from(base)
-            .join("elemental_td")
+            .join("green_circle_td")
             .join("save.json"),
     )
 }
@@ -285,28 +265,26 @@ fn read() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::game::defs::TOWERS;
 
     fn played_game() -> Game {
         let mut g = Game::new();
-        g.gold = 500_000;
-        // A lopsided pool: deep in two elements, thin in two more, none at
-        // all in the last two - so the fixture exercises the essence ceiling
-        // rather than a board where everything happens to be legal.
-        g.essence = [4, 4, 2, 2, 0, 0];
-        g.drafts_taken = 12;
+        g.gold = 5_000_000;
+        // Every shop root, each pushed a few steps up its own path, so the
+        // fixture covers forks as well as straight ladders.
+        let shop = crate::game::defs::shop_order();
         for (n, slot) in (0..g.board.slots.len()).step_by(3).enumerate().take(12) {
-            let def = n % TOWERS.len();
-            if !g.unlocked(def) {
-                continue;
-            }
+            let def = shop[n % shop.len()];
             g.build_choice = Some((def, 1));
             if g.try_build(slot) {
                 let ti = g.towers.len() - 1;
-                while g.towers[ti].tier < 5 {
-                    let before = g.towers[ti].tier;
-                    g.upgrade(ti);
-                    if g.towers[ti].tier == before {
+                for _ in 0..4 {
+                    let before = g.towers[ti].def;
+                    let choices = g.upgrade_choices(ti);
+                    match choices.first() {
+                        Some(&(into, _)) => g.upgrade_into(ti, into),
+                        None => break,
+                    }
+                    if g.towers[ti].def == before {
                         break;
                     }
                 }
@@ -345,23 +323,10 @@ mod tests {
             "the seed is what makes the waves match"
         );
         assert_eq!(after.stats.kills, before.stats.kills);
-        assert_eq!(
-            after.essence, before.essence,
-            "a resumed run lost its essences"
-        );
-        assert_eq!(after.drafts_taken, before.drafts_taken);
         assert_eq!(after.towers.len(), before.towers.len());
 
-        let mut a: Vec<_> = after
-            .towers
-            .iter()
-            .map(|t| (t.slot, t.def, t.tier))
-            .collect();
-        let mut b: Vec<_> = before
-            .towers
-            .iter()
-            .map(|t| (t.slot, t.def, t.tier))
-            .collect();
+        let mut a: Vec<_> = after.towers.iter().map(|t| (t.slot, t.def)).collect();
+        let mut b: Vec<_> = before.towers.iter().map(|t| (t.slot, t.def)).collect();
         a.sort_unstable();
         b.sort_unstable();
         assert_eq!(a, b, "the restored board is not the board that was saved");
@@ -377,7 +342,7 @@ mod tests {
         }
 
         // And the next wave must be the same one the saved run was facing.
-        assert_eq!(after.next_wave_def().kind, before.next_wave_def().kind);
+        assert_eq!(after.next_wave_def().name, before.next_wave_def().name);
     }
 
     /// A save is a file on disk that anyone can edit. It must never be able to
@@ -390,13 +355,7 @@ mod tests {
         for break_it in [
             (|s: &mut Save| s.version = 999) as fn(&mut Save),
             |s: &mut Save| s.towers[0].def = 9_999,
-            |s: &mut Save| s.towers[0].tier = 0,
-            |s: &mut Save| s.towers[0].tier = 99,
             |s: &mut Save| s.towers[0].slot = 60_000,
-            // Essences that could not have built this board.
-            |s: &mut Save| s.essence = [0; 6],
-            // A pool whose total does not match the number of drafts taken.
-            |s: &mut Save| s.drafts_taken = 99,
             // More monsters circling than the ring can hold: a board that
             // had already lost.
             |s: &mut Save| s.circling = u16::MAX,

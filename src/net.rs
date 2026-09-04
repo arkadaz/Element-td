@@ -9,7 +9,7 @@
 //! when something in it actually changed, so eight idle players cost nothing.
 
 use ewebsock::{WsEvent, WsMessage, WsReceiver, WsSender};
-use td_proto::{ClientMsg, PROTOCOL, RoomView, ServerMsg, Snapshot, encode, decode};
+use td_proto::{ClientMsg, PROTOCOL, RoomView, ServerMsg, Snapshot, decode, encode};
 
 /// How often a snapshot may leave the client, at most.
 const PUSH_HZ: f32 = 2.0;
@@ -88,7 +88,11 @@ impl Net {
                 let proto = w.location().protocol().unwrap_or_default();
                 let host = w.location().host().unwrap_or_default();
                 if !host.is_empty() {
-                    let scheme = if proto.starts_with("https") { "wss" } else { "ws" };
+                    let scheme = if proto.starts_with("https") {
+                        "wss"
+                    } else {
+                        "ws"
+                    };
                     return format!("{scheme}://{host}/ws");
                 }
             }
@@ -213,7 +217,9 @@ impl Net {
     pub fn poll(&mut self) -> Option<Event> {
         let mut out = None;
         loop {
-            let Some(rx) = self.receiver.as_ref() else { break };
+            let Some(rx) = self.receiver.as_ref() else {
+                break;
+            };
             let Some(ev) = rx.try_recv() else { break };
             match ev {
                 WsEvent::Opened => {
@@ -324,7 +330,10 @@ mod tests {
     fn an_unreachable_server_fails_instead_of_hanging() {
         let mut n = Net::default();
         n.create("", "Ark", "pw", 0);
-        assert!(matches!(n.status, Status::Failed(_)), "empty address must fail");
+        assert!(
+            matches!(n.status, Status::Failed(_)),
+            "empty address must fail"
+        );
     }
 
     #[test]
@@ -332,7 +341,10 @@ mod tests {
         let long = format!("boom\nstack trace\n{}", "x".repeat(400));
         let s = short_error(&long);
         assert_eq!(s, "boom");
-        assert!(short_error("").len() > 0, "an empty error still needs words");
+        assert!(
+            short_error("").len() > 0,
+            "an empty error still needs words"
+        );
         assert!(short_error(&"y".repeat(500)).len() <= 90);
     }
 
@@ -340,11 +352,20 @@ mod tests {
     fn snapshots_are_rate_limited_and_deduplicated() {
         let mut n = Net::default();
         // Offline clients never push, whatever happens.
-        n.push(Snapshot { wave: 3, ..Default::default() }, 1.0);
+        n.push(
+            Snapshot {
+                wave: 3,
+                ..Default::default()
+            },
+            1.0,
+        );
         assert_eq!(n.last_sent, Snapshot::default());
 
         n.status = Status::Playing;
-        let snap = Snapshot { wave: 3, ..Default::default() };
+        let snap = Snapshot {
+            wave: 3,
+            ..Default::default()
+        };
         n.push(snap, 0.0);
         assert_eq!(n.last_sent, snap, "the first change goes out immediately");
 
@@ -353,7 +374,10 @@ mod tests {
         assert_eq!(n.last_sent, snap);
 
         // A new line, but too soon after the last one.
-        let next = Snapshot { wave: 4, ..Default::default() };
+        let next = Snapshot {
+            wave: 4,
+            ..Default::default()
+        };
         n.push(next, 0.1);
         assert_eq!(n.last_sent, snap, "pushes must respect the rate limit");
 
@@ -363,10 +387,19 @@ mod tests {
 
         // Idle time must not bank credit for a later burst.
         n.push(next, 3600.0);
-        let a = Snapshot { wave: 5, ..Default::default() };
-        let b = Snapshot { wave: 6, ..Default::default() };
+        let a = Snapshot {
+            wave: 5,
+            ..Default::default()
+        };
+        let b = Snapshot {
+            wave: 6,
+            ..Default::default()
+        };
         n.push(a, 0.0);
         n.push(b, 0.0);
-        assert_eq!(n.last_sent, a, "an hour of quiet does not buy two sends at once");
+        assert_eq!(
+            n.last_sent, a,
+            "an hour of quiet does not buy two sends at once"
+        );
     }
 }

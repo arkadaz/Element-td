@@ -16,18 +16,18 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::Router;
 use axum::extract::State;
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::response::IntoResponse;
 use axum::routing::get;
-use axum::Router;
 use futures_util::{SinkExt, StreamExt};
 use rand::Rng;
 use sha2::{Digest, Sha256};
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::{Mutex, broadcast};
 use tower_http::compression::CompressionLayer;
-use tower_layer::Layer;
 use tower_http::services::{ServeDir, ServeFile};
+use tower_layer::Layer;
 
 use td_proto::{
     ClientMsg, MAX_FRAME, MAX_PASSWORD, MAX_PLAYERS, MAX_ROOM_ID, PROTOCOL, PlayerView, RoomView,
@@ -117,8 +117,22 @@ fn new_room_id(rng: &mut impl Rng) -> String {
     let b: [u8; 16] = rng.random();
     format!(
         "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-4{:01x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        b[0], b[1], b[2], b[3], b[4], b[5], b[6] & 0x0f, b[7],
-        (b[8] & 0x3f) | 0x80, b[9], b[10], b[11], b[12], b[13], b[14], b[15]
+        b[0],
+        b[1],
+        b[2],
+        b[3],
+        b[4],
+        b[5],
+        b[6] & 0x0f,
+        b[7],
+        (b[8] & 0x3f) | 0x80,
+        b[9],
+        b[10],
+        b[11],
+        b[12],
+        b[13],
+        b[14],
+        b[15]
     )
 }
 
@@ -128,7 +142,9 @@ async fn main() {
         .ok()
         .and_then(|p| p.parse().ok())
         .unwrap_or(8787);
-    let state = AppState { rooms: Arc::new(Mutex::new(HashMap::new())) };
+    let state = AppState {
+        rooms: Arc::new(Mutex::new(HashMap::new())),
+    };
     spawn_reaper(&state);
     let app = router(state);
 
@@ -251,7 +267,9 @@ async fn serve_client(socket: WebSocket, state: AppState) {
             if text.len() > MAX_FRAME {
                 continue;
             }
-            let Some(cmsg) = decode::<ClientMsg>(&text) else { continue };
+            let Some(cmsg) = decode::<ClientMsg>(&text) else {
+                continue;
+            };
             if !apply(&reader_state, &room_id, slot, cmsg).await {
                 break;
             }
@@ -289,7 +307,12 @@ async fn seat_client(
     };
 
     let (room_id, slot) = match cmsg {
-        ClientMsg::Create { protocol, name, password, difficulty } => {
+        ClientMsg::Create {
+            protocol,
+            name,
+            password,
+            difficulty,
+        } => {
             if protocol != PROTOCOL {
                 reject(sink, "This client is a different version to the server.");
                 return None;
@@ -328,7 +351,12 @@ async fn seat_client(
             );
             (id, 0u8)
         }
-        ClientMsg::Join { protocol, room, password, name } => {
+        ClientMsg::Join {
+            protocol,
+            room,
+            password,
+            name,
+        } => {
             if protocol != PROTOCOL {
                 reject(sink, "This client is a different version to the server.");
                 return None;
@@ -368,11 +396,18 @@ async fn seat_client(
 
     let _ = sink
         .send(Message::Text(
-            encode(&ServerMsg::Welcome { room: room_id.clone(), you: slot }).into(),
+            encode(&ServerMsg::Welcome {
+                room: room_id.clone(),
+                you: slot,
+            })
+            .into(),
         ))
         .await;
     publish(state, &room_id).await;
-    Some(Seat { room: room_id, slot })
+    Some(Seat {
+        room: room_id,
+        slot,
+    })
 }
 
 /// Applies one client message. Returns false if the connection should close.
@@ -380,7 +415,9 @@ async fn apply(state: &AppState, room_id: &str, slot: u8, msg: ClientMsg) -> boo
     let mut started_seed: Option<(u64, u8)> = None;
     {
         let mut rooms = state.rooms.lock().await;
-        let Some(room) = rooms.get_mut(room_id) else { return false };
+        let Some(room) = rooms.get_mut(room_id) else {
+            return false;
+        };
         let Some(me) = room.slots.get_mut(slot as usize).and_then(|s| s.as_mut()) else {
             return false;
         };
@@ -405,7 +442,9 @@ async fn apply(state: &AppState, room_id: &str, slot: u8, msg: ClientMsg) -> boo
         // run one.
         let rooms = state.rooms.lock().await;
         if let Some(room) = rooms.get(room_id) {
-            let _ = room.tx.send(encode(&ServerMsg::Started { seed, difficulty }));
+            let _ = room
+                .tx
+                .send(encode(&ServerMsg::Started { seed, difficulty }));
         }
     }
     publish(state, room_id).await;
@@ -414,8 +453,14 @@ async fn apply(state: &AppState, room_id: &str, slot: u8, msg: ClientMsg) -> boo
 
 async fn disconnect(state: &AppState, seat: &Seat) {
     let mut rooms = state.rooms.lock().await;
-    let Some(room) = rooms.get_mut(&seat.room) else { return };
-    if let Some(p) = room.slots.get_mut(seat.slot as usize).and_then(|s| s.as_mut()) {
+    let Some(room) = rooms.get_mut(&seat.room) else {
+        return;
+    };
+    if let Some(p) = room
+        .slots
+        .get_mut(seat.slot as usize)
+        .and_then(|s| s.as_mut())
+    {
         // Keep the scoreboard line of a player who drops mid-game, so the room
         // still shows how far they got.
         if room.started {
