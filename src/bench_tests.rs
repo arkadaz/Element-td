@@ -30,7 +30,12 @@ const BUDGET_MS: f64 = 2.0;
 /// thousand plots and the ring at its limit. That is not a board any real run
 /// reaches - it is the worst frame the game can be asked to produce - so it
 /// gets a budget of its own rather than dragging the draw-list one up.
-const SIM_BUDGET_MS: f64 = 8.0;
+/// The map's arena is the full outer ring, which is 3,014 build pads - three
+/// times what it was when the lane was a hand-built U through one corner. This
+/// test packs every one of them, so it measures a board with three thousand
+/// towers on it: a state the economy cannot actually reach, held as the ceiling
+/// rather than as a likely frame.
+const SIM_BUDGET_MS: f64 = 14.0;
 
 /// A board with a tower on every pad and a wave walking the road.
 fn busy_board(wave: u32) -> Game {
@@ -83,18 +88,24 @@ fn the_ring_and_its_pads_are_the_size_the_design_says() {
         b.slots.len(),
         crate::game::FLOOD_LIMIT
     );
-    // The map's own lane: down a three-tile corridor and back, plus the run
-    // that reaches it. Long enough that a lap takes real time, short enough
-    // that a tower at one end is not irrelevant to the other.
+    // The map's own circuit: the outer ring, corner to corner to corner, as a
+    // closed loop. Sixty tiles a side and four sides, so a little under two
+    // hundred and fifty - long enough that a lap takes real time, and long
+    // enough that no single tower covers a meaningful fraction of it.
+    //
+    // This was 60 to 120 when the lane was a hand-built U through one corner of
+    // the map. That U was wrong; see the comment above `LAP` in
+    // `tools/emit_map.py`.
     assert!(
-        (60.0..120.0).contains(&b.total),
+        (180.0..300.0).contains(&b.total),
         "lane is {:.1} tiles",
         b.total
     );
     // Every tile of the arena that is not corridor, which is the map's own
-    // rule: in Green Circle TD the whole field is yours to build on.
+    // rule: in Green Circle TD the whole field is yours to build on. The ring
+    // encloses sixty tiles square, so this is thousands rather than hundreds.
     assert!(
-        (600..1600).contains(&b.slots.len()),
+        (2000..4500).contains(&b.slots.len()),
         "{} pads",
         b.slots.len()
     );

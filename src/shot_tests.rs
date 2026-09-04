@@ -490,3 +490,88 @@ fn how_bright_is_a_busy_frame() {
     band("lane band", h / 8, h * 2 / 5);
     band("open field", h * 3 / 5, h - 1);
 }
+
+/// Every model archetype, alone and close up.
+///
+///     cargo test --release capture_the_model_sheet -- --ignored --nocapture
+///     TD_MODELS=Warrior,Mage cargo test --release capture_the_model_sheet -- --ignored
+///
+/// One PNG per archetype, because a grid of them is a fight with the camera and
+/// a single centred figure is not. `TD_MODELS` narrows it to a comma-separated
+/// list while you are working on one.
+///
+/// This is the only way to actually look at these: on the board a monster is
+/// forty pixels tall in a crowd of three hundred, and at that size a figure
+/// with the right proportions and one with the wrong proportions are the same
+/// smudge. Every proportion in `view/models.rs` was set against these.
+#[test]
+#[ignore = "renders PNGs; run it deliberately"]
+fn capture_the_model_sheet() {
+    use crate::gfx::draw::DrawList;
+    use crate::view::models::{self, Pose, Skin};
+
+    let dir = out_dir();
+    let want = std::env::var("TD_MODELS").unwrap_or_default();
+    let wanted: Vec<&str> = want.split(',').filter(|s| !s.is_empty()).collect();
+
+    println!();
+    let mut n = 0;
+    for &m in crate::game::greentd_types::Model::ALL {
+        let name = format!("{m:?}");
+        if !wanted.is_empty() && !wanted.iter().any(|w| w.eq_ignore_ascii_case(&name)) {
+            continue;
+        }
+        let mut d = DrawList::default();
+        let pose = Pose {
+            pos: [0.0, 0.0],
+            z: 0.1,
+            // Big: the sheet is for seeing the figure, not for reproducing how
+            // small it is in play.
+            r: 0.42,
+            yaw: 0.7,
+            t: 0.35,
+            walk: true,
+            lights: true,
+        };
+        models::draw(&mut d, m, &pose, &Skin::wearing(m, [0.85, 0.72, 0.35], 0.0));
+        let shot = crate::shot::capture_list(
+            &d,
+            [0.0, 0.0],
+            18.0,
+            // Far shallower than the game's fifty-two degrees. From the play
+            // camera a standing figure is a head and a pair of shoulders, which
+            // is fine for playing and useless for judging leg length.
+            24.0,
+            // Aimed at chest height rather than at the grass.
+            0.62,
+            560,
+            660,
+        );
+        let path = dir.join(format!("model_{name}.png"));
+        crate::shot::write_png(&path, &shot).expect("could not write the sheet");
+        // The biggest single piece, because one mis-scaled primitive is the
+        // failure mode here: a figure can be forty correct pieces and one cone
+        // larger than all of them, and on the board that reads as a smudge
+        // rather than as an obvious bug.
+        let mut big = (0.0f32, 0usize, [0.0f32; 3]);
+        for (si, b) in d.solid.iter().enumerate() {
+            for i in b {
+                let m = i.scale[0].abs().max(i.scale[1].abs()).max(i.scale[2].abs());
+                if m > big.0 {
+                    big = (m, si, i.scale);
+                }
+            }
+        }
+        println!(
+            "  {name:<14} {:>3} pieces   biggest: shape {} at [{:.2},{:.2},{:.2}]  ->  {}",
+            d.solid_count(),
+            big.1,
+            big.2[0],
+            big.2[1],
+            big.2[2],
+            path.display()
+        );
+        n += 1;
+    }
+    assert!(n > 0, "TD_MODELS matched nothing");
+}

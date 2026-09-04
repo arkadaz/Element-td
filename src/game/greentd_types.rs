@@ -382,6 +382,29 @@ pub enum Model {
 }
 
 impl Model {
+    /// Every archetype, in declaration order.
+    ///
+    /// `models_in_use` in `view` walks only the ones a tower or a wave asks
+    /// for; this is the whole list, which is what the model sheet renders and
+    /// what stops a builder being added and then never looked at.
+    pub const ALL: &'static [Model] = &[
+    Model::Acolyte, Model::Archer, Model::Mage, Model::Warrior,
+    Model::Demon, Model::Brute, Model::Troll, Model::Gnoll,
+    Model::Skeleton, Model::Wraith, Model::Naga, Model::Rifleman,
+    Model::Villager, Model::Panda, Model::Bear, Model::Mammoth,
+    Model::Centaur, Model::Lizard, Model::Crab, Model::Spider,
+    Model::Serpent, Model::Turtle, Model::Ent, Model::Golem,
+    Model::Giant, Model::Infernal, Model::FlameLord, Model::Gyrocopter,
+    Model::Phoenix, Model::Harpy, Model::Dragon, Model::FrostWyrm,
+    Model::Turret, Model::Turbolazer, Model::RebelTurret, Model::Vulcan,
+    Model::SamSite, Model::Cannon, Model::MeatWagon, Model::Ship,
+    Model::Obelisk, Model::MagicTower, Model::Observatory, Model::DemonGate,
+    Model::Altar, Model::Burrow, Model::Tentacle, Model::Wisp,
+    Model::SkullPile, Model::IceTorch, Model::EggSack, Model::Snowman,
+    Model::ThornsAura, Model::CommandAura, Model::ControlMagic, Model::DarkPortal,
+    ];
+
+
     /// Whether the model stands on the ground or hangs above it. Used to check
     /// that a wave the map flies is drawn as something with wings.
     #[allow(dead_code)]

@@ -896,34 +896,28 @@ impl eframe::App for App {
     }
 }
 
-/// Where the camera opens, in tiles. Used by play and by a headless capture,
-/// since neither has a player to scroll it.
+/// Where the camera opens, in tiles: a point on the lane, near the spawn.
 ///
-/// The middle of the arena rectangle is the obvious answer and it is the wrong
-/// one. The lane runs around two sides of the field rather than through it, so
-/// the rectangle's centre is a spot in the open with the fighting off at the
-/// edge of the frame - which is exactly what the first screenshots showed: a
-/// thin strip of lane along the top and two thirds of the picture empty grass.
+/// Two wrong answers preceded this one, and both are instructive.
 ///
-/// So aim at the lane instead: the centroid of [`LAP`] weighted by segment
-/// length, which is the point the walking is densest around. Every plot worth
-/// building on is within a few tiles of it.
+/// The middle of the arena rectangle put the camera in the open with the
+/// fighting off at the edge of frame. So it was changed to the centroid of the
+/// lane - which is correct for a lane that runs *through* the field, and
+/// nonsense for this one: the map's lane is a closed ring, and the centroid of
+/// a ring is the hollow middle of it. That framing opened the game on sixty
+/// tiles of empty grass with the entire circuit off-screen in every direction.
 ///
-/// [`LAP`]: game::greentd_map::LAP
+/// A point *on* the lane has neither failure. This is the first waypoint, which
+/// is the corner the map's own Red player feeds creeps into.
 pub fn lane_middle() -> [f32; 2] {
     let lap = game::greentd_map::LAP;
-    let (mut acc, mut total) = ([0.0f32; 2], 0.0f32);
-    for (a, b) in lap.iter().zip(lap.iter().cycle().skip(1)).take(lap.len()) {
-        let len = ((b[0] - a[0]).powi(2) + (b[1] - a[1]).powi(2)).sqrt();
-        acc[0] += (a[0] + b[0]) * 0.5 * len;
-        acc[1] += (a[1] + b[1]) * 0.5 * len;
-        total += len;
+    match lap.first() {
+        Some(p) => *p,
+        None => {
+            let v = game::greentd_map::VIEW;
+            [(v[0] + v[2]) * 0.5, (v[1] + v[3]) * 0.5]
+        }
     }
-    if total <= 0.0 {
-        let v = game::greentd_map::VIEW;
-        return [(v[0] + v[2]) * 0.5, (v[1] + v[3]) * 0.5];
-    }
-    [acc[0] / total, acc[1] / total]
 }
 
 /// The rectangle that holds every build pad, in tiles.

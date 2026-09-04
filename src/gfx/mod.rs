@@ -34,6 +34,13 @@ use crate::game::fx::ParticleSpawn;
 use crate::math::{Camera, Mat4, v3};
 use mesh::{SHAPE_COUNT, Span};
 
+/// Ground textures, baked by `tools/bake_textures.py` from CC0 sources.
+pub static GROUND_BLOB: &[u8] = include_bytes!("../../assets/textures.bin");
+
+/// The decoded ground pixels, kept between creating the texture and having a
+/// queue to fill it with.
+static GROUND_PIXELS: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+
 pub const STATIC_CAP: usize = 24_576;
 pub const INSTANCE_CAP: usize = 32_768;
 pub const GLOW_CAP: usize = 8_192;
@@ -237,6 +244,12 @@ pub struct Renderer {
     scene_bg: wgpu::BindGroup,
     shadow_bg: wgpu::BindGroup,
     shadow_view: wgpu::TextureView,
+    /// The baked ground textures, and the sampler that repeats them.
+    ground_tex: wgpu::Texture,
+    ground_view: wgpu::TextureView,
+    ground_sampler: wgpu::Sampler,
+    ground_size: u32,
+    ground_layers: u32,
     shadow_sampler: wgpu::Sampler,
     shadow_size: u32,
 
@@ -292,8 +305,8 @@ pub struct Renderer {
     pub last_instances: u32,
 }
 
-const MESH_ATTRS: [wgpu::VertexAttribute; 2] =
-    wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3];
+const MESH_ATTRS: [wgpu::VertexAttribute; 3] =
+    wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 8 => Float32x3];
 
 /// Solid instances sit alongside the mesh, so they start at location 2.
 /// Location 7 carries the PBR material (roughness, metallic).
@@ -461,6 +474,25 @@ impl Renderer {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
                     count: None,
                 },
+                // The ground textures. An array rather than an atlas so tiles
+                // can be sampled with plain repeat addressing and no bleeding
+                // between neighbours at the seams.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
             ],
         });
 
@@ -606,8 +638,29 @@ impl Renderer {
             ..Default::default()
         });
 
-        let scene_bg =
-            Self::make_scene_bg(device, &scene_bgl, &uniform, &shadow_view, &shadow_sampler);
+        let (ground_tex, ground_view, ground_size, ground_layers) =
+            Self::ground_texture(device);
+        // Repeat, because the terrain is addressed by world position and a tile
+        // twenty tiles out is at texture coordinate twenty.
+        let ground_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("ground sampler"),
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            address_mode_w: wgpu::AddressMode::Repeat,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
+            ..Default::default()
+        });
+        let scene_bg = Self::make_scene_bg(
+            device,
+            &scene_bgl,
+            &uniform,
+            &shadow_view,
+            &shadow_sampler,
+            &ground_view,
+            &ground_sampler,
+        );
         let shadow_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("shadow bg"),
             layout: &shadow_bgl,
@@ -678,6 +731,11 @@ impl Renderer {
             scene_bg,
             shadow_bg,
             shadow_view,
+            ground_tex,
+            ground_view,
+            ground_sampler,
+            ground_size,
+            ground_layers,
             shadow_sampler,
             shadow_size,
             uniform,
@@ -853,6 +911,8 @@ impl Renderer {
         uniform: &wgpu::Buffer,
         shadow: &wgpu::TextureView,
         cmp: &wgpu::Sampler,
+        ground: &wgpu::TextureView,
+        ground_smp: &wgpu::Sampler,
     ) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("scene bg"),
@@ -870,13 +930,88 @@ impl Renderer {
                     binding: 2,
                     resource: wgpu::BindingResource::Sampler(cmp),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(ground),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::Sampler(ground_smp),
+                },
             ],
         })
+    }
+
+    /// The baked ground textures, as a filtered repeating array texture.
+    ///
+    /// Raw RGBA out of `assets/textures.bin` - see `tools/bake_textures.py` for
+    /// why there is no PNG decoder anywhere in this crate. A blob that is
+    /// missing or malformed produces a single white pixel per layer, which
+    /// multiplies to nothing and leaves the field exactly the flat colour it was
+    /// before textures existed.
+    fn ground_texture(device: &wgpu::Device) -> (wgpu::Texture, wgpu::TextureView, u32, u32) {
+        let blob = GROUND_BLOB;
+        let mut size = 1u32;
+        let mut layers = 1u32;
+        let mut pixels: Vec<u8> = vec![255, 255, 255, 255];
+        if blob.len() >= 16 {
+            let at = |o: usize| u32::from_le_bytes([blob[o], blob[o + 1], blob[o + 2], blob[o + 3]]);
+            let (magic, ver, sz, n) = (at(0), at(4), at(8), at(12));
+            let need = 16 + (sz as usize * sz as usize * 4) * n as usize;
+            if magic == 0x5845_5447 && ver == 1 && sz > 0 && n > 0 && blob.len() >= need {
+                size = sz;
+                layers = n;
+                pixels = blob[16..need].to_vec();
+            }
+        }
+        let tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("ground textures"),
+            size: wgpu::Extent3d {
+                width: size,
+                height: size,
+                depth_or_array_layers: layers,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let view = tex.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        });
+        // The pixels are written by `upload_static`, which is the first point a
+        // queue exists; the bind group only ever needs the view.
+        GROUND_PIXELS.get_or_init(|| pixels);
+        (tex, view, size, layers)
     }
 
     pub fn upload_static(&self, queue: &wgpu::Queue) {
         let lib = mesh::build();
         queue.write_buffer(&self.mesh, 0, bytemuck::cast_slice(&lib.vertices));
+        if let Some(px) = GROUND_PIXELS.get() {
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &self.ground_tex,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                px,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(self.ground_size * 4),
+                    rows_per_image: Some(self.ground_size),
+                },
+                wgpu::Extent3d {
+                    width: self.ground_size,
+                    height: self.ground_size,
+                    depth_or_array_layers: self.ground_layers,
+                },
+            );
+        }
     }
 
     /// Packs the shape buckets end to end into `buf` and records where each one
@@ -991,6 +1126,8 @@ impl Renderer {
                 &self.uniform,
                 &self.shadow_view,
                 &self.shadow_sampler,
+                &self.ground_view,
+                &self.ground_sampler,
             );
         }
         // Force the colour targets to be rebuilt at the new render scale.

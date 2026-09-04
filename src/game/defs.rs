@@ -165,8 +165,15 @@ pub const FLOOD_LIMIT: usize = 700;
 /// of what it took to kill: the creep's health after its armour, divided down.
 /// That keeps the purse on the same exponential as the roster without any
 /// hand-authored table to drift out of step with it.
+///
+/// The divisor was 900 while the lane was a hand-built eighty-five tile U. The
+/// map's real circuit is two hundred and thirty-six, which needs about thirty-
+/// four towers to cover rather than a dozen, and 900 could not pay for them:
+/// a played board died on wave fifteen with fifteen towers up. Swept against
+/// `a_sensible_build_clears_the_campaign`, 500 still loses on wave sixteen and
+/// 350 clears - so 350, with the margin on the side of the player.
 pub fn bounty_of(w: &WaveDef) -> u32 {
-    (w.payable_hp() / 900.0).round().max(1.0) as u32
+    (w.payable_hp() / 350.0).round().max(1.0) as u32
 }
 
 pub fn bounty_for(wave: u32) -> u32 {

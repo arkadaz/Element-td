@@ -18,7 +18,7 @@ use crate::game::board::{self, ROAD_HALF};
 use crate::game::greentd_map::{ARENA, MAP_H, MAP_W};
 use crate::game::defs::*;
 use crate::game::{Game, Phase};
-use crate::gfx::draw::{Color, DrawList, Material, Shape, boost, mix, rgba};
+use crate::gfx::draw::{GroundTex, Color, DrawList, Material, Shape, boost, mix, rgba};
 
 /// The map's own palette: Warcraft III's Lordaeron Summer tileset, in
 /// daylight.
@@ -163,23 +163,31 @@ fn terrain(g: &Game, d: &mut DrawList, tall: &mut DrawList) {
                 // grid reads as graph paper; a low-frequency blend reads as a
                 // field, which is what Warcraft III's tilesets do with four
                 // variants of one texture.
+                // Barely any. This used to swing the whole way from GRASS_A to
+                // GRASS_EDGE in three-tile blocks, which was the right call
+                // when a tile was one flat colour and is the wrong one now
+                // there is a grass texture underneath: the blocks read as a
+                // chequerboard laid over the grain. The texture is the
+                // variation; this is only enough to stop it tiling visibly.
                 let patch = (hash2(tx / 3, ty / 3) * 0.72 + h * 0.28).clamp(0.0, 1.0);
-                let c = if patch < 0.45 {
-                    mix(theme::GRASS_A, theme::GRASS_B, patch / 0.45)
-                } else {
-                    mix(theme::GRASS_B, theme::GRASS_EDGE, (patch - 0.45) / 0.55)
-                };
+                let c = mix(theme::GRASS_A, theme::GRASS_B, patch * 0.35);
                 (GROUND_Z, c)
             };
-            d.shape(
-                Shape::Quad,
+            // The tile's colour still comes from the palette measured against
+            // a Warcraft III screenshot; the texture multiplies into it. Doing
+            // it that way keeps the field the right green - a photographic
+            // grass albedo on its own is far yellower than Lordaeron Summer -
+            // while giving it the grain a flat fill was missing.
+            d.ground(
+                if corridor {
+                    GroundTex::Dirt
+                } else {
+                    GroundTex::Grass
+                },
                 [p[0], p[1], z],
-                [1.0, 1.0, 1.0],
-                0.0,
-                0.0,
+                [1.0, 1.0],
                 rgba(base, 1.0),
                 Material::EARTH,
-                0.0,
             );
 
             // The edge where turf meets corridor, and only there: a couple of
@@ -211,14 +219,22 @@ fn terrain(g: &Game, d: &mut DrawList, tall: &mut DrawList) {
                 // A seam on two sides only, so neighbouring plots share one
                 // line. Barely darker than the turf: a bright line turns the
                 // field into graph paper.
-                for (dx, dy, sx, sy) in [(0.0, 0.5, 1.0, 0.035), (0.5, 0.0, 0.035, 1.0)] {
+                for (dx, dy, sx, sy) in [(0.0, 0.5, 1.0, 0.03), (0.5, 0.0, 0.03, 1.0)] {
                     d.shape(
                         Shape::Quad,
                         [p[0] + dx, p[1] + dy, GROUND_Z + 0.003],
                         [sx, sy, 1.0],
                         0.0,
                         0.0,
-                        rgba(mix(base, theme::PAD_KERB, 0.6), 0.55),
+                        // Eight hundred plots means this seam is a grid over the
+                        // entire field, and at full strength that is graph
+                        // paper. Faint enough to find a tile edge by when you
+                        // look for it, and to disappear when you are not.
+                        // Subtle by *colour*, not by alpha: the solid pass is
+                        // opaque, so the alpha on a ground quad does nothing at
+                        // all. Setting it to 0.18 and expecting a faint line
+                        // gave a full-strength grid over the whole field.
+                        rgba(mix(base, theme::PAD_KERB, 0.30), 1.0),
                         Material::EARTH,
                         0.0,
                     );
@@ -850,15 +866,25 @@ mod tests {
         }
     }
 
-    /// Every model the map actually uses has to be a *model*: several kinds of
-    /// primitive, assembled into something. A silhouette that is one sphere is
-    /// a placeholder, and this is the test that says so.
+    /// Every model the map actually uses has to be a *model*.
+    ///
+    /// There are two ways to be one now, and they look completely different in
+    /// a draw list. A baked mesh from `assets/models.bin` is a single instance
+    /// carrying thousands of triangles; a generated build is dozens of
+    /// instances of a handful of primitives. Both are fine. One sphere is not,
+    /// and that is what this catches.
     #[test]
     fn every_model_is_actually_built() {
         for m in models_in_use() {
             let c = dummy(m, m.airborne());
             let mut d = DrawList::default();
             monsters::draw(&mut d, &c, true);
+            let baked: usize = (crate::gfx::mesh::PRIM_COUNT..SHAPE_COUNT)
+                .map(|i| d.solid[i].len())
+                .sum();
+            if baked > 0 {
+                continue;
+            }
             let n: usize = (0..SHAPE_COUNT).map(|i| d.solid[i].len()).sum();
             assert!(n >= 5, "{m:?} is too simple to read as anything");
         }
@@ -866,6 +892,10 @@ mod tests {
 
     /// Silhouette is what tells two things apart at gameplay zoom, so no two
     /// models may be assembled from the same primitives in the same amounts.
+    ///
+    /// Baked meshes each land in their own bucket, so this separates them for
+    /// free; the rule bites on the generated builds, where it is easy to write
+    /// two archetypes that differ only in colour.
     #[test]
     fn every_model_has_its_own_silhouette() {
         let mut prints: Vec<(Model, Vec<usize>)> = Vec::new();

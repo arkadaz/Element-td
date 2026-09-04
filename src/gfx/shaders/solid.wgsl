@@ -21,6 +21,8 @@ struct Uniforms {
     fog: vec4<f32>,         // rgb = fog colour, a = density
 };
 @group(0) @binding(0) var<uniform> U: Uniforms;
+@group(0) @binding(3) var ground_tex: texture_2d_array<f32>;
+@group(0) @binding(4) var ground_smp: sampler;
 @group(0) @binding(1) var shadow_map: texture_depth_2d;
 @group(0) @binding(2) var shadow_samp: sampler_comparison;
 
@@ -39,6 +41,8 @@ struct VsIn {
     @location(5) i_params: vec2<f32>,
     @location(6) i_color: vec4<f32>,
     @location(7) i_material: vec2<f32>,
+    // A baked model's own vertex colour; white on every generated primitive.
+    @location(8) v_col: vec3<f32>,
 };
 
 struct VsOut {
@@ -54,6 +58,8 @@ struct VsOut {
     // noise cost four hashes on every fragment on screen for an effect nobody
     // can see at gameplay distance.
     @location(6) tint: f32,
+    // Ground texture layer, one-based. Zero for everything that is not terrain.
+    @location(7) tex: f32,
 };
 
 // Yaw about Z, then pitch tilting the local +Z axis.
@@ -90,6 +96,8 @@ fn vs(in: VsIn) -> VsOut {
     o.world = world;
     o.color = in.i_color;
     o.emissive = in.i_params.x;
+    o.color = vec4<f32>(o.color.rgb * in.v_col, o.color.a);
+    o.tex = in.i_params.y;
     o.material = in.i_material;
     o.tint = 0.94 + fract(sin(dot(in.i_pos.xy, vec2<f32>(12.9898, 78.233))) * 43758.5453) * 0.12;
     // Offset along the normal to keep sloped faces off their own shadow.
@@ -230,6 +238,20 @@ fn env_brdf(f0: vec3<f32>, rough: f32, ndv: f32) -> vec3<f32> {
 
 @fragment
 fn fs(o: VsOut) -> @location(0) vec4<f32> {
+    // Ground texture, addressed by world position so the terrain needs no UVs
+    // and neighbouring tiles line up with no seam. Tiled a little under once
+    // per tile, which is deliberately not exactly once: on an exact tile the
+    // repeat lands on the grid and the field reads as wallpaper.
+    var albedo_tex = vec3<f32>(1.0);
+    if (o.tex >= 0.5) {
+        let layer = i32(o.tex - 1.0);
+        albedo_tex = textureSample(ground_tex, ground_smp, o.world.xy * 0.73, layer).rgb;
+        // The bake normalises each layer to a linear mean of one half, so twice
+        // the sample averages to exactly one: the texture multiplies the tile's
+        // measured colour without changing how bright it is on average. The mix
+        // is how much grain to let through.
+        albedo_tex = mix(vec3<f32>(1.0), albedo_tex * 2.0, 0.75);
+    }
     let n = normalize(o.nrm);
     let l = normalize(U.light_dir.xyz);
     let v = normalize(U.cam_pos.xyz - o.world);
@@ -253,7 +275,7 @@ fn fs(o: VsOut) -> @location(0) vec4<f32> {
     let rough = min(sqrt(mat_rough * mat_rough + smear), 1.0);
     let metal = clamp(o.material.y, 0.0, 1.0);
 
-    let albedo = o.color.rgb * o.tint;
+    let albedo = o.color.rgb * o.tint * albedo_tex;
 
     // Dielectrics reflect ~4%; metals reflect their own colour.
     let f0 = mix(vec3<f32>(0.04), albedo, metal);

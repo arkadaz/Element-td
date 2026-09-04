@@ -277,7 +277,61 @@ const WOOD: Material = Material::WOOD;
 
 // ---------------------------------------------------------------- dispatch
 
+/// Which baked model, if any, stands in for each archetype.
+///
+/// Filled once from whatever `assets/models.bin` turned out to contain, so the
+/// bake and the game cannot disagree: an archetype with no baked mesh simply
+/// keeps its generated build, and adding one to `tools/bake_models.py` is the
+/// whole change.
+static BAKED: std::sync::OnceLock<[Option<usize>; 64]> = std::sync::OnceLock::new();
+
+fn baked(m: Model) -> Option<usize> {
+    let table = BAKED.get_or_init(|| {
+        let mut t = [None; 64];
+        for (name, slot) in crate::gfx::mesh::model_slots() {
+            if let Some(i) = Model::ALL.iter().position(|a| format!("{a:?}") == *name) {
+                t[i] = Some(*slot);
+            }
+        }
+        t
+    });
+    let i = Model::ALL.iter().position(|a| *a == m)?;
+    table[i]
+}
+
+/// How tall a baked model stands, in units of `Pose::r`.
+///
+/// The bake normalises every model to exactly one unit tall so that this number
+/// means the same thing for all of them; a creep's `r` is its collision radius,
+/// and a figure roughly two and a half radii tall is what the generated builds
+/// were already drawing.
+const BAKED_HEIGHT: f32 = 2.6;
+
 pub fn draw(d: &mut DrawList, m: Model, p: &Pose, s: &Skin) {
+    if let Some(slot) = baked(m) {
+        let h = p.r * BAKED_HEIGHT;
+        d.model(
+            slot,
+            [p.pos[0], p.pos[1], p.z],
+            // The mesh stands on z = 0 and is one unit tall, so a uniform scale
+            // is the whole transform.
+            [h, h, h],
+            // The models face +x at rest; the game's yaw has them facing the
+            // way they walk.
+            p.yaw,
+            0.0,
+            // White, so the model's own baked colours come through untouched.
+            // The hit flash still reads, because `Skin::wearing` puts it here.
+            [1.0, 1.0, 1.0, 1.0],
+            Material::CHITIN,
+            0.0,
+        );
+        return;
+    }
+    draw_generated(d, m, p, s)
+}
+
+fn draw_generated(d: &mut DrawList, m: Model, p: &Pose, s: &Skin) {
     use Model::*;
     match m {
         // people
@@ -345,6 +399,41 @@ pub fn draw(d: &mut DrawList, m: Model, p: &Pose, s: &Skin) {
     }
 }
 
+// ---------------------------------------------------------------- proportion
+//
+// Everything below is written against one figure, and it is worth stating what
+// that figure is, because the first cut of these models got it wrong in a way
+// no amount of extra detail could rescue.
+//
+// A humanoid here stands about `2.7 * r` tall. Its head was a sphere of radius
+// `0.50 * r` - a head a third of the body's height - on a torso a full `1.00 *
+// r` wide. Those are the proportions of a bath toy, and they are why a figure
+// carrying forty separate pieces still read as a stack of spheres: at that head
+// size nothing else in the silhouette can be seen.
+//
+// Warcraft III draws a heroic figure at roughly five and a half heads: broad in
+// the shoulder, narrow at the waist, long in the leg, with the head small
+// enough that the shoulders and the weapon are what you recognise from across
+// the board. These are those numbers, as fractions of `p.r`.
+
+/// Ground to hip. Legs are two fifths of the figure - the single biggest
+/// difference between a heroic silhouette and a squat one.
+const HIP: f32 = 1.08;
+/// Ground to the shoulder line.
+const SHOULDER: f32 = 2.02;
+/// Ground to the centre of the head.
+const CROWN: f32 = 2.38;
+/// Head radius. Warcraft III's own footman is close to a fifth of its height,
+/// but that is a figure you see at three hundred pixels. At the forty this game
+/// gives it, a fifth reads as pinheaded and the helm swallows what is left, so
+/// this is a little larger than the reference - which is what Warcraft III
+/// itself does to its units for exactly the same reason.
+const SKULL: f32 = 0.32;
+/// Half-width at the waist and at the chest. The chest is the wider of the two,
+/// and the pauldrons sit wider still, which is the whole shape of the thing.
+const WAIST: f32 = 0.34;
+const CHEST: f32 = 0.46;
+
 // ---------------------------------------------------------------- parts
 
 /// A squashed sphere, oriented with the pose.
@@ -378,17 +467,19 @@ fn stride(
     for (i, side) in [-1.0f32, 1.0].iter().enumerate() {
         let phase = p.t * 2.2 + i as f32 * std::f32::consts::PI;
         let swing = if p.walk { phase.sin() * r * 0.30 } else { 0.0 };
-        let hip = p.p3(0.0, side * r * 0.34, hip_z);
-        let knee = p.p3(swing * 0.5, side * r * 0.36, hip_z * 0.45);
-        let foot = p.p3(swing, side * r * 0.36, swing.abs() * 0.35);
-        d.link(Shape::Capsule, hip, knee, r * thick, leg, mat, 0.0);
-        d.link(Shape::Capsule, knee, foot, r * thick * 0.88, leg, mat, 0.0);
+        let hip = p.p3(0.0, side * r * 0.22, hip_z);
+        let knee = p.p3(swing * 0.5, side * r * 0.24, hip_z * 0.48);
+        let foot = p.p3(swing, side * r * 0.24, swing.abs() * 0.30);
+        // Thigh and calf are lofted, thick end at the joint above: a leg is not
+        // a pipe, and a tapered one costs the same instance a capsule did.
+        d.limb(hip, knee, r * thick, leg, mat, 0.0);
+        d.limb(knee, foot, r * thick * 0.82, leg, mat, 0.0);
         if p.fine() {
             // The boot, pointing the way the figure faces.
             d.shape(
                 Shape::Box,
-                [foot[0], foot[1], foot[2] + r * 0.10],
-                [r * 0.40, r * 0.26, r * 0.20],
+                [foot[0], foot[1], foot[2] + r * 0.08],
+                [r * 0.34, r * 0.20, r * 0.16],
                 p.yaw,
                 0.0,
                 boot,
@@ -414,11 +505,10 @@ fn legs(d: &mut DrawList, p: &Pose, col: Color, count: usize, spread: f32, len: 
         let swing = if p.walk { phase.cos() * r * 0.18 } else { 0.0 };
         let hip = p.at(fwd * r * spread, side * r * spread);
         let foot = p.at(fwd * r * spread + swing, side * r * spread);
-        d.link(
-            Shape::Capsule,
+        d.limb(
             [hip[0], hip[1], p.z + len + lift],
             [foot[0], foot[1], p.z + lift * 0.5],
-            r * 0.26,
+            r * 0.22,
             col,
             FLESH,
             0.0,
@@ -507,25 +597,18 @@ fn arm(
 ) {
     let r = p.r;
     let upper = if armoured { s.steel } else { s.skin };
-    d.link(Shape::Capsule, from, elbow, r * thick, upper, FLESH, 0.0);
-    d.link(
-        Shape::Capsule,
-        elbow,
-        hand,
-        r * thick * 0.86,
-        s.skin,
-        FLESH,
-        0.0,
-    );
+    d.limb(from, elbow, r * thick, upper, FLESH, 0.0);
+    d.limb(elbow, hand, r * thick * 0.80, s.skin, FLESH, 0.0);
     if p.fine() {
+        // The bracer, at the wrist rather than the middle of the forearm.
         let mid = [
-            (elbow[0] + hand[0]) * 0.5,
-            (elbow[1] + hand[1]) * 0.5,
-            (elbow[2] + hand[2]) * 0.5,
+            elbow[0] * 0.25 + hand[0] * 0.75,
+            elbow[1] * 0.25 + hand[1] * 0.75,
+            elbow[2] * 0.25 + hand[2] * 0.75,
         ];
-        d.sphere(mid, r * thick * 1.5, s.leather, FLESH);
+        d.sphere(mid, r * thick * 1.05, s.leather, FLESH);
     }
-    d.sphere(hand, r * thick * 1.35, s.skin, FLESH);
+    d.sphere(hand, r * thick * 0.95, s.skin, FLESH);
 }
 
 /// A sword: grip, guard, blade, fuller, pommel.
@@ -945,25 +1028,28 @@ enum Arms {
 /// carries. Eleven towers and half the creep roster are one of these.
 fn soldier(d: &mut DrawList, p: &Pose, s: &Skin, arms: Arms) {
     let r = p.r;
-    let hip = r * 0.98;
-    let chest = hip + r * 0.66;
-    stride(d, p, hip, 0.19, s.steel, s.leather, STEEL);
+    let hip = r * HIP;
+    let chest = r * SHOULDER;
+    stride(d, p, hip, 0.30, s.steel, s.leather, STEEL);
 
-    // Torso: a tapered plate over a padded gambeson.
-    d.shape(
-        Shape::Cone,
-        p.p3(0.0, 0.0, hip - r * 0.10),
-        [r * 1.00, r * 0.72, r * 0.90],
-        p.yaw,
-        std::f32::consts::PI,
+    // Waist to chest: a torso that narrows downwards, which is what gives the
+    // figure a V rather than a barrel. The cone is inverted, so its wide end is
+    // at the shoulders.
+    // Waist to chest. A lofted taper, wide end up: the torso is the one place
+    // the V of a heroic figure lives, and a cone put a flat lampshade there.
+    d.limb(
+        p.p3(0.0, 0.0, chest - r * 0.04),
+        p.p3(0.0, 0.0, hip - r * 0.06),
+        r * CHEST * 1.9,
         s.cloth,
         CLOTH,
         0.0,
     );
+    // The breastplate over it, wider across than deep.
     d.shape(
         Shape::Sphere,
-        p.p3(0.0, 0.0, chest),
-        [r * 0.90, r * 1.10, r * 0.72],
+        p.p3(0.0, 0.0, chest - r * 0.26),
+        [r * CHEST * 1.15, r * CHEST * 1.65, r * 0.44],
         p.yaw,
         0.0,
         s.steel,
@@ -971,10 +1057,11 @@ fn soldier(d: &mut DrawList, p: &Pose, s: &Skin, arms: Arms) {
         0.0,
     );
     if p.fine() {
+        // The tabard, hanging from the chest to below the belt.
         d.shape(
             Shape::Quad,
-            p.p3(r * 0.46, 0.0, hip + r * 0.18),
-            [r * 0.62, r * 1.05, 1.0],
+            p.p3(r * 0.30, 0.0, hip + r * 0.16),
+            [r * 0.50, r * 0.74, 1.0],
             p.yaw + std::f32::consts::FRAC_PI_2,
             0.15,
             s.body,
@@ -984,8 +1071,8 @@ fn soldier(d: &mut DrawList, p: &Pose, s: &Skin, arms: Arms) {
         for k in 0..2 {
             d.shape(
                 Shape::Cylinder,
-                p.p3(0.0, 0.0, chest - r * (0.10 + 0.18 * k as f32)),
-                [r * 0.94, r * 0.80, r * 0.055],
+                p.p3(0.0, 0.0, chest - r * (0.34 + 0.16 * k as f32)),
+                [r * 0.60, r * 0.50, r * 0.045],
                 p.yaw,
                 0.0,
                 s.iron,
@@ -994,23 +1081,23 @@ fn soldier(d: &mut DrawList, p: &Pose, s: &Skin, arms: Arms) {
             );
         }
     }
-    belt(d, p, hip + r * 0.02, r * 0.86, s);
-    pauldrons(d, p, chest + r * 0.16, r * 0.62, r * 0.42, s);
+    belt(d, p, hip + r * 0.06, r * 0.56, s);
+    // Wider than the chest: the pauldrons are the silhouette.
+    pauldrons(d, p, chest, r * 0.56, r * 0.30, s);
 
-    let head = p.at(r * 0.05, 0.0);
-    d.link(
-        Shape::Cylinder,
-        p.p3(0.0, 0.0, chest + r * 0.20),
-        p.p3(0.0, 0.0, chest + r * 0.42),
-        r * 0.17,
+    let head = p.at(r * 0.04, 0.0);
+    d.limb(
+        p.p3(0.0, 0.0, chest - r * 0.06),
+        p.p3(0.0, 0.0, chest + r * 0.16),
+        r * 0.26,
         s.skin,
         FLESH,
         0.0,
     );
     d.shape(
         Shape::Sphere,
-        [head[0], head[1], p.z + chest + r * 0.66],
-        [r * 0.50, r * 0.46, r * 0.54],
+        [head[0], head[1], p.z + r * CROWN],
+        [r * SKULL * 1.9, r * SKULL * 1.75, r * SKULL * 2.1],
         p.yaw,
         0.0,
         s.skin,
@@ -1021,12 +1108,20 @@ fn soldier(d: &mut DrawList, p: &Pose, s: &Skin, arms: Arms) {
         d,
         p,
         head,
-        p.z + chest + r * 0.70,
-        r * 0.50,
+        p.z + r * (CROWN + 0.03),
+        r * SKULL * 1.95,
         s,
         matches!(arms, Arms::Blade),
     );
-    eyes(d, p, head, p.z + chest + r * 0.62, r * 0.20, r * 0.16, s.glow);
+    eyes(
+        d,
+        p,
+        head,
+        p.z + r * (CROWN - 0.03),
+        r * 0.11,
+        r * 0.09,
+        s.glow,
+    );
 
     let swing = if p.walk { (p.t * 2.2).sin() * r * 0.18 } else { 0.0 };
     match arms {

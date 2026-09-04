@@ -30,6 +30,15 @@ pub struct Instance {
     pub _pad: [f32; 2],
 }
 
+/// Which layer of `assets/textures.bin` a ground tile uses.
+///
+/// The order is the blob's own, set by `LAYERS` in `tools/bake_textures.py`.
+#[derive(Clone, Copy, Debug)]
+pub enum GroundTex {
+    Grass = 0,
+    Dirt = 1,
+}
+
 /// Common surface finishes, so call sites read as materials rather than numbers.
 #[derive(Clone, Copy, Debug)]
 pub struct Material {
@@ -93,12 +102,22 @@ impl Default for Material {
     }
 }
 
-#[derive(Default)]
 pub struct DrawList {
     /// Solids, bucketed by shape so the renderer never has to sort.
     pub solid: [Vec<Instance>; SHAPE_COUNT],
     /// Additive camera-facing sprites: glows, muzzle flashes, auras.
     pub glow: Vec<Instance>,
+}
+
+impl Default for DrawList {
+    // Derived `Default` stops at thirty-two elements, and there are more
+    // buckets than that once the baked models have their own.
+    fn default() -> Self {
+        DrawList {
+            solid: std::array::from_fn(|_| Vec::new()),
+            glow: Vec::new(),
+        }
+    }
 }
 
 impl DrawList {
@@ -307,6 +326,86 @@ impl DrawList {
         let yaw = d[1].atan2(d[0]);
         let pitch = d[2].atan2(flat) - std::f32::consts::FRAC_PI_2;
         self.shape(shape, centre, [w, w, len], yaw, pitch, color, mat, em);
+    }
+
+    /// A lofted limb from `a` to `b`, `w` thick at the `a` end.
+    ///
+    /// Prefer this to `link(Shape::Capsule, ..)` for anything anatomical. A
+    /// capsule is the same width all the way along, so a figure assembled from
+    /// them reads as pipework; [`Shape::Taper`] narrows towards `b` and carries
+    /// a little muscle near `a`, which is most of what separates a drawn
+    /// creature from a diagram of one.
+    #[allow(clippy::too_many_arguments)]
+    pub fn limb(
+        &mut self,
+        a: [f32; 3],
+        b: [f32; 3],
+        w: f32,
+        color: Color,
+        mat: Material,
+        em: f32,
+    ) {
+        self.link(Shape::Taper, a, b, w, color, mat, em);
+    }
+
+    /// One instance of a baked model, in the bucket that model was loaded into.
+    ///
+    /// A model is a whole unit in a single draw - an orc's skin, leather and axe
+    /// are colours inside the mesh rather than separate instances - so this is
+    /// one call where a generated build was forty.
+    #[allow(clippy::too_many_arguments)]
+    pub fn model(
+        &mut self,
+        slot: usize,
+        pos: [f32; 3],
+        scale: [f32; 3],
+        yaw: f32,
+        pitch: f32,
+        color: Color,
+        mat: Material,
+        em: f32,
+    ) {
+        let bucket = crate::gfx::mesh::model_bucket(slot);
+        if bucket >= self.solid.len() {
+            return;
+        }
+        self.solid[bucket].push(Instance {
+            pos,
+            scale,
+            rot: [yaw, pitch],
+            params: [em, bucket as f32],
+            color,
+            material: [mat.roughness, mat.metallic],
+            _pad: [0.0; 2],
+        });
+    }
+
+    /// A ground tile, textured by world position.
+    ///
+    /// The terrain has no UVs and does not need any: it is axis-aligned and
+    /// lies flat, so the world x and y *are* the texture coordinates. That is
+    /// what keeps the texture path down to one number on the instance, and why
+    /// nothing else in the vertex format had to change to get a textured field.
+    #[allow(clippy::too_many_arguments)]
+    pub fn ground(
+        &mut self,
+        layer: GroundTex,
+        pos: [f32; 3],
+        size: [f32; 2],
+        color: Color,
+        mat: Material,
+    ) {
+        self.solid[Shape::Quad as usize].push(Instance {
+            pos,
+            scale: [size[0], size[1], 1.0],
+            rot: [0.0, 0.0],
+            // params.y is the texture layer, one-based: zero means untextured,
+            // which is every other thing the game draws.
+            params: [0.0, layer as u32 as f32 + 1.0],
+            color,
+            material: [mat.roughness, mat.metallic],
+            _pad: [0.0; 2],
+        });
     }
 
     // -------------------------------------------------- glows

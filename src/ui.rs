@@ -122,6 +122,62 @@ pub fn carved(ui: &Ui, r: Rect, fill: Color32, gold: bool) {
     );
 }
 
+/// A surface the HUD is made of, and its layer in `assets/textures.bin`.
+///
+/// The order is the blob's, set by `LAYERS` in `tools/bake_textures.py`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Mat {
+    Wood = 2,
+    Stone = 3,
+}
+
+/// One of the baked materials, as an egui texture.
+///
+/// Registered once per material and kept for the life of the context. Returns
+/// `None` if the blob is missing or too short, and every caller then paints the
+/// flat colour it was painting before textures existed - a bad asset costs the
+/// grain, not the HUD.
+pub fn material(ctx: &egui::Context, which: Mat) -> Option<egui::TextureHandle> {
+    use std::sync::Mutex;
+    static CACHE: Mutex<Vec<(usize, egui::TextureHandle)>> = Mutex::new(Vec::new());
+    let layer = which as usize;
+    let mut cache = CACHE.lock().ok()?;
+    if let Some((_, h)) = cache.iter().find(|(l, _)| *l == layer) {
+        return Some(h.clone());
+    }
+
+    let blob = crate::gfx::GROUND_BLOB;
+    if blob.len() < 16 {
+        return None;
+    }
+    let at = |o: usize| u32::from_le_bytes([blob[o], blob[o + 1], blob[o + 2], blob[o + 3]]);
+    if at(0) != 0x5845_5447 || at(4) != 1 {
+        return None;
+    }
+    let size = at(8) as usize;
+    let layers = at(12) as usize;
+    if size == 0 || layer >= layers {
+        return None;
+    }
+    let stride = size * size * 4;
+    let start = 16 + layer * stride;
+    if start + stride > blob.len() {
+        return None;
+    }
+    let img = egui::ColorImage::from_rgba_unmultiplied([size, size], &blob[start..start + stride]);
+    let handle = ctx.load_texture(
+        format!("mat{layer}"),
+        img,
+        egui::TextureOptions {
+            // Repeating, because the console is tiled rather than stretched.
+            wrap_mode: egui::TextureWrapMode::Repeat,
+            ..egui::TextureOptions::LINEAR
+        },
+    );
+    cache.push((layer, handle.clone()));
+    Some(handle)
+}
+
 /// The console itself: the wooden ground the strip and the command bar sit on.
 ///
 /// egui fills a panel with one flat colour, which is what made the HUD read as a
@@ -130,6 +186,20 @@ pub fn carved(ui: &Ui, r: Rect, fill: Color32, gold: bool) {
 pub fn console(ui: &Ui, r: Rect) {
     let p = ui.painter();
     p.rect_filled(r, CornerRadius::ZERO, pal::PANEL);
+    if let Some(tex) = material(ui.ctx(), Mat::Wood) {
+        // Tiled across the panel at the texture's own scale rather than
+        // stretched to fit: a plank stretched across a fifteen-hundred point
+        // console is a smear, and the grain is the entire point.
+        let tiles = vec2(r.width() / 220.0, r.height() / 220.0);
+        p.image(
+            tex.id(),
+            r,
+            Rect::from_min_size(pos2(0.0, 0.0), tiles),
+            // The panel colour is still the panel colour; the wood multiplies
+            // into it, exactly as the ground textures work.
+            Color32::from_rgb(236, 232, 226),
+        );
+    }
     // Grain: a handful of darker bands across the wood.
     let n = (r.width() / 34.0) as i32;
     for k in 0..n {

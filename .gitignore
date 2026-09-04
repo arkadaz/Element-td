@@ -8,3 +8,11 @@
 # ...and the unpacked contents of one, for the same reason. `tools/extract.py`
 # recreates this directory from a map you supply yourself.
 /tools/greentd/
+
+# Download caches for the asset bake. `tools/bake_models.py` and
+# `tools/bake_textures.py` refetch these; `assets/*.bin` is the output that
+# matters and is committed.
+/tools/glb/
+/tools/tex/
+/tools/model_candidates.json
+__pycache__/

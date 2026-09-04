@@ -10,6 +10,7 @@ This reads `war3map.w3e`, bakes the texture grid, and traces the route the Red
 player's creeps actually walk out of the move orders in `war3map.j`.
 """
 
+import re
 import struct
 
 import mpq
@@ -124,46 +125,110 @@ def centre_of_corridor(x, y, axis):
 
 # The lap.
 #
-# Read the corridor widths where nothing crosses them, so a junction does not
-# make a three-tile passage look sixty tiles wide, and take the turning points
-# from the map's own regions.
-RUN_Y = centre_of_corridor(JUNCTION[0] - 8, JUNCTION[1], 'y')
-COL_X = centre_of_corridor(FAR[0], FAR[1] + 12, 'x')
-WEST_X = float(ENTRY[0])
-FAR_Y = float(FAR[1])
+# This used to be three regions joined into a U by hand, and it was wrong in a
+# way that made the whole game look strange: the board was a straight corridor
+# across the top of an empty field, because a U through one corner of the map is
+# what it is.
+#
+# The map is a *circle*, which is what it is called. `script.j` registers a
+# trigger on every waypoint region and each one orders the creep to the next, so
+# the route is in the map and can be read rather than guessed. Converted to
+# tiles, the waypoints are two concentric square rings:
+#
+#   outer   corners (18, 78) (79, 78) (78, 18) (18, 18)
+#           mid-edges Top (48, 79)  Right (79, 48)  Bottom (48, 18)  Left (18, 48)
+#   inner   corners (26, 71) (71, 71) (71, 26) (26, 26)
+#           mid-edges Top (48, 70)  Right (70, 48)  Bottom (48, 27)  Left (27, 48)
+#
+# Eight players sit around them - four at the map's corners feeding the outer
+# ring, four in the middle feeding the inner one - and the mid-edges are where
+# the two rings meet, which is how a creep crosses from one to the other.
+#
+# Single player takes the outer ring, as a closed loop. It is the largest of the
+# two, it is the one the map's own Red player walks, and a loop is what makes
+# this game what it is: nothing ever reaches an exit, so what you are defending
+# is a *rate*.
+WAYPOINT_RE = re.compile(r'udg_rect(\d+)=Rect\(([-0-9.]+),([-0-9.]+),([-0-9.]+),([-0-9.]+)\)')
 
-# Half the corridor's width, so the two directions do not overlap. Creeps pass
-# each other in a three-tile passage, which is exactly what this looks like in
-# Warcraft III.
+
+def waypoints():
+    """Every waypoint region's centre, in tiles, by its rect number."""
+    # The script lives at Scripts\war3map.j inside the archive; there is a
+    # stub at the root that reads back as nothing.
+    a = mpq.Archive(MAP)
+    raw = a.read('Scripts\war3map.j') or a.read('war3map.j')
+    if not raw:
+        raise SystemExit('the archive has no trigger script - the route cannot be read')
+    text = raw.decode('latin-1', 'replace')
+    out = {}
+    for m in WAYPOINT_RE.finditer(text):
+        n = int(m.group(1))
+        x0, y0, x1, y1 = (float(g) for g in m.groups()[1:])
+        # Same origin and tile size the terrain is read with, so a
+        # waypoint and a tile mean the same thing.
+        out[n] = (
+            ((x0 + x1) * 0.5 - ORIGIN) / TILE,
+            ((y0 + y1) * 0.5 - ORIGIN) / TILE,
+        )
+    return out
+
+
+def outer_ring(wp):
+    """The outer circuit, in order, as a closed loop of tile positions.
+
+    The rect numbers are the map's, taken from which trigger is registered on
+    which region: rect03 is OutsideTL, rect17 OutsideTop, and so on round.
+    Pinned by number rather than found by geometry because the map is fixed and
+    a wrong guess here is a route through a wall.
+    """
+    order = [3, 17, 16, 28, 27, 7, 6, 4]
+    missing = [n for n in order if n not in wp]
+    if missing:
+        raise SystemExit('script.j has no rect %s - the route cannot be read' % missing)
+    return [wp[n] for n in order]
+
+
+WP = waypoints()
+RING = outer_ring(WP)
+
+# Creeps travel on one side of a three-tile corridor so the two directions do
+# not overlap, exactly as they do in Warcraft III. The ring is walked
+# anticlockwise, so pushing each leg towards the middle of the board puts the
+# traffic on the inside kerb.
 LANE = 0.75
+CX = sum(x for x, _ in RING) / len(RING)
+CY = sum(y for _, y in RING) / len(RING)
 
-LAP = [
-    (WEST_X, RUN_Y - LANE),
-    (COL_X - LANE, RUN_Y - LANE),
-    (COL_X - LANE, FAR_Y),
-    (COL_X + LANE, FAR_Y),
-    (COL_X + LANE, RUN_Y + LANE),
-    (WEST_X, RUN_Y + LANE),
-]
 
-# What the camera frames: the lane, plus the ground within a tower's reach of
-# it. Everything the player will ever look at, and nothing else.
+def kerb(p):
+    x, y = p
+    dx = LANE if x < CX else -LANE
+    dy = LANE if y < CY else -LANE
+    # Only the axis the corner turns on gets the offset on a mid-edge, so a
+    # straight run stays straight.
+    return (x + dx * 0.5, y + dy * 0.5)
+
+
+LAP = [kerb(p) for p in RING]
+
+# What the camera may look at, and what may be built on: the ring plus a tower's
+# reach outside it, and the whole field inside. The player scrolls this; it is
+# far larger than one screen, which is the point of a circuit.
 LANE_X0 = min(x for x, _ in LAP)
 LANE_X1 = max(x for x, _ in LAP)
 LANE_Y0 = min(y for _, y in LAP)
 LANE_Y1 = max(y for _, y in LAP)
 VIEW = (
-    LANE_X0 - 7.0,
-    LANE_Y0 - 7.0,
+    LANE_X0 - 8.0,
+    LANE_Y0 - 8.0,
     LANE_X1 + 8.0,
     LANE_Y1 + 8.0,
 )
 
 # ---------------------------------------------------------------- the arena
 #
-# The buildable field is exactly what the camera frames. A plot the player
-# cannot see is a plot they cannot click, and this map is played from one fixed
-# view rather than by scrolling around it.
+# Everything inside the framed rectangle that is not corridor. On this map that
+# is the whole field the ring encloses plus the margin outside it.
 ARENA = VIEW
 
 

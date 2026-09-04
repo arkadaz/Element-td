@@ -116,7 +116,6 @@ pub static TEXTURE: &[u8; MAP_W * MAP_H] = &[
 
 /// Cliff level per tile. Flat everywhere but two corners in this map, and
 /// kept so a raised arena would come through without a code change.
-#[allow(dead_code)]
 pub static LEVEL: &[u8; MAP_W * MAP_H] = &[
     2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,
     2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,
@@ -218,7 +217,6 @@ pub static LEVEL: &[u8; MAP_W * MAP_H] = &[
 ];
 
 /// Where the Red player's creeps come from, in tiles.
-#[allow(dead_code)]
 pub const SPAWN_TILE: [f32; 2] = [6.0, 90.0];
 
 /// The lap, in tiles.
@@ -228,20 +226,22 @@ pub const SPAWN_TILE: [f32; 2] = [6.0, 90.0];
 /// and back. Written as a closed loop down one half of the corridor and
 /// up the other, which is how two streams pass in a three-tile passage.
 pub static LAP: &[[f32; 2]] = &[
-    [6.00, 77.25],
-    [17.25, 77.25],
-    [17.25, 48.00],
-    [18.75, 48.00],
-    [18.75, 78.75],
-    [6.00, 78.75],
+    [18.25, 77.62],
+    [48.38, 78.00],
+    [77.88, 77.50],
+    [78.00, 47.75],
+    [77.62, 18.12],
+    [48.38, 18.00],
+    [18.38, 18.50],
+    [18.00, 47.62],
 ];
 
 /// The quarter of the map this player defends: min x, min y, max x, max y,
 /// in tiles. The rest of the field belongs to the other seven players and
 /// is drawn but never built on.
-pub const ARENA: [f32; 4] = [-1.0, 41.0, 26.8, 86.8];
+pub const ARENA: [f32; 4] = [10.0, 10.0, 86.0, 86.0];
 
 /// What the camera frames: the lane and the ground a tower can reach from
 /// it. Tighter than the arena, because Warcraft III sits about twenty-five
 /// tiles from edge to edge and the whole arena is sixty.
-pub const VIEW: [f32; 4] = [-1.0, 41.0, 26.8, 86.8];
+pub const VIEW: [f32; 4] = [10.0, 10.0, 86.0, 86.0];

@@ -506,7 +506,18 @@ impl Rig {
 
     /// The camera for a view of `span` tiles centred on `centre`.
     pub fn camera(&self, centre: [f32; 2], span: f32) -> Camera {
-        let target = v3(centre[0], centre[1], 0.0);
+        self.camera_at(centre, 0.0, span)
+    }
+
+    /// The same, aimed `lift` above the ground plane.
+    ///
+    /// Play always aims at the ground, because the ground is what the player is
+    /// choosing tiles on. A shallow camera cannot: at twenty degrees a figure
+    /// standing on the target rises most of the way up the frame, so a model
+    /// sheet aimed at z = 0 photographs the grass with everything's feet along
+    /// the top edge.
+    pub fn camera_at(&self, centre: [f32; 2], lift: f32, span: f32) -> Camera {
+        let target = v3(centre[0], centre[1], lift);
         Camera::at(
             target,
             self.distance(span),
@@ -557,16 +568,23 @@ impl Rig {
     pub fn pan_range(&self, span: f32, bounds: [f32; 4], reach: [f32; 4]) -> [f32; 4] {
         let d = self.distance(span);
         let axis = |lo: f32, hi: f32, want: (f32, f32), foot: (f32, f32), inner: (f32, f32)| {
-            let low = (lo - foot.0 * d).min(want.0 - inner.0 * d);
-            let high = (hi - foot.1 * d).max(want.1 - inner.1 * d);
-            if low > high {
-                // Zoomed out far enough that one view already holds everything
-                // this axis has to offer, so there is nothing left to scroll
-                // towards: sit in the middle of it.
-                let mid = (low + high) * 0.5;
-                return (mid, mid);
+            // Where the arena alone would let the centre sit.
+            let (mut blo, mut bhi) = (lo - foot.0 * d, hi - foot.1 * d);
+            if blo > bhi {
+                // Zoomed out far enough that one view already holds this axis
+                // of the arena, so there is nothing left to scroll towards:
+                // centre it. Collapsing *here*, before the reach below, is what
+                // stops the allowance growing without limit as the camera pulls
+                // back - it used to be applied to the combined range, so at full
+                // zoom-out the player could scroll a third of a screen onto
+                // ground with neither arena nor pads on it.
+                let mid = (blo + bhi) * 0.5;
+                blo = mid;
+                bhi = mid;
             }
-            (low, high)
+            // Then widened, if that is what it takes to bring the outermost
+            // pads on screen. When the arena already fits, it is not.
+            (blo.min(want.0 - inner.0 * d), bhi.max(want.1 - inner.1 * d))
         };
         let (x0, x1) = axis(
             bounds[0],
@@ -765,16 +783,50 @@ mod tests {
                     );
                 }
 
+                // Scrolling may overhang the arena - `Rig::pan_range` says why,
+                // and the pad check above is why it has to. What it may not do
+                // is wander: everything the player can bring on screen must be
+                // arena, or within a short reach of the outermost pad.
+                //
+                // Stated that way rather than as "inside the fully zoomed-out
+                // view", which is not the same thing and stopped being true
+                // when the arena became the map's real ring. A tall narrow
+                // window cannot hold a square arena on both axes at once, so
+                // the widest view is *smaller* than the arena in one of them,
+                // and comparing against it fails on ground that was never out
+                // of bounds.
+                // The allowance is a share of what is on screen rather than a
+                // fixed number of tiles, because the overhang `pan_range` grants
+                // is proportional to the camera's distance and so grows with the
+                // zoom. A tenth of the span, plus a few tiles at the near end.
+                // Panning may overhang the arena - `Rig::pan_range` says why,
+                // and the pad check above is why it has to. What it may not do
+                // is wander.
+                //
+                // Stated as a bound on where the camera *looks*, not on how
+                // much ground it takes in. Two earlier versions bounded the
+                // footprint - first against the fully zoomed-out view, then
+                // against a fraction of the span - and neither converges: the
+                // ground a fifty-two degree camera covers grows faster than the
+                // distance does, so every bound that held at one zoom failed at
+                // the next one out. The look-at point does not have that
+                // problem, and it is the thing the clamp actually controls.
+                const STRAY: f32 = 12.0;
+                let bound = [
+                    view[0].min(pads[0]) - STRAY,
+                    view[1].min(pads[1]) - STRAY,
+                    view[2].max(pads[2]) + STRAY,
+                    view[3].max(pads[3]) + STRAY,
+                ];
                 let r = rig.pan_range(span, view, pads);
                 for c in [[r[0], r[1]], [r[2], r[1]], [r[0], r[3]], [r[2], r[3]]] {
-                    let seen = on_screen(&rig.camera(c, span));
                     assert!(
-                        seen[0] >= outer[0] - SLACK
-                            && seen[1] >= outer[1] - SLACK
-                            && seen[2] <= outer[2] + SLACK
-                            && seen[3] <= outer[3] + SLACK,
-                        "panning to {c:?} at aspect {aspect}, span {span:.1} shows {seen:?}, \
-                         which is outside the arena view {outer:?}"
+                        c[0] >= bound[0]
+                            && c[1] >= bound[1]
+                            && c[0] <= bound[2]
+                            && c[1] <= bound[3],
+                        "at aspect {aspect}, span {span:.1} the camera can be aimed at {c:?}, \
+                         which is outside the arena and its pads {bound:?}"
                     );
                 }
             }

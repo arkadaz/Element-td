@@ -963,7 +963,15 @@ struct Planner {
     built: usize,
 }
 
-/// The order a board gets built in when nothing is urgent.
+/// The order a board gets built in when nothing is urgent, as a repeating
+/// pattern rather than a fixed list.
+///
+/// It used to be a list of exactly twenty-six, which was a sensible number when
+/// the lane was eighty-five tiles. The map's real circuit is two hundred and
+/// thirty-six, and a fixed twenty-six towers on it is a board with holes you
+/// could walk an army through - which is exactly what happened: the campaign
+/// test died on wave fifteen with twelve towers built and seven hundred and one
+/// monsters circling.
 const PLAN: [Family; 26] = [
     Family::Siege,
     Family::Siege,
@@ -996,6 +1004,27 @@ const PLAN: [Family; 26] = [
 /// How many waves ahead a gap in the board counts as urgent.
 const LOOKAHEAD: u32 = 4;
 
+/// How much lane one tower is responsible for.
+///
+/// A Siege Tower reaches seven tiles, so it covers about fourteen of corridor if
+/// the corridor runs past it. Halved, because a lane you cover exactly once is a
+/// lane where every monster is under fire for one tower's worth of time and no
+/// more, and that is not enough throughput to hold a circuit.
+const LANE_PER_TOWER: f32 = 7.0;
+
+/// How many towers it takes to cover this board's lane.
+fn coverage_target(g: &Game) -> usize {
+    (g.board.total / LANE_PER_TOWER).ceil() as usize
+}
+
+/// The family to build `n`th, cycling the plan once it runs out.
+///
+/// The tail of the pattern is mostly Siege with Multi, Destruction and Troll
+/// mixed through it, which is the shape a real board keeps as it grows.
+fn plan_at(n: usize) -> Family {
+    PLAN[n % PLAN.len()]
+}
+
 impl Planner {
     fn spend(&mut self, g: &mut Game) {
         for _ in 0..500 {
@@ -1014,13 +1043,20 @@ impl Planner {
                 }
             }
 
-            // 2. Cover the lane before deepening anything on it. Eighty-five
-            //    tiles of corridor and a seven tile reach means about a dozen
-            //    towers to watch all of it; four very good ones watch an
-            //    eighth of it and the rest walks past.
-            let build = PLAN.get(self.built).map(|&f| (f, seed_cost(f)));
+            // 2. Cover the lane before deepening anything on it, at whatever
+            //    length this map's lane happens to be - see `coverage_target`.
+            let target = coverage_target(g);
+            let build = if self.built < target * 2 {
+                let f = plan_at(self.built);
+                Some((f, seed_cost(f)))
+            } else {
+                None
+            };
             let up = cheapest_upgrade(g);
-            let spread = g.towers.len() < 12;
+            // Cover the whole lane before deepening any of it. Four very good
+            // towers watch a fraction of a two-hundred-tile circuit and the rest
+            // walks past them.
+            let spread = g.towers.len() < target;
             let take_build = match (build, up) {
                 (Some((_, bc)), Some((_, _, uc))) => spread || bc <= uc as i64,
                 (Some(_), None) => true,
@@ -1049,7 +1085,11 @@ impl Planner {
     /// first free pad in index order is in the far corner of the field, and a
     /// board built there fires at nothing at all.
     fn place(&mut self, g: &mut Game, family: Family) -> bool {
-        let along = (self.built as f32 + 0.5) / PLAN.len() as f32 * g.board.total;
+        // Spread along the whole lane, wrapping so a second pass fills the gaps
+        // between the first rather than piling up past the end of it.
+        let target = coverage_target(g).max(1);
+        let along = (self.built as f32 + 0.5) / target as f32 * g.board.total;
+        let along = along % g.board.total;
         let at = g.board.sample(along);
         let Some(slot) = (0..g.board.slots.len())
             .filter(|&i| g.board.slots[i].tower.is_none())

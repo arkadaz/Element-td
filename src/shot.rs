@@ -239,6 +239,85 @@ pub fn capture(game: &Game, decor: &Decor, width: u32, height: u32, quality: Qua
     )
 }
 
+/// Renders an arbitrary draw list over flat ground, framed on a box of world.
+///
+/// `capture` photographs the game; this photographs whatever you hand it. It
+/// exists for the model sheet, and the reason it needs to exist is that fifty-
+/// six models cannot be judged from a battle: on the board a monster is forty
+/// pixels tall in a crowd of three hundred, and at that size a figure with the
+/// wrong proportions and a figure with the right ones look equally like a smudge.
+pub fn capture_list(
+    list: &DrawList,
+    centre: [f32; 2],
+    span: f32,
+    pitch_deg: f32,
+    lift: f32,
+    width: u32,
+    height: u32,
+) -> Shot {
+    render_to_image(
+        width,
+        height,
+        FORMAT,
+        |device, queue, adapter, encoder, view_tex| {
+            let mut renderer = Renderer::new(device, adapter, FORMAT);
+            renderer.quality = Quality::Ultra;
+            renderer.set_quality(device, Quality::Ultra);
+
+            // A plain ground plate, so the figures cast onto something and the
+            // sheet is lit the way the board is.
+            let mut ground = DrawList::default();
+            ground.shape(
+                crate::gfx::mesh::Shape::Quad,
+                [centre[0], centre[1], 0.1],
+                [span * 2.0, span * 2.0, 1.0],
+                0.0,
+                0.0,
+                [0.105, 0.190, 0.075, 1.0],
+                crate::gfx::draw::Material::EARTH,
+                0.0,
+            );
+            renderer.set_static_scene(queue, &DrawList::default(), &ground);
+            renderer.upload_static(queue);
+
+            let rig = Rig::new(
+                width as f32 / height.max(1) as f32,
+                pitch_deg.to_radians(),
+                crate::CAM_YAW_DEG.to_radians(),
+            );
+            let camera = rig.camera_at(centre, lift, span);
+            let light = shadow_view_proj(BW, BH, LIGHT_DIR);
+            for _ in 0..2 {
+                renderer.prepare(
+                    device, queue, encoder, list, &[], &camera, &light, width, height,
+                    1.0 / 60.0,
+                );
+            }
+            let mut pass = encoder
+                .begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("sheet composite"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: view_tex,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                })
+                .forget_lifetime();
+            renderer.composite(&mut pass, 0.0, 0.0, width as f32, height as f32);
+            drop(pass);
+            Vec::new()
+        },
+    )
+}
+
 /// Writes a PNG. Uncompressed deflate blocks, so there is no dependency to add
 /// for what is a debugging convenience - a 1280x720 frame lands around 3.7 MB,
 /// which is fine for something nobody ships.
