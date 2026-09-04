@@ -320,6 +320,10 @@ pub fn draw(d: &mut DrawList, m: Model, p: &Pose, s: &Skin) {
             // way they walk.
             p.yaw,
             0.0,
+            // Where in the stride this one is. `Pose::t` is already staggered
+            // per unit, so a wave does not march in lockstep; a unit that is
+            // not walking is frozen at the pose the bake chose.
+            if p.walk { p.t * 0.72 } else { 0.0 },
             // White, so the model's own baked colours come through untouched.
             // The hit flash still reads, because `Skin::wearing` puts it here.
             [1.0, 1.0, 1.0, 1.0],

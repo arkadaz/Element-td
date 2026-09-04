@@ -96,22 +96,47 @@ def colour_layer(asset):
     return im
 
 
+def normal_layer(asset):
+    """The tangent-space normal map, square, at `SIZE`.
+
+    These zips have been downloaded all along and only the colour was kept,
+    which is most of why the ground read as painted card: an albedo tells the
+    light what colour a surface is and nothing at all about its shape. The
+    normal map is the shape.
+
+    `NormalGL` rather than `NormalDX` - the green channel points up in OpenGL
+    convention, which is what the shader below assumes.
+    """
+    z = zipfile.ZipFile(fetch(asset))
+    name = next((n for n in z.namelist() if n.lower().endswith('_normalgl.jpg')), None)
+    if name is None:
+        # No normal map in this pack: a flat one, which perturbs nothing.
+        return Image.new('RGB', (SIZE, SIZE), (128, 128, 255))
+    im = Image.open(io.BytesIO(z.read(name))).convert('RGB')
+    return im.resize((SIZE, SIZE), Image.LANCZOS)
+
+
 def main():
     os.makedirs(OUT, exist_ok=True)
     body = bytearray()
     names = []
+    # Colours first, then the matching normals in the same order, so a layer's
+    # normal is always at `layer + len(LAYERS)`. `solid.wgsl` relies on that.
     for name, asset in LAYERS:
         im = colour_layer(asset)
         body += im.convert('RGBA').tobytes()
         names.append((name, asset))
         px = im.resize((1, 1), Image.LANCZOS).getpixel((0, 0))
         print('  %-7s %-12s average rgb%s' % (name, asset, px))
+    for name, asset in LAYERS:
+        body += normal_layer(asset).convert('RGBA').tobytes()
+        print('  %-7s %-12s normal map' % (name, asset))
 
-    head = struct.pack('<IIII', MAGIC, 1, SIZE, len(LAYERS))
+    head = struct.pack('<IIII', MAGIC, 2, SIZE, len(LAYERS) * 2)
     dst = os.path.join(OUT, 'textures.bin')
     open(dst, 'wb').write(head + bytes(body))
     print('\nwrote %s  %d layers of %dx%d  %.1f KB'
-          % (dst, len(LAYERS), SIZE, SIZE, (len(head) + len(body)) / 1024.0))
+          % (dst, len(LAYERS) * 2, SIZE, SIZE, (len(head) + len(body)) / 1024.0))
 
     creds = os.path.join(OUT, 'CREDITS.md')
     with open(creds, 'a', newline='\n') as f:

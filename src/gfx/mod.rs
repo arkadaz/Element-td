@@ -305,14 +305,20 @@ pub struct Renderer {
     pub last_instances: u32,
 }
 
-const MESH_ATTRS: [wgpu::VertexAttribute; 3] =
-    wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 8 => Float32x3];
+/// Packed: see `mesh::GpuVertex`, whose field order this must match.
+const MESH_ATTRS: [wgpu::VertexAttribute; 5] = wgpu::vertex_attr_array![
+    0 => Snorm16x4, 1 => Snorm8x4, 8 => Unorm8x4,
+    // The second pose, as an offset. Zero on everything that does not walk.
+    9 => Snorm16x4, 10 => Snorm8x4
+];
 
 /// Solid instances sit alongside the mesh, so they start at location 2.
 /// Location 7 carries the PBR material (roughness, metallic).
-const SOLID_ATTRS: [wgpu::VertexAttribute; 6] = wgpu::vertex_attr_array![
+const SOLID_ATTRS: [wgpu::VertexAttribute; 7] = wgpu::vertex_attr_array![
     2 => Float32x3, 3 => Float32x3, 4 => Float32x2, 5 => Float32x2, 6 => Float32x4,
-    7 => Float32x2
+    7 => Float32x2,
+    // x: how far through the stride this instance is. y is spare.
+    11 => Float32x2
 ];
 
 /// Billboards have no mesh buffer, so their instance data starts at location 0.
@@ -336,7 +342,7 @@ const ADD_BLEND: wgpu::BlendState = wgpu::BlendState {
 
 fn mesh_layout<'a>() -> wgpu::VertexBufferLayout<'a> {
     wgpu::VertexBufferLayout {
-        array_stride: std::mem::size_of::<mesh::Vertex>() as u64,
+        array_stride: std::mem::size_of::<mesh::GpuVertex>() as u64,
         step_mode: wgpu::VertexStepMode::Vertex,
         attributes: &MESH_ATTRS,
     }
@@ -958,7 +964,7 @@ impl Renderer {
             let at = |o: usize| u32::from_le_bytes([blob[o], blob[o + 1], blob[o + 2], blob[o + 3]]);
             let (magic, ver, sz, n) = (at(0), at(4), at(8), at(12));
             let need = 16 + (sz as usize * sz as usize * 4) * n as usize;
-            if magic == 0x5845_5447 && ver == 1 && sz > 0 && n > 0 && blob.len() >= need {
+            if magic == 0x5845_5447 && ver == 2 && sz > 0 && n > 0 && blob.len() >= need {
                 size = sz;
                 layers = n;
                 pixels = blob[16..need].to_vec();

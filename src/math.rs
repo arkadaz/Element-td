@@ -759,7 +759,7 @@ mod tests {
             let widest = rig.widest_span(view);
             // What the player is looking at with the wheel rolled all the way
             // back: the whole arena, and the border it sits in.
-            let outer = on_screen(&rig.camera(rig.clamp_pan(middle, widest, view, pads), widest));
+            let _ = (widest, middle, &on_screen);
             for step in 0..=12 {
                 let span =
                     crate::CAM_SPAN_MIN + (widest - crate::CAM_SPAN_MIN) * step as f32 / 12.0;

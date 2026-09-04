@@ -12,8 +12,9 @@
 
 use bytemuck::{Pod, Zeroable};
 
-#[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable, Default)]
+/// A vertex while it is being built. Plain floats, because the shape builders
+/// are arithmetic and packing in the middle of that would be unreadable.
+#[derive(Clone, Copy, Default)]
 pub struct Vertex {
     pub pos: [f32; 3],
     pub nrm: [f32; 3],
@@ -24,6 +25,84 @@ pub struct Vertex {
     /// it - an orc's skin, straps and axe are different colours within one mesh
     /// and one draw - which is the whole reason this attribute exists.
     pub col: [f32; 3],
+    /// Where this vertex sits half a stride later, as an offset, and how its
+    /// normal moves with it.
+    ///
+    /// Zero on every generated primitive and on anything the bake found no
+    /// animation for, so those are rigid and cost only the bytes.
+    pub dpos: [f32; 3],
+    pub dnrm: [f32; 3],
+}
+
+/// The largest coordinate a model may have, in units of its own height.
+///
+/// Positions are stored as a fraction of this, so the shader multiplies by it
+/// to get back to model space. Must match `POS_RANGE` in
+/// `tools/bake_models.py`; `the_packed_range_matches_the_bake` checks it.
+pub const POS_RANGE: f32 = 4.0;
+
+/// What actually goes in the vertex buffer: twenty-eight bytes, not sixty.
+///
+/// Nothing here needs float precision. A model is normalised to one unit tall,
+/// so a sixteen-bit position is good to a fraction of a millimetre at human
+/// scale, and normals and colours have never needed more than eight bits. In
+/// floats the model blob was 28 MB - larger than the rest of the game put
+/// together.
+///
+/// The fourth component of each vector is padding the GPU formats require
+/// (`Snorm16x4`, `Snorm8x4`, `Unorm8x4`), not spare capacity.
+///
+/// **Field order must match `MESH_ATTRS`.** `wgpu::vertex_attr_array!` assigns
+/// byte offsets in the order attributes are listed, so a field inserted in the
+/// middle of this silently feeds the shader the wrong data - which is exactly
+/// what happened when `dpos` went in before `col`, and the whole board rendered
+/// black.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable, Default)]
+pub struct GpuVertex {
+    pub pos: [i16; 4],
+    pub nrm: [i8; 4],
+    pub col: [u8; 4],
+    pub dpos: [i16; 4],
+    pub dnrm: [i8; 4],
+}
+
+fn q16(v: f32) -> i16 {
+    (v / POS_RANGE).clamp(-1.0, 1.0).mul_add(32767.0, 0.0) as i16
+}
+
+fn q8(v: f32) -> i8 {
+    (v.clamp(-1.0, 1.0) * 127.0) as i8
+}
+
+fn u8c(v: f32) -> u8 {
+    (v.clamp(0.0, 1.0) * 255.0) as u8
+}
+
+impl GpuVertex {
+    /// The position this was packed from. For tests and diagnostics; the GPU
+    /// unpacks it in the vertex shader.
+    pub fn position(&self) -> [f32; 3] {
+        let f = |v: i16| v as f32 / 32767.0 * POS_RANGE;
+        [f(self.pos[0]), f(self.pos[1]), f(self.pos[2])]
+    }
+    /// The normal this was packed from.
+    pub fn normal(&self) -> [f32; 3] {
+        let f = |v: i8| v as f32 / 127.0;
+        [f(self.nrm[0]), f(self.nrm[1]), f(self.nrm[2])]
+    }
+}
+
+impl From<Vertex> for GpuVertex {
+    fn from(v: Vertex) -> GpuVertex {
+        GpuVertex {
+            pos: [q16(v.pos[0]), q16(v.pos[1]), q16(v.pos[2]), 0],
+            nrm: [q8(v.nrm[0]), q8(v.nrm[1]), q8(v.nrm[2]), 0],
+            col: [u8c(v.col[0]), u8c(v.col[1]), u8c(v.col[2]), 255],
+            dpos: [q16(v.dpos[0]), q16(v.dpos[1]), q16(v.dpos[2]), 0],
+            dnrm: [q8(v.dnrm[0]), q8(v.dnrm[1]), q8(v.dnrm[2]), 0],
+        }
+    }
 }
 
 /// Which shape an instance draws. Kept in `Instance::params.y`.
@@ -95,7 +174,7 @@ pub struct Span {
 }
 
 pub struct Library {
-    pub vertices: Vec<Vertex>,
+    pub vertices: Vec<GpuVertex>,
     pub spans: [Span; SHAPE_COUNT],
     /// Archetype name to model slot, for whatever `assets/models.bin` held.
     pub models: Vec<(String, usize)>,
@@ -112,12 +191,13 @@ static MODEL_BLOB: &[u8] = include_bytes!("../../assets/models.bin");
 ///
 /// Format, all little-endian: magic `GTDM`, a version, a model count, then that
 /// many `(u8 name length, name, u32 first vertex, u32 count)` records, then the
-/// vertices themselves as nine floats each - position, normal, colour.
+/// vertices themselves as fifteen floats each - position, normal, colour, and
+/// the offset to the second pose's position and normal.
 ///
 /// A blob that is missing, truncated or of an unknown version leaves the model
 /// slots empty, and every archetype falls back to its generated build. That is
 /// deliberate: a bad asset should cost detail, not the game.
-fn load_models(v: &mut Vec<Vertex>, spans: &mut [Span; SHAPE_COUNT]) -> Vec<(String, usize)> {
+fn load_models(v: &mut Vec<GpuVertex>, spans: &mut [Span; SHAPE_COUNT]) -> Vec<(String, usize)> {
     let b = MODEL_BLOB;
     let mut out = Vec::new();
     if b.len() < 12 {
@@ -126,7 +206,7 @@ fn load_models(v: &mut Vec<Vertex>, spans: &mut [Span; SHAPE_COUNT]) -> Vec<(Str
     let u32_at = |o: usize| -> u32 {
         u32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]])
     };
-    if u32_at(0) != 0x4D44_5447 || u32_at(4) != 1 {
+    if u32_at(0) != 0x4D44_5447 || u32_at(4) != 3 {
         return out;
     }
     let count = u32_at(8) as usize;
@@ -149,7 +229,7 @@ fn load_models(v: &mut Vec<Vertex>, spans: &mut [Span; SHAPE_COUNT]) -> Vec<(Str
         records.push((name, first, vcount));
     }
     let body = o;
-    let stride = 36;
+    let stride = std::mem::size_of::<GpuVertex>();
     for (slot, (name, first, vcount)) in records.into_iter().enumerate() {
         let start = body + first * stride;
         let end = start + vcount * stride;
@@ -157,16 +237,11 @@ fn load_models(v: &mut Vec<Vertex>, spans: &mut [Span; SHAPE_COUNT]) -> Vec<(Str
             continue;
         }
         let base = v.len() as u32;
-        for k in 0..vcount {
-            let f = |j: usize| -> f32 {
-                let o = start + k * stride + j * 4;
-                f32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]])
-            };
-            v.push(Vertex {
-                pos: [f(0), f(1), f(2)],
-                nrm: [f(3), f(4), f(5)],
-                col: [f(6), f(7), f(8)],
-            });
+        // The bake writes exactly `GpuVertex`, so this is a reinterpretation
+        // rather than a decode - which is the point of packing at bake time.
+        match bytemuck::try_cast_slice::<u8, GpuVertex>(&b[start..end]) {
+            Ok(verts) => v.extend_from_slice(verts),
+            Err(_) => continue,
         }
         spans[model_bucket(slot)] = Span {
             first: base,
@@ -185,22 +260,22 @@ pub fn model_slots() -> &'static [(String, usize)] {
     static SLOTS: std::sync::OnceLock<Vec<(String, usize)>> = std::sync::OnceLock::new();
     SLOTS.get_or_init(|| {
         let mut spans = [Span::default(); SHAPE_COUNT];
-        let mut verts: Vec<Vertex> = Vec::new();
+        let mut verts: Vec<GpuVertex> = Vec::new();
         load_models(&mut verts, &mut spans)
     })
 }
 
 /// Builds every shape into one buffer, recording each one's span.
 pub fn build() -> Library {
-    let mut v: Vec<Vertex> = Vec::with_capacity(4096);
+    let mut v: Vec<GpuVertex> = Vec::with_capacity(4096);
     let mut spans = [Span::default(); SHAPE_COUNT];
 
-    let mut record = |v: &mut Vec<Vertex>, idx: usize, tris: Vec<Vertex>| {
+    let mut record = |v: &mut Vec<GpuVertex>, idx: usize, tris: Vec<Vertex>| {
         spans[idx] = Span {
             first: v.len() as u32,
             count: tris.len() as u32,
         };
-        v.extend(tris);
+        v.extend(tris.into_iter().map(GpuVertex::from));
     };
 
     record(&mut v, Shape::Box as usize, chamfered_box(0.12));
@@ -234,9 +309,17 @@ fn tri(a: [f32; 3], b: [f32; 3], c: [f32; 3], out: &mut Vec<Vertex>) {
         u[0] * w[1] - u[1] * w[0],
     ]);
     const W: [f32; 3] = [1.0, 1.0, 1.0];
-    out.push(Vertex { pos: a, nrm: n, col: W });
-    out.push(Vertex { pos: b, nrm: n, col: W });
-    out.push(Vertex { pos: c, nrm: n, col: W });
+    const Z: [f32; 3] = [0.0, 0.0, 0.0];
+    let v = |pos| Vertex {
+        pos,
+        nrm: n,
+        dpos: Z,
+        dnrm: Z,
+        col: W,
+    };
+    out.push(v(a));
+    out.push(v(b));
+    out.push(v(c));
 }
 
 /// Triangle with explicit per-vertex normals, for anything curved.
@@ -247,21 +330,17 @@ fn tri_n(
     out: &mut Vec<Vertex>,
 ) {
     const W: [f32; 3] = [1.0, 1.0, 1.0];
-    out.push(Vertex {
-        pos: a.0,
-        nrm: normalize(a.1),
+    const Z: [f32; 3] = [0.0, 0.0, 0.0];
+    let v = |x: ([f32; 3], [f32; 3])| Vertex {
+        pos: x.0,
+        nrm: normalize(x.1),
+        dpos: Z,
+        dnrm: Z,
         col: W,
-    });
-    out.push(Vertex {
-        pos: b.0,
-        nrm: normalize(b.1),
-        col: W,
-    });
-    out.push(Vertex {
-        pos: c.0,
-        nrm: normalize(c.1),
-        col: W,
-    });
+    };
+    out.push(v(a));
+    out.push(v(b));
+    out.push(v(c));
 }
 
 fn normalize(v: [f32; 3]) -> [f32; 3] {
@@ -655,16 +734,21 @@ mod tests {
             .max()
             .unwrap_or(0) as usize;
         for (i, v) in lib.vertices[..end].iter().enumerate() {
+            let p = v.position();
             for k in 0..3 {
                 assert!(
-                    v.pos[k].abs() <= 0.5001,
-                    "vertex {i} escapes the unit cell: {:?}",
-                    v.pos
+                    p[k].abs() <= 0.5001,
+                    "vertex {i} escapes the unit cell: {p:?}"
                 );
             }
-            let len = (v.nrm[0] * v.nrm[0] + v.nrm[1] * v.nrm[1] + v.nrm[2] * v.nrm[2]).sqrt();
+            let n = v.normal();
+            let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+            // Normals are eight-bit, so each component is good to about
+            // 1/127 and the length of the vector can be out by a little over a
+            // percent. Two percent is the real bound; anything past it is a
+            // normal that was wrong before it was packed.
             assert!(
-                (len - 1.0).abs() < 0.01,
+                (len - 1.0).abs() < 0.02,
                 "vertex {i} normal is not unit: {len}"
             );
         }
@@ -682,14 +766,21 @@ mod tests {
         for (name, slot) in &lib.models {
             let s = lib.spans[model_bucket(*slot)];
             let v = &lib.vertices[s.first as usize..(s.first + s.count) as usize];
-            let lo = v.iter().fold(f32::MAX, |m, x| m.min(x.pos[2]));
-            let hi = v.iter().fold(f32::MIN, |m, x| m.max(x.pos[2]));
+            let lo = v.iter().fold(f32::MAX, |m, x| m.min(x.position()[2]));
+            let hi = v.iter().fold(f32::MIN, |m, x| m.max(x.position()[2]));
             assert!(lo.abs() < 0.01, "{name} does not stand on the ground: {lo}");
             assert!((hi - 1.0).abs() < 0.01, "{name} is {hi} tall, not one");
-            let wide = v
-                .iter()
-                .fold(0.0f32, |m, x| m.max(x.pos[0].abs().max(x.pos[1].abs())));
-            assert!(wide < 4.0, "{name} is {wide} wide - that is not a unit");
+            let wide = v.iter().fold(0.0f32, |m, x| {
+                let p = x.position();
+                m.max(p[0].abs().max(p[1].abs()))
+            });
+            // Not POS_RANGE itself: a position at exactly the range would have
+            // been clipped by the packing, so anything near it is a model that
+            // did not fit rather than one that is merely wide.
+            assert!(
+                wide < POS_RANGE * 0.98,
+                "{name} is {wide} wide - that is past what the packed format holds"
+            );
         }
     }
 

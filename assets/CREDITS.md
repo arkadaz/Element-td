@@ -5,6 +5,26 @@ baked by `tools/bake_models.py` from the sources below.
 
 | Archetype | Model | Author | Source |
 | --- | --- | --- | --- |
+| Troll | Blue Demon | Quaternius | https://static.poly.pizza/6fbb8914-bd11-45e1-a906-51ace2ca5d2d.glb |
+| Rifleman | SWAT | Quaternius | https://static.poly.pizza/713f6535-f4f3-4367-a4c6-ced126ae0936.glb |
+| Bear | Wolf | Quaternius | https://static.poly.pizza/f1d12388-e39b-4157-b32a-646a1d089fc4.glb |
+| Mammoth | Cow | Quaternius | https://static.poly.pizza/382b3d4a-a7c9-4c03-9858-3df630d90047.glb |
+| Turtle | Turtle Character | Polygonal Mind | https://static.poly.pizza/508c991f-6624-4a4a-8c3a-7c4557e5a415.glb |
+| Ent | Tree Spiral | Quaternius | https://static.poly.pizza/bbec9d41-c797-4077-8712-3d733288765f.glb |
+| Golem | Goleling | Quaternius | https://static.poly.pizza/51bf31d7-1aee-4a51-acb1-d667843af205.glb |
+| FlameLord | Bonfire | Quaternius | https://static.poly.pizza/e96d5573-fa3a-47ad-bae0-0ef9640026fa.glb |
+| Gyrocopter | Helicopter | kazuma | https://static.poly.pizza/e3dfeb10-5525-4a39-83d8-13a709aaca4b.glb |
+| Phoenix | Birb | Quaternius | https://static.poly.pizza/05dac745-bdd0-4169-9e64-f497ca21f69a.glb |
+| Vulcan | Turret Gun | Quaternius | https://static.poly.pizza/58ce64fc-b698-4b78-af75-05bb2dfad2ed.glb |
+| SamSite | Rocket | hat_my_guy | https://static.poly.pizza/244c027c-40f0-45ca-a707-0f8e855c9831.glb |
+| MeatWagon | Broken Cart | Quaternius | https://static.poly.pizza/713b3099-a66a-417e-8c2e-1fe55497f325.glb |
+| Obelisk | Column | Quaternius | https://static.poly.pizza/5239f88f-e30b-452b-a19e-89745d580b1e.glb |
+| DemonGate | Arch | Quaternius | https://static.poly.pizza/b4f2ce7f-e692-4b4c-aa2e-0d6b6e42d552.glb |
+| Wisp | Planet | Quaternius | https://static.poly.pizza/a7874f98-9015-4c0c-933e-fa82dbb01907.glb |
+| IceTorch | Crystal | iPoly3D | https://static.poly.pizza/5d75f150-80ee-4345-b823-7d566742501c.glb |
+| EggSack | Egg | Quaternius | https://static.poly.pizza/b93932c4-96f0-45e7-bf05-fee371aaad09.glb |
+| ThornsAura | Cactus | Quaternius | https://static.poly.pizza/c9bfa77b-fc43-402a-aee4-f34b2581b0f6.glb |
+| DarkPortal | Landing Pad | Kay Lousberg | https://static.poly.pizza/deb43956-8ef1-435d-a4ff-b991f24b80ee.glb |
 | Acolyte | Monkroose | Quaternius | https://static.poly.pizza/54ca5c4d-aa20-40ff-a510-25c1c6a48ee9.glb |
 | Archer | Archery Second Age Le | Quaternius | https://static.poly.pizza/6e897a9f-7c4c-44c2-85d6-cc79b18d6b07.glb |
 | Mage | Wizard | Quaternius | https://static.poly.pizza/d206c071-7934-40eb-9091-35ebdf93c317.glb |

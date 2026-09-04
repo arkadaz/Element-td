@@ -27,7 +27,8 @@ pub struct Instance {
     pub params: [f32; 2],
     pub color: Color,
     pub material: [f32; 2],
-    pub _pad: [f32; 2],
+    /// x: how far through the stride, 0 to 1. y is spare.
+    pub anim: [f32; 2],
 }
 
 /// Which layer of `assets/textures.bin` a ground tile uses.
@@ -169,7 +170,7 @@ impl DrawList {
             params: [emissive, 0.0],
             color,
             material: mat.pack(),
-            _pad: [0.0; 2],
+            anim: [0.0; 2],
         });
     }
 
@@ -350,6 +351,9 @@ impl DrawList {
 
     /// One instance of a baked model, in the bucket that model was loaded into.
     ///
+    /// `step` is how far through the stride, 0 to 1; it wraps, so any value
+    /// works and a per-unit offset stops a wave marching in lockstep.
+    ///
     /// A model is a whole unit in a single draw - an orc's skin, leather and axe
     /// are colours inside the mesh rather than separate instances - so this is
     /// one call where a generated build was forty.
@@ -361,6 +365,7 @@ impl DrawList {
         scale: [f32; 3],
         yaw: f32,
         pitch: f32,
+        step: f32,
         color: Color,
         mat: Material,
         em: f32,
@@ -376,7 +381,7 @@ impl DrawList {
             params: [em, bucket as f32],
             color,
             material: [mat.roughness, mat.metallic],
-            _pad: [0.0; 2],
+            anim: [step, 0.0],
         });
     }
 
@@ -404,7 +409,7 @@ impl DrawList {
             params: [0.0, layer as u32 as f32 + 1.0],
             color,
             material: [mat.roughness, mat.metallic],
-            _pad: [0.0; 2],
+            anim: [0.0; 2],
         });
     }
 
@@ -419,7 +424,7 @@ impl DrawList {
             params: [power, 0.0],
             color,
             material: [1.0, 0.0],
-            _pad: [0.0; 2],
+            anim: [0.0; 2],
         });
     }
 

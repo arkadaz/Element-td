@@ -151,7 +151,7 @@ pub fn material(ctx: &egui::Context, which: Mat) -> Option<egui::TextureHandle> 
         return None;
     }
     let at = |o: usize| u32::from_le_bytes([blob[o], blob[o + 1], blob[o + 2], blob[o + 3]]);
-    if at(0) != 0x5845_5447 || at(4) != 1 {
+    if at(0) != 0x5845_5447 || at(4) != 2 {
         return None;
     }
     let size = at(8) as usize;

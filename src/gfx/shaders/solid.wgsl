@@ -21,6 +21,21 @@ struct Uniforms {
     fog: vec4<f32>,         // rgb = fog colour, a = density
 };
 @group(0) @binding(0) var<uniform> U: Uniforms;
+/// How hard the ground's normal map bends the surface normal. One would be the
+/// map's own strength; this is softer, because the camera looks down at fifty-
+/// two degrees and a full-strength normal on a floor seen from above turns into
+/// noise rather than relief.
+const GROUND_RELIEF: f32 = 0.55;
+
+/// Must match `mesh::POS_RANGE`. Vertex positions are stored as a fraction of
+/// it so they fit in sixteen bits.
+const POS_RANGE: f32 = 4.0;
+
+/// How many colour layers `assets/textures.bin` holds. Each one's normal map is
+/// that many layers further on, so this must match `LAYERS` in
+/// `tools/bake_textures.py`; `the_texture_blob_matches_the_shader` checks it.
+const GROUND_LAYERS: i32 = 4;
+
 @group(0) @binding(3) var ground_tex: texture_2d_array<f32>;
 @group(0) @binding(4) var ground_smp: sampler;
 @group(0) @binding(1) var shadow_map: texture_depth_2d;
@@ -33,8 +48,11 @@ struct Uniforms {
 const SHADOW_TAPS: i32 = 4;
 
 struct VsIn {
-    @location(0) v_pos: vec3<f32>,
-    @location(1) v_nrm: vec3<f32>,
+    // Packed - see `mesh::GpuVertex`. Positions arrive as a fraction of
+    // POS_RANGE and are scaled back below; normals and colours arrive already
+    // normalised by the snorm/unorm formats.
+    @location(0) v_pos: vec4<f32>,
+    @location(1) v_nrm: vec4<f32>,
     @location(2) i_pos: vec3<f32>,
     @location(3) i_scale: vec3<f32>,
     @location(4) i_rot: vec2<f32>,
@@ -42,7 +60,10 @@ struct VsIn {
     @location(6) i_color: vec4<f32>,
     @location(7) i_material: vec2<f32>,
     // A baked model's own vertex colour; white on every generated primitive.
-    @location(8) v_col: vec3<f32>,
+    @location(8) v_col: vec4<f32>,
+    @location(9) v_dpos: vec4<f32>,
+    @location(10) v_dnrm: vec4<f32>,
+    @location(11) i_anim: vec2<f32>,
 };
 
 struct VsOut {
@@ -84,11 +105,20 @@ fn rot_of(yaw: f32, pitch: f32) -> mat3x3<f32> {
 @vertex
 fn vs(in: VsIn) -> VsOut {
     let r = rot_of(in.i_rot.x, in.i_rot.y);
-    let world = in.i_pos + r * (in.v_pos * in.i_scale);
+    // The walk. Two poses half a stride apart are baked into the mesh - the
+    // second as an offset - and this blends between them. A cosine rather than
+    // a sawtooth so the figure eases through each contact instead of snapping
+    // back at the end of the cycle, and because half a walk cycle IS the other
+    // half with the legs swapped, going back and forth between two poses is the
+    // whole stride rather than half of one.
+    let step = 0.5 - 0.5 * cos(in.i_anim.x * 6.2831853);
+    let v_pos = (in.v_pos.xyz + in.v_dpos.xyz * step) * POS_RANGE;
+    let v_nrm = in.v_nrm.xyz + in.v_dnrm.xyz * step;
+    let world = in.i_pos + r * (v_pos * in.i_scale);
     // Non-uniform scale needs the inverse-transpose; for an axis-aligned scale
     // that is just dividing by the scale.
     let inv = vec3<f32>(1.0) / max(in.i_scale, vec3<f32>(1e-4));
-    let nrm = normalize(r * (in.v_nrm * inv));
+    let nrm = normalize(r * (v_nrm * inv));
 
     var o: VsOut;
     o.clip = U.view_proj * vec4<f32>(world, 1.0);
@@ -96,7 +126,7 @@ fn vs(in: VsIn) -> VsOut {
     o.world = world;
     o.color = in.i_color;
     o.emissive = in.i_params.x;
-    o.color = vec4<f32>(o.color.rgb * in.v_col, o.color.a);
+    o.color = vec4<f32>(o.color.rgb * in.v_col.rgb, o.color.a);
     o.tex = in.i_params.y;
     o.material = in.i_material;
     o.tint = 0.94 + fract(sin(dot(in.i_pos.xy, vec2<f32>(12.9898, 78.233))) * 43758.5453) * 0.12;
@@ -243,16 +273,32 @@ fn fs(o: VsOut) -> @location(0) vec4<f32> {
     // per tile, which is deliberately not exactly once: on an exact tile the
     // repeat lands on the grid and the field reads as wallpaper.
     var albedo_tex = vec3<f32>(1.0);
+    var n = normalize(o.nrm);
     if (o.tex >= 0.5) {
         let layer = i32(o.tex - 1.0);
-        albedo_tex = textureSample(ground_tex, ground_smp, o.world.xy * 0.73, layer).rgb;
+        let uv = o.world.xy * 0.73;
+        albedo_tex = textureSample(ground_tex, ground_smp, uv, layer).rgb;
+
+        // The surface's shape, not just its colour.
+        //
+        // The ground is flat and axis-aligned, so its tangent frame is the
+        // world's: +x is tangent, +y is bitangent, +z is up. That makes this a
+        // three-line perturbation with no tangent basis to carry through the
+        // vertex format - and it is the single largest difference between a
+        // field that reads as ground and one that reads as painted card.
+        let tn = textureSample(ground_tex, ground_smp, uv, layer + GROUND_LAYERS).xyz * 2.0 - 1.0;
+        n = normalize(vec3<f32>(
+            n.x + tn.x * GROUND_RELIEF,
+            n.y + tn.y * GROUND_RELIEF,
+            n.z,
+        ));
         // The bake normalises each layer to a linear mean of one half, so twice
         // the sample averages to exactly one: the texture multiplies the tile's
         // measured colour without changing how bright it is on average. The mix
         // is how much grain to let through.
         albedo_tex = mix(vec3<f32>(1.0), albedo_tex * 2.0, 0.75);
     }
-    let n = normalize(o.nrm);
+
     let l = normalize(U.light_dir.xyz);
     let v = normalize(U.cam_pos.xyz - o.world);
     let h = normalize(l + v);
