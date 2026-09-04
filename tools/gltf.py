@@ -9,9 +9,14 @@ Rust side reads.
 glTF is JSON plus one binary chunk, so there is no dependency to add for this.
 """
 
+import base64
+import io
 import json
 import math
+import os
 import struct
+
+from PIL import Image
 
 # Accessor component types, and how many bytes each takes.
 CTYPE = {5120: ('b', 1), 5121: ('B', 1), 5122: ('h', 2),
@@ -20,7 +25,18 @@ NCOMP = {'SCALAR': 1, 'VEC2': 2, 'VEC3': 3, 'VEC4': 4, 'MAT4': 16}
 
 
 def read_glb(path):
-    """The JSON chunk and the binary chunk of a .glb."""
+    """The JSON document and binary payload of a .glb or embedded .gltf."""
+    if path.lower().endswith('.gltf'):
+        js = json.load(open(path, encoding='utf-8'))
+        buffers = js.get('buffers', [])
+        if not buffers:
+            return js, b''
+        uri = buffers[0].get('uri', '')
+        if uri.startswith('data:'):
+            return js, base64.b64decode(uri.split(',', 1)[1])
+        payload = os.path.join(os.path.dirname(path), *uri.replace('\\', '/').split('/'))
+        return js, open(payload, 'rb').read()
+
     d = open(path, 'rb').read()
     magic, _ver, _len = struct.unpack('<III', d[:12])
     if magic != 0x46546C67:
@@ -108,6 +124,50 @@ def srgb_to_linear(c):
     """glTF base colours are already linear; this is here for the rare pack
     that stores sRGB and is left unused rather than guessed at."""
     return c
+
+
+def texture_images(js, bin_, path):
+    """Load the images referenced by a glTF texture table.
+
+    Poly Pizza's character packs use material factors, while Kenney's CC0
+    tower kit uses a tiny colour atlas. The runtime deliberately has no model
+    texture bindings, so atlas colours are sampled here and baked into each
+    vertex instead.
+    """
+    out = {}
+    for i, spec in enumerate(js.get('images', [])):
+        raw = None
+        uri = spec.get('uri')
+        if uri and uri.startswith('data:'):
+            raw = base64.b64decode(uri.split(',', 1)[1])
+        elif uri:
+            image_path = os.path.join(os.path.dirname(path), *uri.replace('\\', '/').split('/'))
+            if os.path.exists(image_path):
+                raw = open(image_path, 'rb').read()
+        elif 'bufferView' in spec:
+            bv = js['bufferViews'][spec['bufferView']]
+            start = bv.get('byteOffset', 0)
+            raw = bin_[start:start + bv['byteLength']]
+        if raw:
+            out[i] = Image.open(io.BytesIO(raw)).convert('RGB')
+    return out
+
+
+def sample_texture(image, uv):
+    """Nearest atlas sample, returned as linear RGB for the renderer."""
+    u, v = uv
+    u = u % 1.0
+    v = v % 1.0
+    x = min(image.width - 1, max(0, int(u * image.width)))
+    # glTF image data and texture coordinates both use a top-left origin.
+    y = min(image.height - 1, max(0, int(v * image.height)))
+    rgb = image.getpixel((x, y))
+
+    def linear(byte):
+        c = byte / 255.0
+        return c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
+
+    return tuple(linear(c) for c in rgb)
 
 
 def inverse(m):
@@ -261,6 +321,7 @@ def triangles(path, anim='auto', at=0.0):
         walk(root, ident)
 
     mats = js.get('materials', [])
+    images = texture_images(js, bin_, path)
     verts = []
     for ni, node in enumerate(nodes):
         if 'mesh' not in node or ni not in world:
@@ -284,6 +345,10 @@ def triangles(path, anim='auto', at=0.0):
             pos = accessor(js, bin_, prim['attributes']['POSITION'])
             nrm = (accessor(js, bin_, prim['attributes']['NORMAL'])
                    if 'NORMAL' in prim['attributes'] else None)
+            texcoords = {}
+            for key, value in prim['attributes'].items():
+                if key.startswith('TEXCOORD_'):
+                    texcoords[int(key.rsplit('_', 1)[1])] = accessor(js, bin_, value)
             jts = (accessor(js, bin_, prim['attributes']['JOINTS_0'])
                    if skin and 'JOINTS_0' in prim['attributes'] else None)
             wts = (accessor(js, bin_, prim['attributes']['WEIGHTS_0'])
@@ -293,11 +358,26 @@ def triangles(path, anim='auto', at=0.0):
             else:
                 idx = list(range(len(pos)))
             col = (1.0, 1.0, 1.0)
+            tex_image = None
+            tex_uv = None
+            tex_offset = (0.0, 0.0)
+            tex_scale = (1.0, 1.0)
+            tex_rotation = 0.0
             mi = prim.get('material')
             if mi is not None and mi < len(mats):
                 pbr = mats[mi].get('pbrMetallicRoughness', {})
                 bc = pbr.get('baseColorFactor', [1, 1, 1, 1])
                 col = tuple(srgb_to_linear(c) for c in bc[:3])
+                bt = pbr.get('baseColorTexture')
+                if bt is not None and bt.get('index', -1) < len(js.get('textures', [])):
+                    texture = js['textures'][bt['index']]
+                    tex_image = images.get(texture.get('source'))
+                    transform = bt.get('extensions', {}).get('KHR_texture_transform', {})
+                    coord_i = transform.get('texCoord', bt.get('texCoord', 0))
+                    tex_uv = texcoords.get(coord_i)
+                    tex_offset = tuple(transform.get('offset', tex_offset))
+                    tex_scale = tuple(transform.get('scale', tex_scale))
+                    tex_rotation = transform.get('rotation', 0.0)
             for k in idx:
                 if jts and wts:
                     # Linear blend skinning, the same four-weight sum the GPU
@@ -327,7 +407,16 @@ def triangles(path, anim='auto', at=0.0):
                     n = tuple(c / ln for c in n)
                 else:
                     n = (0.0, 0.0, 1.0)
-                verts.append((p, n, col))
+                vertex_col = col
+                if tex_image is not None and tex_uv is not None:
+                    u = tex_uv[k][0] * tex_scale[0]
+                    v = tex_uv[k][1] * tex_scale[1]
+                    cr, sr = math.cos(tex_rotation), math.sin(tex_rotation)
+                    uv = (cr * u - sr * v + tex_offset[0],
+                          sr * u + cr * v + tex_offset[1])
+                    sampled = sample_texture(tex_image, uv)
+                    vertex_col = tuple(col[c] * sampled[c] for c in range(3))
+                verts.append((p, n, vertex_col))
     return verts
 
 

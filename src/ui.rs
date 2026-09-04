@@ -10,11 +10,15 @@ use egui::{
 };
 
 use crate::game::defs::*;
-use crate::game::{FLOOD_LIMIT, Game, Phase, WAVE_PERIOD};
+use crate::game::{
+    BOSS_HP_MULT, BOSS_MENDER_PER_SEC, BOSS_REWARD_MULT, Cue, Doctrine, Game, Phase, ToastTone,
+};
 use crate::math::{Camera, v3};
 
+static TOWER_ICONS: &[u8] = include_bytes!("../assets/tower_icons.bin");
+
 pub const TOP_H: f32 = 58.0;
-pub const COMMAND_H: f32 = 178.0;
+pub const COMMAND_H: f32 = 222.0;
 
 /// Below this width the HUD switches to a compact layout: shorter bars, smaller
 /// cards, no minimap. Phones in landscape are typically 650-900 points wide.
@@ -42,38 +46,37 @@ fn card_w(compact: bool) -> f32 {
 }
 /// Height every section of the command bar is laid out to. Keeping one number
 /// here is what stops the palette from overflowing its panel.
-pub const BAR_H: f32 = 156.0;
+pub const BAR_H: f32 = 198.0;
 pub const CARD_W: f32 = 86.0;
 pub const CARD_H: f32 = 100.0;
 
 // ---------------------------------------------------------------- palette
 
-/// Warcraft III's own console: carved wood and stone under a gold rule.
+/// A modernised Warcraft console: deep forest slate under a restrained gold rule.
 ///
 /// The HUD used to be a flat blue-grey dashboard, which is a perfectly good
-/// interface and looks nothing like the game this is a port of. Warcraft III's
-/// console is warm, dark and bevelled - a wooden frame with stone insets, gold
-/// trim, and parchment-coloured text - and the numbers on it are gold. These are
-/// those colours.
+/// The information architecture remains recognisably RTS, but the large brown
+/// blocks are cooled and darkened so the battlefield owns the colour and the
+/// interface reads as one quiet frame around it.
 pub mod pal {
     use egui::Color32;
-    /// The wooden console body.
-    pub const PANEL: Color32 = Color32::from_rgb(94, 79, 55);
+    /// The console body.
+    pub const PANEL: Color32 = Color32::from_rgb(31, 40, 37);
     /// Stone inset: minimap wells, command slots, the leaderboard ground.
-    pub const PANEL_DEEP: Color32 = Color32::from_rgb(28, 25, 19);
+    pub const PANEL_DEEP: Color32 = Color32::from_rgb(13, 18, 18);
     /// A raised slot on the console.
-    pub const CARD: Color32 = Color32::from_rgb(116, 98, 68);
-    pub const CARD_HOVER: Color32 = Color32::from_rgb(146, 124, 84);
+    pub const CARD: Color32 = Color32::from_rgb(43, 55, 50);
+    pub const CARD_HOVER: Color32 = Color32::from_rgb(59, 78, 68);
     /// The dark line that separates one carved piece from the next.
-    pub const LINE: Color32 = Color32::from_rgb(38, 32, 23);
+    pub const LINE: Color32 = Color32::from_rgb(8, 13, 13);
     /// The gold rule that runs along every edge of the console.
-    pub const GOLD_LINE: Color32 = Color32::from_rgb(190, 152, 70);
+    pub const GOLD_LINE: Color32 = Color32::from_rgb(156, 126, 61);
     /// The bright top edge of a bevel, which is what makes wood look carved
     /// rather than painted.
-    pub const BEVEL: Color32 = Color32::from_rgb(152, 130, 90);
-    pub const INK: Color32 = Color32::from_rgb(236, 228, 206);
-    pub const DIM: Color32 = Color32::from_rgb(186, 172, 140);
-    pub const ACC: Color32 = Color32::from_rgb(96, 196, 255);
+    pub const BEVEL: Color32 = Color32::from_rgb(84, 108, 94);
+    pub const INK: Color32 = Color32::from_rgb(232, 239, 232);
+    pub const DIM: Color32 = Color32::from_rgb(157, 176, 162);
+    pub const ACC: Color32 = Color32::from_rgb(87, 194, 221);
     pub const GOLD: Color32 = Color32::from_rgb(255, 206, 92);
     pub const BAD: Color32 = Color32::from_rgb(232, 88, 72);
     pub const GOOD: Color32 = Color32::from_rgb(126, 220, 104);
@@ -87,14 +90,34 @@ pub mod pal {
 pub fn carved(ui: &Ui, r: Rect, fill: Color32, gold: bool) {
     let p = ui.painter();
     let cr = CornerRadius::same(4);
+    p.rect_filled(
+        r.translate(vec2(0.0, 2.0)),
+        cr,
+        Color32::from_rgba_unmultiplied(0, 0, 0, 110),
+    );
     p.rect_filled(r, cr, fill);
+    if let Some(tex) = material(ui.ctx(), Mat::Stone) {
+        let tiles = vec2((r.width() / 150.0).max(0.5), (r.height() / 150.0).max(0.5));
+        p.image(
+            tex.id(),
+            r.shrink(1.0),
+            Rect::from_min_size(pos2(0.0, 0.0), tiles),
+            Color32::from_rgba_unmultiplied(78, 92, 84, 38),
+        );
+    }
     // Lit edge along the top and left, shadow along the bottom and right.
     p.line_segment(
-        [r.left_bottom() + vec2(1.0, -1.0), r.left_top() + vec2(1.0, 1.0)],
+        [
+            r.left_bottom() + vec2(1.0, -1.0),
+            r.left_top() + vec2(1.0, 1.0),
+        ],
         Stroke::new(1.0, pal::BEVEL),
     );
     p.line_segment(
-        [r.left_top() + vec2(1.0, 1.0), r.right_top() + vec2(-1.0, 1.0)],
+        [
+            r.left_top() + vec2(1.0, 1.0),
+            r.right_top() + vec2(-1.0, 1.0),
+        ],
         Stroke::new(1.0, pal::BEVEL),
     );
     p.line_segment(
@@ -114,10 +137,13 @@ pub fn carved(ui: &Ui, r: Rect, fill: Color32, gold: bool) {
     p.rect_stroke(
         r,
         cr,
-        Stroke::new(
-            1.0,
-            if gold { pal::GOLD_LINE } else { pal::LINE },
-        ),
+        Stroke::new(1.0, if gold { pal::GOLD_LINE } else { pal::LINE }),
+        StrokeKind::Inside,
+    );
+    p.rect_stroke(
+        r.shrink(3.0),
+        CornerRadius::same(2),
+        Stroke::new(1.0, Color32::from_rgba_unmultiplied(178, 202, 181, 24)),
         StrokeKind::Inside,
     );
 }
@@ -138,12 +164,10 @@ pub enum Mat {
 /// flat colour it was painting before textures existed - a bad asset costs the
 /// grain, not the HUD.
 pub fn material(ctx: &egui::Context, which: Mat) -> Option<egui::TextureHandle> {
-    use std::sync::Mutex;
-    static CACHE: Mutex<Vec<(usize, egui::TextureHandle)>> = Mutex::new(Vec::new());
     let layer = which as usize;
-    let mut cache = CACHE.lock().ok()?;
-    if let Some((_, h)) = cache.iter().find(|(l, _)| *l == layer) {
-        return Some(h.clone());
+    let cache_id = Id::new(("hud-material", layer));
+    if let Some(texture) = ctx.data(|data| data.get_temp::<egui::TextureHandle>(cache_id)) {
+        return Some(texture);
     }
 
     let blob = crate::gfx::GROUND_BLOB;
@@ -174,8 +198,51 @@ pub fn material(ctx: &egui::Context, which: Mat) -> Option<egui::TextureHandle> 
             ..egui::TextureOptions::LINEAR
         },
     );
-    cache.push((layer, handle.clone()));
+    ctx.data_mut(|data| data.insert_temp(cache_id, handle.clone()));
     Some(handle)
+}
+
+/// The 24x4 atlas is rendered from the exact staged 3D assemblies used on the
+/// battlefield. A malformed optional asset falls back to the old colour swatch
+/// rather than taking the interface down with it.
+fn tower_icons(ctx: &egui::Context) -> Option<egui::TextureHandle> {
+    let cache_id = Id::new("tower-icon-atlas");
+    if let Some(texture) = ctx.data(|data| data.get_temp::<egui::TextureHandle>(cache_id)) {
+        return Some(texture);
+    }
+    if TOWER_ICONS.len() < 16 {
+        return None;
+    }
+    let at = |o: usize| {
+        u32::from_le_bytes([
+            TOWER_ICONS[o],
+            TOWER_ICONS[o + 1],
+            TOWER_ICONS[o + 2],
+            TOWER_ICONS[o + 3],
+        ])
+    };
+    let (magic, version, width, height) = (at(0), at(4), at(8) as usize, at(12) as usize);
+    let need = 16usize.saturating_add(width.saturating_mul(height).saturating_mul(3));
+    if magic != 0x4149_5447 || version != 1 || width == 0 || height == 0 || need > TOWER_ICONS.len()
+    {
+        return None;
+    }
+    let image = egui::ColorImage::from_rgb([width, height], &TOWER_ICONS[16..need]);
+    let texture = ctx.load_texture("tower-icons", image, egui::TextureOptions::LINEAR);
+    ctx.data_mut(|data| data.insert_temp(cache_id, texture.clone()));
+    Some(texture)
+}
+
+fn tower_icon_uv(def: &TowerLevel) -> Rect {
+    let col = def.family.icon_slot() as f32;
+    let row = tower_visual_stage(def) as f32;
+    // Stay inside the cell so filtered sampling never borrows a neighbour.
+    let inset_x = 0.75 / 24.0 / 64.0;
+    let inset_y = 0.75 / 4.0 / 64.0;
+    Rect::from_min_max(
+        pos2(col / 24.0 + inset_x, row / 4.0 + inset_y),
+        pos2((col + 1.0) / 24.0 - inset_x, (row + 1.0) / 4.0 - inset_y),
+    )
 }
 
 /// The console itself: the wooden ground the strip and the command bar sit on.
@@ -195,9 +262,9 @@ pub fn console(ui: &Ui, r: Rect) {
             tex.id(),
             r,
             Rect::from_min_size(pos2(0.0, 0.0), tiles),
-            // The panel colour is still the panel colour; the wood multiplies
-            // into it, exactly as the ground textures work.
-            Color32::from_rgb(236, 232, 226),
+            // A low-alpha green-grey tint keeps the grain tactile without
+            // turning the entire information surface into a brown slab.
+            Color32::from_rgba_unmultiplied(96, 118, 104, 72),
         );
     }
     // Grain: a handful of darker bands across the wood.
@@ -214,8 +281,28 @@ pub fn console(ui: &Ui, r: Rect) {
     let edge = if r.top() < 40.0 { r.bottom() } else { r.top() };
     p.line_segment(
         [pos2(r.left(), edge), pos2(r.right(), edge)],
-        Stroke::new(2.0, pal::GOLD_LINE),
+        Stroke::new(3.0, pal::GOLD_LINE),
     );
+    let inward = if edge == r.top() { 5.0 } else { -5.0 };
+    p.line_segment(
+        [
+            pos2(r.left(), edge + inward),
+            pos2(r.right(), edge + inward),
+        ],
+        Stroke::new(1.0, pal::BEVEL),
+    );
+    // Small metal studs turn the long strip into one constructed console and
+    // also break up a wide desktop without adding another information layer.
+    let studs = (r.width() / 180.0).floor() as usize;
+    for i in 0..=studs {
+        let x = r.left() + (i as f32 + 0.5) * r.width() / (studs + 1) as f32;
+        p.circle_filled(pos2(x, edge + inward * 0.48), 2.2, pal::LINE);
+        p.circle_filled(
+            pos2(x - 0.5, edge + inward * 0.48 - 0.5),
+            1.1,
+            pal::GOLD_LINE,
+        );
+    }
 }
 
 /// A command slot: the square icon well a build or upgrade button sits in.
@@ -286,6 +373,7 @@ pub fn short(v: f64) -> String {
 
 pub struct UiState {
     pub show_help: bool,
+    pub sound_enabled: bool,
     pub build_tier: u32,
     pub hotkeys: Vec<usize>,
     /// Where the build cards were drawn last frame, and the panel they must fit
@@ -334,20 +422,17 @@ impl Default for UiState {
     fn default() -> Self {
         Self {
             show_help: false,
+            sound_enabled: true,
             build_tier: 1,
             hotkeys: Vec::new(),
             card_rects: Vec::new(),
             palette_rect: Rect::NOTHING,
             compact: false,
-            // A browser is the constrained target by definition, so it opens
-            // on the two-pass preset and climbs only if the frames say it can.
-            // Starting high and falling meant several seconds of bad frames on
-            // every phone before the tuner noticed.
-            quality: if cfg!(target_arch = "wasm32") {
-                crate::gfx::Quality::Performance
-            } else {
-                crate::gfx::Quality::Balanced
-            },
+            // Desktop browsers open with real-time shadows and native-looking
+            // resolution. `App::ui` still moves compact or very-high-DPI
+            // screens to Performance on their first frame, while auto-quality
+            // can promote a sustained 60 fps desktop to the full HDR pass.
+            quality: crate::gfx::Quality::Balanced,
             quality_dirty: false,
             palette_page: 0,
             slow_frames: 0,
@@ -411,15 +496,26 @@ pub fn top_bar(g: &mut Game, ui: &mut Ui, ust: &mut UiState, perf: &str) {
         Send,
         Pause,
         Speed,
+        Sound,
         Quality,
         Menu,
         Help,
     }
     let send_bonus = (g.wave_timer * EARLY_BONUS_PER_SEC) as i32;
-    let send_label = if compact {
-        format!("Send +{send_bonus}")
+    let deploying_stream = g.wave > 0 && g.spawn_left > 0;
+    let send_label = if deploying_stream {
+        if compact {
+            format!("Deploy {}", g.spawn_left)
+        } else {
+            format!("Deploying  {} left", g.spawn_left)
+        }
+    } else if compact {
+        format!("{} +{send_bonus}", if g.wave > 0 { "Rush" } else { "Send" })
     } else {
-        format!("Send  +{send_bonus}g")
+        format!(
+            "{}  +{send_bonus}g",
+            if g.wave > 0 { "Rush" } else { "Send" }
+        )
     };
     let speed_label = format!("{:.0}x", g.speed);
     let quality_label = if compact {
@@ -427,18 +523,27 @@ pub fn top_bar(g: &mut Game, ui: &mut Ui, ust: &mut UiState, perf: &str) {
     } else {
         ust.quality.label()
     };
+    let sound_label = if ust.sound_enabled {
+        "SFX ON"
+    } else {
+        "SFX OFF"
+    };
     // The pause icon is painted, not typed. egui bundles a Latin font and an
     // emoji font; U+25B6 and U+2759 are in neither, so this button rendered as
     // two empty tofu boxes. Two spaces reserve the width and the glyph is drawn
     // below - which also means it always matches the button's ink colour.
     let pause_label = "  ";
 
-    let mut cmds: Vec<(Cmd, &str)> = Vec::with_capacity(6);
-    if g.phase == Phase::Build {
+    let mut cmds: Vec<(Cmd, &str)> = Vec::with_capacity(7);
+    if g.wave < g.last_wave()
+        && !matches!(g.phase, Phase::Defeat | Phase::Victory)
+        && !g.pending_doctrine
+    {
         cmds.push((Cmd::Send, send_label.as_str()));
     }
     cmds.push((Cmd::Pause, pause_label));
     cmds.push((Cmd::Speed, speed_label.as_str()));
+    cmds.push((Cmd::Sound, sound_label));
     cmds.push((Cmd::Quality, quality_label));
     cmds.push((Cmd::Menu, "Menu"));
     cmds.push((Cmd::Help, "?"));
@@ -463,7 +568,7 @@ pub fn top_bar(g: &mut Game, ui: &mut Ui, ust: &mut UiState, perf: &str) {
     };
     // Not lives - there are none. The number that decides the run is how many
     // monsters are still going round, against what the ring will hold.
-    let circling = format!("{}/{}", g.creeps.len(), FLOOD_LIMIT);
+    let circling = format!("{}/{}", g.creeps.len(), g.flood_limit());
     let flood = g.flood();
     let value_size = if compact { 15.0 } else { 18.0 };
     let chips: [(&str, &str, Color32); 3] = [
@@ -504,10 +609,11 @@ pub fn top_bar(g: &mut Game, ui: &mut Ui, ust: &mut UiState, perf: &str) {
     let rank = |c: Cmd| match c {
         Cmd::Quality => 0,
         Cmd::Help => 1,
-        Cmd::Speed => 2,
-        Cmd::Pause => 3,
-        Cmd::Menu => 4,
-        Cmd::Send => 5,
+        Cmd::Sound => 2,
+        Cmd::Speed => 3,
+        Cmd::Pause => 4,
+        Cmd::Menu => 5,
+        Cmd::Send => 6,
     };
     let width_of = |ws: &[f32]| ws.iter().sum::<f32>() + pad * (ws.len() as f32 - 1.0).max(0.0);
     while cmds.len() > 1 && stats_w + width_of(&widths) + pad * 2.0 > full.width() {
@@ -537,6 +643,78 @@ pub fn top_bar(g: &mut Game, ui: &mut Ui, ust: &mut UiState, perf: &str) {
     for (i, (label, value, col)) in chips.iter().enumerate() {
         let r = Rect::from_min_size(pos2(x, full.top()), vec2(chip_ws[i], h));
         stat_chip(ui, r, label, value, *col, value_size);
+        let response = ui.interact(r, Id::new(("top_stat", i)), Sense::hover());
+        match i {
+            0 => {
+                response.on_hover_ui(|ui| {
+                    ui.label(
+                        RichText::new(g.difficulty.label())
+                            .strong()
+                            .color(pal::GOLD),
+                    );
+                    ui.label(
+                        RichText::new(g.difficulty.blurb())
+                            .size(11.0)
+                            .color(pal::DIM),
+                    );
+                    if g.doctrine_picks() > 0 {
+                        ui.label(
+                            RichText::new(format!(
+                                "Command: Arsenal {}  |  Overdrive {}  |  High Ground {}",
+                                g.doctrines[0], g.doctrines[1], g.doctrines[2]
+                            ))
+                            .size(11.0)
+                            .color(pal::GOOD),
+                        );
+                    }
+                });
+            }
+            1 => {
+                response.on_hover_ui(|ui| {
+                    let oldest = g.creeps.iter().map(|c| c.laps).max().unwrap_or(0);
+                    ui.label(RichText::new("Ring pressure").strong());
+                    ui.label(
+                        RichText::new(format!(
+                            "The run ends above {} circling enemies. Fullest so far: {}.",
+                            g.flood_limit(), g.stats.peak_circling
+                        ))
+                        .size(11.0)
+                        .color(pal::DIM),
+                    );
+                    if oldest > 0 {
+                        ui.label(
+                            RichText::new(format!(
+                                "Oldest survivor: {oldest} lap{}. Hard-mode survivors accelerate each lap.",
+                                if oldest == 1 { "" } else { "s" }
+                            ))
+                            .size(11.0)
+                            .color(pal::BAD),
+                        );
+                    }
+                });
+            }
+            _ => {
+                response.on_hover_ui(|ui| {
+                    ui.label(RichText::new("Economy").strong());
+                    ui.label(
+                        RichText::new(
+                            "Kills and wave stipends fund towers. Rush early for instant gold, or wait and clear the ring for a Clean Sweep bonus.",
+                        )
+                        .size(11.0)
+                        .color(pal::DIM),
+                    );
+                    ui.label(
+                        RichText::new(format!(
+                            "This run: {} rush gold  |  {} clean sweeps",
+                            gold_str(g.stats.rush_gold as i64),
+                            g.stats.clean_sweeps
+                        ))
+                        .size(11.0)
+                        .color(pal::GOOD),
+                    );
+                });
+            }
+        }
         ust.stat_rects.push(r);
         x += chip_ws[i] + pad;
     }
@@ -564,7 +742,13 @@ pub fn top_bar(g: &mut Game, ui: &mut Ui, ust: &mut UiState, perf: &str) {
             vec2(widths[i], (h - 12.0).max(20.0)),
         );
         let fill = match cmd {
+            Cmd::Send if deploying_stream => pal::PANEL_DEEP,
+            Cmd::Send if g.creeps.len() + g.spawn_left as usize > g.flood_limit() * 3 / 4 => {
+                Color32::from_rgb(126, 49, 39)
+            }
+            Cmd::Send if g.wave > 0 => Color32::from_rgb(115, 77, 29),
             Cmd::Send => Color32::from_rgb(38, 106, 68),
+            Cmd::Sound if !ust.sound_enabled => Color32::from_rgb(62, 40, 43),
             Cmd::Menu => pal::CARD_HOVER,
             _ => pal::CARD,
         };
@@ -577,10 +761,20 @@ pub fn top_bar(g: &mut Game, ui: &mut Ui, ust: &mut UiState, perf: &str) {
             paint_transport(ui, r, g.paused);
         }
         let resp = match cmd {
-            Cmd::Send => resp
-                .on_hover_text("Call the wave early (Enter). The bonus is the time you give up."),
+            Cmd::Send => resp.on_hover_text(if deploying_stream {
+                "The current stream is still entering the ring. Rush unlocks when every authored enemy has deployed."
+            } else if g.wave > 0 {
+                "Rush now (Enter): begin the next stream while survivors are still circling. The gold pays for that overlap."
+            } else {
+                "Call the next wave early (Enter). The bonus is the setup time you give up."
+            }),
             Cmd::Pause => resp.on_hover_text("Pause (Space)"),
-            Cmd::Speed => resp.on_hover_text("Game speed (F)"),
+            Cmd::Speed => resp.on_hover_text(if g.endless {
+                "Game speed (F): 1x / 2x / 3x in endless"
+            } else {
+                "Game speed (F): 1x / 2x during the campaign"
+            }),
+            Cmd::Sound => resp.on_hover_text("Toggle sound effects."),
             Cmd::Quality => {
                 resp.on_hover_text("Graphics quality (B). Lower it if the frame rate drags.")
             }
@@ -591,11 +785,11 @@ pub fn top_bar(g: &mut Game, ui: &mut Ui, ust: &mut UiState, perf: &str) {
             match cmd {
                 Cmd::Send => g.send_wave(),
                 Cmd::Pause => g.paused = !g.paused,
-                Cmd::Speed => {
-                    g.speed = match g.speed as i32 {
-                        1 => 2.0,
-                        2 => 3.0,
-                        _ => 1.0,
+                Cmd::Speed => g.cycle_speed(),
+                Cmd::Sound => {
+                    ust.sound_enabled = !ust.sound_enabled;
+                    if ust.sound_enabled {
+                        g.sound_cues.push(Cue::Select);
                     }
                 }
                 Cmd::Quality => {
@@ -666,28 +860,43 @@ fn stat_chip(ui: &mut Ui, r: Rect, label: &str, value: &str, color: Color32, val
 /// What is coming next, and what it punishes.
 fn wave_preview(g: &mut Game, ui: &mut Ui, rect: Rect) {
     let w = g.next_wave_def();
-    let upcoming = (g.wave + 1).min(N_WAVES);
+    let upcoming = if g.endless {
+        g.wave + 1
+    } else {
+        (g.wave + 1).min(N_WAVES)
+    };
+    let elite_stride = g.difficulty.elite_stride(upcoming);
     let resp = ui.interact(rect, Id::new("wave_preview"), Sense::hover());
     // The map tags its own waves - Air, Immune, Hero, Boss - and those four
     // words are the whole of what a player has to react to.
-    let flagged = !w.tag.is_empty();
+    let flagged = !w.tag.is_empty() || elite_stride.is_some();
     carved(ui, rect, pal::PANEL_DEEP, flagged);
     let p = ui.painter();
     if flagged {
         p.rect_stroke(
             rect,
             CornerRadius::same(4),
-            Stroke::new(2.0, c32(w.armour_type.color(), 0.95)),
+            Stroke::new(
+                2.0,
+                if w.tag.is_empty() {
+                    pal::GOLD
+                } else {
+                    c32(w.armour_type.color(), 0.95)
+                },
+            ),
             StrokeKind::Inside,
         );
     }
 
     let title = match g.phase {
-        Phase::Combat if g.endless => format!("ENDLESS - WAVE {}", g.wave),
-        Phase::Combat => format!("WAVE {} OF {}", g.wave, N_WAVES),
+        // This card always describes `next_wave_def`, not the enemies already
+        // on the ring. Calling it the current wave made the armour warning and
+        // countdown contradict the main wave counter.
+        Phase::Combat if g.endless => format!("NEXT ENDLESS WAVE {upcoming}"),
+        Phase::Combat => format!("NEXT WAVE {upcoming} OF {N_WAVES}"),
         Phase::Victory => "ALL WAVES CLEARED".to_string(),
         Phase::Defeat => "OVERRUN".to_string(),
-        _ => format!("NEXT: WAVE {upcoming}"),
+        _ => format!("OPENING WAVE {upcoming}"),
     };
     p.text(
         rect.left_top() + vec2(8.0, 5.0),
@@ -697,15 +906,22 @@ fn wave_preview(g: &mut Game, ui: &mut Ui, rect: Rect) {
         pal::DIM,
     );
 
+    let formation = if w.tag == "Boss" && w.count > 1 {
+        format!("{} commander + {} escorts", w.name, w.count - 1)
+    } else {
+        format!("{} x{}", w.name, w.count)
+    };
     let line = format!(
-        "{} x{}  ·  {} armour {}",
-        w.name,
-        w.count,
+        "{}  ·  {} armour {}{}",
+        formation,
         w.armour,
-        w.armour_type.name()
+        w.armour_type.name(),
+        elite_stride
+            .map(|stride| format!("  ·  Vanguard 1/{stride}"))
+            .unwrap_or_default()
     );
     let mut tx = rect.left() + 8.0;
-    if flagged {
+    if !w.tag.is_empty() {
         // A filled badge, not a word in a sentence. Missing an Air wave with no
         // anti-air, or an Immune wave with no Chaos, decides the run.
         let tint = if w.flying {
@@ -740,7 +956,7 @@ fn wave_preview(g: &mut Game, ui: &mut Ui, rect: Rect) {
     );
 
     if g.wave < g.last_wave() {
-        let frac = (g.wave_timer / WAVE_PERIOD.max(1.0)).clamp(0.0, 1.0);
+        let frac = (g.wave_timer / w.lead_in.max(1.0)).clamp(0.0, 1.0);
         let bar = Rect::from_min_size(rect.left_bottom() + vec2(8.0, -6.0), vec2(252.0, 3.0));
         p.rect_filled(bar, CornerRadius::same(2), pal::LINE);
         p.rect_filled(
@@ -797,14 +1013,44 @@ fn wave_preview(g: &mut Game, ui: &mut Ui, rect: Rect) {
                 .color(c32(AIR_TINT, 1.0)),
             );
         }
-        ui.label(
-            RichText::new(format!(
-                "Pays {} gold a kill",
-                gold_str(bounty_of(&w) as i64)
-            ))
-            .size(11.0)
-            .color(pal::GOLD),
-        );
+        if w.tag == "Boss" {
+            ui.label(
+                RichText::new(format!(
+                    "Commander: {:.0}x health, 75% control resistance, and {:.1}%/sec repair for nearby escorts.",
+                    BOSS_HP_MULT,
+                    BOSS_MENDER_PER_SEC * 100.0
+                ))
+                .size(11.0)
+                .color(pal::GOLD),
+            );
+            ui.label(
+                RichText::new(
+                    "Focus Strongest to break the commander; Corruption suppresses escort repair.",
+                )
+                .size(11.0)
+                .color(pal::GOOD),
+            );
+        }
+        if let Some(stride) = elite_stride {
+            ui.label(
+                RichText::new(format!(
+                    "Every {stride}th enemy is a Vanguard: tougher, faster, and 50% resistant to control."
+                ))
+                .size(11.0)
+                .color(pal::GOLD),
+            );
+        }
+        let pay = g.bounty_for_wave(g.wave + 1);
+        let payout = if w.tag == "Boss" {
+            format!(
+                "Pays {} per escort; {} for the commander",
+                gold_str(pay as i64),
+                gold_str(pay.saturating_mul(BOSS_REWARD_MULT) as i64)
+            )
+        } else {
+            format!("Pays {} gold a kill", gold_str(pay as i64))
+        };
+        ui.label(RichText::new(payout).size(11.0).color(pal::GOLD));
     });
 }
 
@@ -836,18 +1082,18 @@ pub fn scoreboard(g: &Game, ctx: &Context) {
             }
             rows.push((
                 "Bounty a kill",
-                gold_str(bounty_for(g.wave.max(1)) as i64),
+                gold_str(g.bounty_for_wave(g.wave.max(1)) as i64),
                 pal::GOLD,
             ));
             rows.push((
                 "Next wave pays",
-                format!("+{}", gold_str(wave_clear_bonus(g.wave + 1) as i64)),
+                format!("+{}", gold_str(g.stipend_for_wave(g.wave + 1) as i64)),
                 pal::GOLD,
             ));
             rows.push(("", String::new(), pal::DIM));
             rows.push((
                 "Circling",
-                format!("{} / {}", g.creeps.len(), FLOOD_LIMIT),
+                format!("{} / {}", g.creeps.len(), g.flood_limit()),
                 if g.flood() > 0.7 { pal::BAD } else { pal::GOOD },
             ));
             rows.push(("Gold", gold_str(g.gold), pal::GOLD));
@@ -883,9 +1129,13 @@ pub fn scoreboard(g: &Game, ctx: &Context) {
                     .color(pal::GOOD),
             );
             ui.label(
-                RichText::new(format!("When enemies > {FLOOD_LIMIT}, game over."))
-                    .size(10.0)
-                    .color(pal::DIM),
+                RichText::new(format!(
+                    "{} · overflow above {}",
+                    g.difficulty.label(),
+                    g.flood_limit()
+                ))
+                .size(10.0)
+                .color(pal::DIM),
             );
             ui.add_space(5.0);
             for (k, v, col) in &rows {
@@ -923,21 +1173,25 @@ pub fn command_bar(g: &mut Game, ui: &mut Ui, ust: &mut UiState) {
         // On a phone the board is the scarce resource: drop the minimap first,
         // then the selection panel, before ever shrinking the build palette.
         if !compact {
+            // Keep the console's instruments at a deliberate maximum width on
+            // ultrawide displays. The side rails become breathing room rather
+            // than stretching a command slot into a banner.
+            let content_w = width.min(1500.0);
+            ui.add_space(((width - content_w) * 0.5).max(0.0));
             minimap(g, ui, bar_h(compact));
-            ui.add_space(6.0);
+            ui.add_space(8.0);
+            let command_w = 296.0;
+            let dossier_w = (content_w - bar_h(compact) - command_w - 16.0).max(320.0);
+            selection_panel(g, ui, compact, dossier_w);
+            ui.add_space(8.0);
+            build_palette(g, ui, ust, command_w);
+        } else {
+            if width > TINY_WIDTH {
+                selection_panel(g, ui, compact, 268.0);
+                ui.add_space(6.0);
+            }
+            build_palette(g, ui, ust, ui.available_width());
         }
-        // What is coming in the next few waves. On a circuit there is no
-        // build phase to plan in, so the only place to see an Air or an Immune
-        // wave before it arrives is here.
-        if !compact && width > TINY_WIDTH {
-            wave_ladder(g, ui, bar_h(compact));
-            ui.add_space(6.0);
-        }
-        if width > TINY_WIDTH {
-            selection_panel(g, ui, compact);
-            ui.add_space(6.0);
-        }
-        build_palette(g, ui, ust);
     });
 }
 
@@ -985,16 +1239,10 @@ fn minimap(g: &Game, ui: &mut Ui, h: f32) {
             Stroke::new(2.5, Color32::from_rgb(86, 72, 56)),
         );
     }
-    // Free pads.
-    for slot in &g.board.slots {
-        if slot.tower.is_none() {
-            p.rect_filled(
-                Rect::from_center_size(map(slot.pos), vec2(2.5, 2.5)),
-                CornerRadius::ZERO,
-                Color32::from_rgb(58, 66, 88),
-            );
-        }
-    }
+    // Empty build tiles are deliberately absent here. Painting all thousand of
+    // them turned the compact overview into graph paper; placement feedback
+    // already appears on the battlefield when a tower card is armed. The
+    // minimap's job is route, threats and built defenses.
     // Towers.
     for t in &g.towers {
         p.rect_filled(
@@ -1012,20 +1260,407 @@ fn minimap(g: &Game, ui: &mut Ui, h: f32) {
     p.circle_filled(map(g.board.sample(0.9)), 3.5, pal::BAD);
 }
 
-fn selection_panel(g: &mut Game, ui: &mut Ui, compact: bool) {
-    let w = if compact { 268.0 } else { 340.0 };
+/// The selected tower is a dossier, not another shop card. A large portrait
+/// anchors recognition, the performance readout answers whether it is earning
+/// its pad, and the three commands sit on one predictable bottom row.
+fn selection_panel_desktop(g: &mut Game, ui: &mut Ui, w: f32) {
+    let (rect, _) = ui.allocate_exact_size(vec2(w, BAR_H), Sense::hover());
+    carved(ui, rect, pal::PANEL, true);
+
+    let show_intel = w >= 650.0;
+    let intel = if show_intel {
+        Some(Rect::from_min_size(
+            pos2(rect.right() - 190.0, rect.top() + 7.0),
+            vec2(182.0, rect.height() - 14.0),
+        ))
+    } else {
+        None
+    };
+    if let Some(r) = intel {
+        wave_intel(g, ui, r);
+    }
+    let main = Rect::from_min_max(
+        rect.left_top(),
+        pos2(
+            intel.map_or(rect.right(), |r| r.left() - 7.0),
+            rect.bottom(),
+        ),
+    );
+    let p = ui.painter();
+
+    let Some(ti) = g.selected.filter(|&i| i < g.towers.len()) else {
+        let opening = g.wave == 0 && g.towers.is_empty();
+        p.text(
+            pos2(main.left() + 14.0, main.top() + 11.0),
+            Align2::LEFT_TOP,
+            "COMMAND DOSSIER",
+            FontId::monospace(9.0),
+            pal::GOLD_LINE,
+        );
+        let emblem = pos2(main.left() + 68.0, main.center().y + 2.0);
+        p.circle_filled(emblem, 35.0, pal::PANEL_DEEP);
+        p.circle_stroke(emblem, 35.0, Stroke::new(2.0, pal::GOLD_LINE));
+        p.circle_stroke(emblem, 27.0, Stroke::new(1.0, pal::BEVEL));
+        p.line_segment(
+            [emblem + vec2(-17.0, 9.0), emblem + vec2(0.0, -17.0)],
+            Stroke::new(3.0, pal::GOOD),
+        );
+        p.line_segment(
+            [emblem + vec2(0.0, -17.0), emblem + vec2(18.0, 10.0)],
+            Stroke::new(3.0, pal::GOOD),
+        );
+        p.circle_filled(emblem + vec2(0.0, -17.0), 4.0, pal::GOLD);
+
+        let tx = main.left() + 120.0;
+        p.text(
+            pos2(tx, main.center().y - 30.0),
+            Align2::LEFT_TOP,
+            if opening {
+                "Choose your opening tower"
+            } else {
+                "Select a tower"
+            },
+            FontId::proportional(18.0),
+            if opening { pal::ACC } else { pal::INK },
+        );
+        p.text(
+            pos2(tx, main.center().y - 2.0),
+            Align2::LEFT_TOP,
+            if opening {
+                "Pick a command icon, then place it on a free plot beside the circuit."
+            } else {
+                "Its damage, contribution, upgrades and targeting controls appear here."
+            },
+            FontId::proportional(12.0),
+            pal::DIM,
+        );
+        p.text(
+            pos2(tx, main.center().y + 25.0),
+            Align2::LEFT_TOP,
+            "Tip: inspect NEXT THREATS before committing your gold.",
+            FontId::monospace(10.0),
+            pal::GOOD,
+        );
+        if g.doctrine_picks() > 0 {
+            p.text(
+                pos2(tx, main.bottom() - 25.0),
+                Align2::LEFT_TOP,
+                format!(
+                    "COMMAND  ARS {}  |  SPD {}  |  RNG {}",
+                    g.doctrines[0], g.doctrines[1], g.doctrines[2]
+                ),
+                FontId::monospace(9.5),
+                pal::GOLD,
+            );
+        }
+        return;
+    };
+
+    let tw = g.towers[ti].clone();
+    let def = tw.def();
+    let col = tower_color(def);
+    let choices = tw.upgrades();
+
+    p.text(
+        pos2(main.left() + 12.0, main.top() + 7.0),
+        Align2::LEFT_TOP,
+        "SELECTED DEFENSE",
+        FontId::monospace(8.5),
+        pal::GOLD_LINE,
+    );
+    let port = Rect::from_min_size(main.left_top() + vec2(12.0, 24.0), vec2(104.0, 104.0));
+    carved(ui, port, pal::PANEL_DEEP, true);
+    if let Some(texture) = tower_icons(ui.ctx()) {
+        p.image(
+            texture.id(),
+            port.shrink(4.0),
+            tower_icon_uv(def),
+            Color32::WHITE,
+        );
+        p.rect_filled(
+            Rect::from_min_max(
+                pos2(port.left() + 4.0, port.bottom() - 24.0),
+                pos2(port.right() - 4.0, port.bottom() - 4.0),
+            ),
+            CornerRadius::ZERO,
+            Color32::from_rgba_unmultiplied(4, 8, 8, 218),
+        );
+    } else {
+        p.circle_filled(port.center(), 31.0, c32(col, 1.0));
+    }
+    p.text(
+        port.center_bottom() + vec2(0.0, -13.0),
+        Align2::CENTER_CENTER,
+        format!("LEVEL {} / {}", tw.level(), tw.ladder_len()),
+        FontId::monospace(9.5),
+        pal::GOLD,
+    );
+
+    let tx = port.right() + 13.0;
+    let text_right = main.right() - 12.0;
+    let name_font = FontId::proportional(18.0);
+    p.text(
+        pos2(tx, port.top()),
+        Align2::LEFT_TOP,
+        elide(ui, tw.full_name(), &name_font, (text_right - tx).max(30.0)),
+        name_font,
+        c32(col, 1.0),
+    );
+    p.text(
+        pos2(tx, port.top() + 25.0),
+        Align2::LEFT_TOP,
+        format!(
+            "{}  ·  {}  ·  {}",
+            def.family.name(),
+            def.attack.name(),
+            def.targets.label()
+        ),
+        FontId::proportional(11.0),
+        c32(col, 0.92),
+    );
+    let dps = tw.dmg() * tw.rate();
+    p.text(
+        pos2(tx, port.top() + 48.0),
+        Align2::LEFT_TOP,
+        if tw.is_support() {
+            format!("AURA {:.1} RANGE", def.abil.aura_range.max(tw.range()))
+        } else {
+            format!("{} DPS     {:.1} RANGE", short(dps as f64), tw.range())
+        },
+        FontId::monospace(13.0),
+        pal::INK,
+    );
+    p.text(
+        pos2(tx, port.top() + 72.0),
+        Align2::LEFT_TOP,
+        if tw.is_support() {
+            let n = buffed_count(g, ti);
+            format!("BUFFING {n} TOWER{}", if n == 1 { "" } else { "S" })
+        } else {
+            format!(
+                "{} KILLS  ·  {} DEALT  ·  {}g EARNED",
+                tw.kills,
+                short(tw.damage),
+                gold_str(tw.gold_earned as i64)
+            )
+        },
+        FontId::monospace(10.5),
+        pal::DIM,
+    );
+    if tw.buff_dmg > 0.0 || tw.buff_rate > 0.0 || tw.buff_range > 0.0 {
+        p.text(
+            pos2(tx, port.top() + 91.0),
+            Align2::LEFT_TOP,
+            format!(
+                "+{:.0}% DMG  |  +{:.0}% RATE  |  +{:.1} RNG",
+                tw.buff_dmg * 100.0,
+                tw.buff_rate * 100.0,
+                tw.buff_range
+            ),
+            FontId::proportional(10.5),
+            pal::GOOD,
+        );
+    }
+
+    let action_rect = Rect::from_min_max(
+        pos2(main.left() + 12.0, main.bottom() - 51.0),
+        pos2(main.right() - 12.0, main.bottom() - 9.0),
+    );
+    let mut action = None;
+    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(action_rect));
+    child.horizontal(|ui| {
+        let gap = ui.spacing().item_spacing.x;
+        let bw = ((action_rect.width() - gap * 2.0) / 3.0).max(70.0);
+        match choices.len() {
+            0 => {
+                ui.add_enabled(
+                    false,
+                    egui::Button::new(RichText::new("MAXIMUM\nTIER").size(10.5))
+                        .fill(pal::CARD)
+                        .min_size(vec2(bw, 40.0)),
+                );
+            }
+            1 => {
+                let (_, cost) = choices[0];
+                let can = g.can_afford(cost);
+                let button = egui::Button::new(
+                    RichText::new(format!("UPGRADE [U]\n{}g", gold_str(cost as i64)))
+                        .size(10.5)
+                        .strong(),
+                )
+                .fill(if can {
+                    Color32::from_rgb(40, 96, 74)
+                } else {
+                    pal::CARD
+                })
+                .min_size(vec2(bw, 40.0));
+                if ui
+                    .add_enabled(can, button)
+                    .on_hover_ui(|ui| tower_tooltip(ui, choices[0].0))
+                    .clicked()
+                {
+                    action = Some(Action::Upgrade);
+                }
+            }
+            n => {
+                ui.add_enabled(
+                    false,
+                    egui::Button::new(
+                        RichText::new(format!("{n} UPGRADES\nCHOOSE RIGHT")).size(10.0),
+                    )
+                    .fill(Color32::from_rgb(86, 68, 27))
+                    .min_size(vec2(bw, 40.0)),
+                );
+            }
+        }
+        if ui
+            .add(
+                egui::Button::new(RichText::new(format!("TARGET\n{}", tw.mode.label())).size(10.5))
+                    .fill(pal::CARD)
+                    .min_size(vec2(bw, 40.0)),
+            )
+            .on_hover_text(format!(
+                "{}\nClick to cycle priority.",
+                tw.mode.description()
+            ))
+            .clicked()
+        {
+            action = Some(Action::Target);
+        }
+        if ui
+            .add(
+                egui::Button::new(RichText::new(format!(
+                    "SELL [S]\n{}g",
+                    gold_str(g.tower_sell_value(ti) as i64)
+                )))
+                .fill(Color32::from_rgb(66, 31, 39))
+                .min_size(vec2(bw, 40.0)),
+            )
+            .on_hover_text("Sell this tower for the exact refund shown.")
+            .clicked()
+        {
+            action = Some(Action::Sell);
+        }
+    });
+
+    match action {
+        Some(Action::Upgrade) => g.upgrade(ti),
+        Some(Action::Target) => {
+            g.towers[ti].mode = g.towers[ti].mode.next();
+            g.sound_cues.push(Cue::Select);
+        }
+        Some(Action::Sell) => g.sell(ti),
+        None => {}
+    }
+}
+
+fn wave_intel(g: &Game, ui: &Ui, rect: Rect) {
+    carved(ui, rect, pal::PANEL_DEEP, false);
+    let p = ui.painter();
+    p.text(
+        rect.left_top() + vec2(9.0, 7.0),
+        Align2::LEFT_TOP,
+        "NEXT THREATS",
+        FontId::monospace(8.5),
+        pal::GOLD_LINE,
+    );
+    for k in 0..4u32 {
+        let n = g.wave + 1 + k;
+        if n > g.last_wave() {
+            break;
+        }
+        let wave = g.wave_def(n);
+        let row = Rect::from_min_size(
+            pos2(rect.left() + 7.0, rect.top() + 25.0 + k as f32 * 37.0),
+            vec2(rect.width() - 14.0, 32.0),
+        );
+        if k == 0 {
+            p.rect_filled(row, CornerRadius::same(2), Color32::from_rgb(30, 45, 39));
+            p.rect_stroke(
+                row,
+                CornerRadius::same(2),
+                Stroke::new(1.0, pal::GOLD_LINE),
+                StrokeKind::Inside,
+            );
+        }
+        p.text(
+            pos2(row.left() + 6.0, row.center().y),
+            Align2::LEFT_CENTER,
+            format!("{n:02}"),
+            FontId::monospace(11.0),
+            if k == 0 { pal::GOLD } else { pal::DIM },
+        );
+        let tag = if !wave.tag.is_empty() {
+            wave.tag
+        } else {
+            wave.armour_type.name()
+        };
+        p.text(
+            pos2(row.left() + 34.0, row.center().y - 6.0),
+            Align2::LEFT_CENTER,
+            tag,
+            FontId::proportional(11.0),
+            c32(wave.armour_type.color(), if k == 0 { 1.0 } else { 0.78 }),
+        );
+        p.text(
+            pos2(row.left() + 34.0, row.center().y + 8.0),
+            Align2::LEFT_CENTER,
+            format!("x{}{}", wave.count, if wave.flying { "  AIR" } else { "" }),
+            FontId::monospace(8.5),
+            if wave.flying {
+                c32(AIR_TINT, 1.0)
+            } else {
+                pal::DIM
+            },
+        );
+    }
+}
+
+fn selection_panel(g: &mut Game, ui: &mut Ui, compact: bool, w: f32) {
+    if !compact {
+        selection_panel_desktop(g, ui, w);
+        return;
+    }
     let (rect, _) = ui.allocate_exact_size(vec2(w, bar_h(compact)), Sense::hover());
     carved(ui, rect, pal::PANEL, true);
     let p = ui.painter();
 
     let Some(ti) = g.selected.filter(|&i| i < g.towers.len()) else {
+        let opening = g.wave == 0 && g.towers.is_empty();
         p.text(
-            rect.center(),
+            pos2(rect.center().x, rect.center().y - 12.0),
             Align2::CENTER_CENTER,
-            "Select a tower, or pick one to build",
-            FontId::proportional(12.5),
+            if opening {
+                "START HERE: PICK A TOWER CARD"
+            } else {
+                "SELECT A TOWER"
+            },
+            FontId::monospace(11.5),
+            if opening { pal::ACC } else { pal::DIM },
+        );
+        p.text(
+            pos2(rect.center().x, rect.center().y + 12.0),
+            Align2::CENTER_CENTER,
+            if opening {
+                "Then click a free plot beside the road"
+            } else {
+                "Click a tower to inspect, upgrade, or sell"
+            },
+            FontId::proportional(11.5),
             pal::DIM,
         );
+        if g.doctrine_picks() > 0 {
+            p.text(
+                pos2(rect.center().x, rect.bottom() - 18.0),
+                Align2::CENTER_CENTER,
+                format!(
+                    "COMMAND  ARS {}  |  SPD {}  |  RNG {}",
+                    g.doctrines[0], g.doctrines[1], g.doctrines[2]
+                ),
+                FontId::monospace(9.5),
+                pal::GOOD,
+            );
+        }
         return;
     };
 
@@ -1035,16 +1670,33 @@ fn selection_panel(g: &mut Game, ui: &mut Ui, compact: bool) {
     let choices = tw.upgrades();
 
     // Portrait frame.
-    // The portrait: a carved stone well with the tower's attack colour in it,
-    // exactly where Warcraft III puts a unit's face.
+    // The portrait shares the same authored icon language as the shop, so the
+    // thing selected on the field is instantly recognisable below.
     let port = Rect::from_min_size(rect.left_top() + vec2(10.0, 10.0), vec2(64.0, 64.0));
     carved(ui, port, pal::PANEL_DEEP, true);
     let p = ui.painter();
-    p.rect_filled(
-        Rect::from_center_size(port.center(), vec2(30.0, 30.0)),
-        CornerRadius::same(3),
-        c32(col, 1.0),
-    );
+    if let Some(texture) = tower_icons(ui.ctx()) {
+        p.image(
+            texture.id(),
+            port.shrink(3.0),
+            tower_icon_uv(def),
+            Color32::WHITE,
+        );
+        p.rect_filled(
+            Rect::from_min_max(
+                pos2(port.left() + 3.0, port.bottom() - 21.0),
+                pos2(port.right() - 3.0, port.bottom() - 3.0),
+            ),
+            CornerRadius::ZERO,
+            Color32::from_rgba_unmultiplied(4, 8, 8, 210),
+        );
+    } else {
+        p.rect_filled(
+            Rect::from_center_size(port.center(), vec2(30.0, 30.0)),
+            CornerRadius::same(3),
+            c32(col, 1.0),
+        );
+    }
     // A Siege Tower has twenty levels and a Poison Tower fifteen, so the step
     // is only meaningful next to the length of its own path.
     p.text(
@@ -1111,14 +1763,15 @@ fn selection_panel(g: &mut Game, ui: &mut Ui, compact: bool) {
         FontId::monospace(10.5),
         pal::DIM,
     );
-    if tw.buff_dmg > 0.0 || tw.buff_rate > 0.0 {
+    if tw.buff_dmg > 0.0 || tw.buff_rate > 0.0 || tw.buff_range > 0.0 {
         p.text(
             pos2(tx, port.top() + 68.0),
             Align2::LEFT_TOP,
             format!(
-                "Aura: +{:.0}% damage, +{:.0}% rate",
+                "+{:.0}% DMG  |  +{:.0}% RATE  |  +{:.1} RNG",
                 tw.buff_dmg * 100.0,
-                tw.buff_rate * 100.0
+                tw.buff_rate * 100.0,
+                tw.buff_range
             ),
             FontId::proportional(10.5),
             pal::GOOD,
@@ -1140,11 +1793,18 @@ fn selection_panel(g: &mut Game, ui: &mut Ui, compact: bool) {
             1 => {
                 let (into, cost) = choices[0];
                 let can = g.can_afford(cost);
-                let label = format!(
-                    "{}\n{}g",
-                    elide(ui, TOWERS[into].name, &FontId::proportional(12.0), 104.0),
-                    gold_str(cost as i64)
-                );
+                let current = def.effective_dps();
+                let next = TOWERS[into].effective_dps();
+                let gain = if current > 0.0 {
+                    ((next / current - 1.0) * 100.0).round().max(0.0) as u32
+                } else {
+                    0
+                };
+                let label = if gain > 0 {
+                    format!("Upgrade +{gain}%\n{}g", gold_str(cost as i64))
+                } else {
+                    format!("Upgrade\n{}g", gold_str(cost as i64))
+                };
                 let b = egui::Button::new(RichText::new(label).size(12.0).strong())
                     .fill(if can {
                         Color32::from_rgb(43, 110, 190)
@@ -1181,20 +1841,27 @@ fn selection_panel(g: &mut Game, ui: &mut Ui, compact: bool) {
                 .min_size(vec2(96.0, 44.0));
         if ui
             .add(tb)
-            .on_hover_text("Cycle targeting priority")
+            .on_hover_text(format!(
+                "{}\nClick to cycle targeting priority.",
+                tw.mode.description()
+            ))
             .clicked()
         {
             action = Some(Action::Target);
         }
 
         let sb = egui::Button::new(
-            RichText::new(format!("Sell\n{}g", gold_str(tw.sell_value() as i64))).size(11.5),
+            RichText::new(format!(
+                "Sell\n{}g",
+                gold_str(g.tower_sell_value(ti) as i64)
+            ))
+            .size(11.5),
         )
         .fill(Color32::from_rgb(64, 32, 42))
         .min_size(vec2(90.0, 44.0));
         if ui
             .add(sb)
-            .on_hover_text("The map refunds what you paid, in full")
+            .on_hover_text("Sell this tower for the exact refund shown.")
             .clicked()
         {
             action = Some(Action::Sell);
@@ -1237,7 +1904,221 @@ enum Action {
 /// an Aura Tower choosing Damage or Speed, the King Tower opening the four
 /// Supers - it becomes that list instead, because a fork with six branches
 /// does not fit anywhere else and is the most important decision in the game.
-fn build_palette(g: &mut Game, ui: &mut Ui, ust: &mut UiState) {
+fn build_palette(g: &mut Game, ui: &mut Ui, ust: &mut UiState, width: f32) {
+    if ust.compact {
+        build_palette_strip(g, ui, ust);
+    } else {
+        build_palette_grid(g, ui, ust, width);
+    }
+}
+
+/// Desktop command card: the familiar four-by-three muscle-memory grid. The
+/// old eleven-wide carousel forced the eye across half the monitor and made
+/// every tower compete with the selected unit. Here icons are commands; names,
+/// rules and exact numbers belong to the hover dossier.
+fn build_palette_grid(g: &mut Game, ui: &mut Ui, ust: &mut UiState, width: f32) {
+    let (rect, _) = ui.allocate_exact_size(vec2(width, BAR_H), Sense::hover());
+    carved(ui, rect, pal::PANEL, true);
+    let branching = g
+        .selected
+        .filter(|&i| i < g.towers.len())
+        .filter(|&i| g.towers[i].upgrades().len() > 1);
+    let entries: Vec<usize> = match branching {
+        Some(ti) => g.towers[ti]
+            .upgrades()
+            .into_iter()
+            .map(|(i, _)| i)
+            .collect(),
+        None => shop_order(),
+    };
+    let p = ui.painter();
+    p.text(
+        rect.left_top() + vec2(10.0, 7.0),
+        Align2::LEFT_TOP,
+        if branching.is_some() {
+            "CHOOSE UPGRADE"
+        } else {
+            "TOWER COMMANDS"
+        },
+        FontId::monospace(8.5),
+        if branching.is_some() {
+            pal::GOLD
+        } else {
+            pal::GOLD_LINE
+        },
+    );
+    p.text(
+        rect.right_top() + vec2(-10.0, 7.0),
+        Align2::RIGHT_TOP,
+        "1-0 / -",
+        FontId::monospace(8.0),
+        pal::DIM,
+    );
+
+    const COLS: usize = 4;
+    const ROWS: usize = 3;
+    const GAP: f32 = 5.0;
+    let well = Rect::from_min_max(
+        rect.left_top() + vec2(8.0, 24.0),
+        rect.right_bottom() - vec2(8.0, 8.0),
+    );
+    let side = ((well.width() - GAP * (COLS - 1) as f32) / COLS as f32)
+        .min((well.height() - GAP * (ROWS - 1) as f32) / ROWS as f32)
+        .floor()
+        .max(44.0);
+    let grid_size = vec2(
+        side * COLS as f32 + GAP * (COLS - 1) as f32,
+        side * ROWS as f32 + GAP * (ROWS - 1) as f32,
+    );
+    let origin = pos2(
+        (well.center().x - grid_size.x * 0.5).round(),
+        (well.center().y - grid_size.y * 0.5).round(),
+    );
+
+    ust.hotkeys.clear();
+    ust.card_rects.clear();
+    ust.palette_rect = rect;
+    ust.palette_page = 0;
+    for slot in 0..COLS * ROWS {
+        let col = slot % COLS;
+        let row = slot / COLS;
+        let card = Rect::from_min_size(
+            origin + vec2(col as f32 * (side + GAP), row as f32 * (side + GAP)),
+            vec2(side, side),
+        );
+        if let Some(&def_i) = entries.get(slot) {
+            ust.hotkeys.push(def_i);
+            ust.card_rects.push(card);
+            tower_command_card(g, ui, card, def_i, branching, palette_hotkey(slot));
+        } else {
+            slot_frame(ui, card, false, false);
+        }
+    }
+}
+
+fn tower_command_card(
+    g: &mut Game,
+    ui: &mut Ui,
+    rect: Rect,
+    def_i: usize,
+    upgrading: Option<usize>,
+    hotkey: &str,
+) {
+    let def = &TOWERS[def_i];
+    let affordable = g.can_afford(def.gold);
+    let selected = upgrading.is_none() && g.build_choice.map(|(d, _)| d) == Some(def_i);
+    let resp = ui.interact(rect, ui.id().with(("tower_command", def_i)), Sense::click());
+    let hover = ui
+        .ctx()
+        .animate_bool_with_time(resp.id.with("hover"), resp.hovered(), 0.08);
+    slot_frame_amount(ui, rect, hover, selected);
+    let p = ui.painter_at(rect);
+    let icon = rect.shrink(3.0);
+    p.rect_filled(icon, CornerRadius::same(2), Color32::from_rgb(8, 12, 11));
+    if let Some(texture) = tower_icons(ui.ctx()) {
+        p.image(
+            texture.id(),
+            icon,
+            tower_icon_uv(def),
+            if affordable {
+                Color32::WHITE
+            } else {
+                Color32::from_rgba_unmultiplied(112, 112, 112, 190)
+            },
+        );
+    } else {
+        p.circle_filled(
+            icon.center(),
+            icon.width() * 0.28,
+            c32(tower_color(def), if affordable { 1.0 } else { 0.4 }),
+        );
+    }
+    let cost_band =
+        Rect::from_min_max(pos2(icon.left(), icon.bottom() - 16.0), icon.right_bottom());
+    p.rect_filled(
+        cost_band,
+        CornerRadius::ZERO,
+        Color32::from_rgba_unmultiplied(4, 8, 7, 220),
+    );
+    p.circle_filled(
+        pos2(cost_band.left() + 8.0, cost_band.center().y),
+        3.0,
+        pal::GOLD,
+    );
+    p.text(
+        pos2(cost_band.left() + 14.0, cost_band.center().y),
+        Align2::LEFT_CENTER,
+        gold_str(def.gold as i64),
+        FontId::monospace(9.5),
+        if affordable { pal::GOLD } else { pal::BAD },
+    );
+    let key = Rect::from_min_size(icon.left_top() + vec2(2.0, 2.0), vec2(14.0, 14.0));
+    p.rect_filled(
+        key,
+        CornerRadius::same(2),
+        Color32::from_rgba_unmultiplied(3, 7, 6, 226),
+    );
+    p.text(
+        key.center(),
+        Align2::CENTER_CENTER,
+        hotkey,
+        FontId::monospace(9.0),
+        pal::GOLD,
+    );
+    if def.targets != Targets::GroundOnly && def.targets != Targets::Nothing {
+        p.text(
+            icon.right_top() + vec2(-3.0, 3.0),
+            Align2::RIGHT_TOP,
+            if def.targets == Targets::AirOnly {
+                "AIR!"
+            } else {
+                "AIR"
+            },
+            FontId::monospace(7.5),
+            c32(AIR_TINT, if affordable { 1.0 } else { 0.5 }),
+        );
+    }
+
+    if resp.clicked() {
+        match upgrading {
+            Some(ti) => g.upgrade_into(ti, def_i),
+            None => {
+                g.build_choice = Some((def_i, 1));
+                g.selected = None;
+                g.sound_cues.push(Cue::Select);
+            }
+        }
+    }
+    resp.on_hover_ui(|ui| tower_tooltip(ui, def_i));
+}
+
+fn slot_frame_amount(ui: &Ui, r: Rect, hover: f32, chosen: bool) {
+    let mix = |a: Color32, b: Color32, t: f32| {
+        let lerp = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t) as u8;
+        Color32::from_rgb(lerp(a.r(), b.r()), lerp(a.g(), b.g()), lerp(a.b(), b.b()))
+    };
+    let p = ui.painter();
+    p.rect_filled(
+        r,
+        CornerRadius::same(3),
+        mix(pal::PANEL_DEEP, pal::CARD_HOVER, hover),
+    );
+    p.rect_stroke(
+        r,
+        CornerRadius::same(3),
+        Stroke::new(
+            if chosen { 2.0 } else { 1.0 + hover },
+            if chosen {
+                pal::GOLD
+            } else {
+                mix(pal::GOLD_LINE, pal::GOLD, hover)
+            },
+        ),
+        StrokeKind::Inside,
+    );
+}
+
+fn build_palette_strip(g: &mut Game, ui: &mut Ui, ust: &mut UiState) {
     let compact = ust.compact;
     let width = ui.available_width().max(card_w(compact) + 24.0);
     let (rect, _) = ui.allocate_exact_size(vec2(width, bar_h(compact)), Sense::hover());
@@ -1339,7 +2220,7 @@ fn build_palette(g: &mut Game, ui: &mut Ui, ust: &mut UiState) {
             break;
         }
         ust.card_rects.push(card);
-        tower_card(g, ui, card, i, branching, slot + 1);
+        tower_card(g, ui, card, i, branching, palette_hotkey(slot));
     }
 
     if paged {
@@ -1402,7 +2283,7 @@ pub fn wave_ladder(g: &Game, ui: &mut Ui, h: f32) {
         if n > g.last_wave() {
             break;
         }
-        let w = wave_at(n);
+        let w = g.wave_def(n);
         let y = rect.top() + 16.0 + k as f32 * row_h;
         let col = c32(w.armour_type.color(), if k == 0 { 1.0 } else { 0.75 });
         p.text(
@@ -1430,6 +2311,16 @@ pub fn wave_ladder(g: &Game, ui: &mut Ui, h: f32) {
                 3.5,
                 c32(AIR_TINT, 1.0),
             );
+        } else if g.difficulty.elite_stride(n).is_some() {
+            // A gold V says that Vanguards are mixed into the wave without
+            // hiding the armour label that determines the player's counter.
+            p.text(
+                pos2(rect.right() - 10.0, y + row_h * 0.5),
+                Align2::CENTER_CENTER,
+                "V",
+                FontId::monospace(9.0),
+                pal::GOLD,
+            );
         }
     }
 
@@ -1443,7 +2334,7 @@ pub fn wave_ladder(g: &Game, ui: &mut Ui, h: f32) {
                 if n > g.last_wave() {
                     break;
                 }
-                let w = wave_at(n);
+                let w = g.wave_def(n);
                 ui.label(
                     RichText::new(format!(
                         "{n}. {} x{}  ·  {} armour {}{}",
@@ -1471,7 +2362,7 @@ fn tower_card(
     rect: Rect,
     def_i: usize,
     upgrading: Option<usize>,
-    hotkey: usize,
+    hotkey: &str,
 ) {
     let def = &TOWERS[def_i];
     let cost = def.gold;
@@ -1483,21 +2374,34 @@ fn tower_card(
     slot_frame(ui, rect, resp.hovered(), selected);
     let p = ui.painter_at(rect);
 
-    // Lay out down the card as fractions of its height. The icon is a square
-    // well with the tower's attack colour in it, which is as close to Warcraft
-    // III's hand-painted command icons as a renderer with no textures gets.
+    // Lay out down the card as fractions of its height. Illustrated family
+    // icons replace the old flat colour chips; target and attack labels remain
+    // beside them because those are rules, not decoration.
     let h = rect.height();
-    let icon_side = (h * 0.40).min(rect.width() * 0.72);
+    let icon_side = (h * 0.54).min(rect.width() * 0.80);
     let icon = Rect::from_center_size(
-        pos2(rect.center().x, rect.top() + h * 0.28),
+        pos2(rect.center().x, rect.top() + h * 0.31),
         vec2(icon_side, icon_side),
     );
-    p.rect_filled(icon, CornerRadius::same(2), Color32::from_rgb(12, 11, 9));
-    p.rect_filled(
-        icon.shrink(icon_side * 0.16),
-        CornerRadius::same(2),
-        c32(col, if affordable { 1.0 } else { 0.42 }),
-    );
+    p.rect_filled(icon, CornerRadius::same(2), Color32::from_rgb(12, 15, 14));
+    if let Some(texture) = tower_icons(ui.ctx()) {
+        p.image(
+            texture.id(),
+            icon,
+            tower_icon_uv(def),
+            if affordable {
+                Color32::WHITE
+            } else {
+                Color32::from_rgba_unmultiplied(120, 120, 120, 190)
+            },
+        );
+    } else {
+        p.rect_filled(
+            icon.shrink(icon_side * 0.16),
+            CornerRadius::same(2),
+            c32(col, if affordable { 1.0 } else { 0.42 }),
+        );
+    }
     p.rect_stroke(
         icon,
         CornerRadius::same(2),
@@ -1524,7 +2428,7 @@ fn tower_card(
 
     let name_font = FontId::proportional(11.5);
     p.text(
-        pos2(rect.center().x, rect.top() + h * 0.53),
+        pos2(rect.center().x, rect.top() + h * 0.61),
         Align2::CENTER_TOP,
         elide(ui, def.family.short(), &name_font, rect.width() - 6.0),
         name_font,
@@ -1535,11 +2439,11 @@ fn tower_card(
     // loses characters off *both* ends.
     let role_font = FontId::proportional(9.0);
     p.text(
-        pos2(rect.center().x, rect.top() + h * 0.68),
+        pos2(rect.center().x, rect.top() + h * 0.74),
         Align2::CENTER_TOP,
-        elide(ui, def.attack.name(), &role_font, rect.width() - 6.0),
+        elide(ui, def.family.role_tag(), &role_font, rect.width() - 6.0),
         role_font,
-        c32(def.attack.color(), 0.9),
+        c32(def.family.fx_color(), 0.95),
     );
     let cost_c = pos2(rect.center().x, rect.bottom() - h * 0.10);
     p.circle_filled(pos2(cost_c.x - 22.0, cost_c.y), 4.0, pal::GOLD);
@@ -1557,7 +2461,7 @@ fn tower_card(
     p.text(
         key.center(),
         Align2::CENTER_CENTER,
-        format!("{hotkey}"),
+        hotkey,
         FontId::monospace(9.5),
         pal::GOLD,
     );
@@ -1568,10 +2472,32 @@ fn tower_card(
             None => {
                 g.build_choice = Some((def_i, 1));
                 g.selected = None;
+                g.sound_cues.push(Cue::Select);
             }
         }
     }
     resp.on_hover_ui(|ui| tower_tooltip(ui, def_i));
+}
+
+/// Eleven build cards fit the desktop command bar. Their shortcuts follow the
+/// physical number row rather than printing impossible two-digit keys.
+fn palette_hotkey(slot: usize) -> &'static str {
+    const KEYS: [&str; 11] = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "-"];
+    KEYS.get(slot).copied().unwrap_or("")
+}
+
+#[cfg(test)]
+mod command_card_tests {
+    use super::palette_hotkey;
+
+    #[test]
+    fn every_desktop_command_card_advertises_a_real_unique_key() {
+        let keys: Vec<&str> = (0..11).map(palette_hotkey).collect();
+        assert_eq!(
+            keys,
+            ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "-"]
+        );
+    }
 }
 
 /// Shortens `text` until it fits `max_w`, ending in two dots.
@@ -1783,9 +2709,97 @@ fn kv(ui: &mut Ui, k: &str, v: &str) {
 pub fn modals(g: &mut Game, ctx: &Context, ust: &mut UiState) {
     if matches!(g.phase, Phase::Defeat | Phase::Victory) {
         game_over(g, ctx);
+    } else if g.pending_doctrine {
+        doctrine_draft(g, ctx);
     }
-    if ust.show_help {
+    if ust.show_help && !g.pending_doctrine {
         help(ctx, ust);
+    }
+}
+
+/// Three clear, permanent choices at waves 10, 20 and 30. The simulation is
+/// paused while this is open, so reading a build-defining decision never costs
+/// the player half a wave.
+fn doctrine_draft(g: &mut Game, ctx: &Context) {
+    let mut picked = None;
+    egui::Modal::new(Id::new("doctrine_draft"))
+        .frame(
+            egui::Frame::NONE
+                .fill(pal::PANEL)
+                .stroke(Stroke::new(1.5, pal::GOLD))
+                .corner_radius(CornerRadius::same(14))
+                .inner_margin(24.0),
+        )
+        .show(ctx, |ui| {
+            ui.set_width(500.0);
+            ui.vertical_centered(|ui| {
+                ui.label(
+                    RichText::new("COMMAND UPGRADE")
+                        .monospace()
+                        .strong()
+                        .size(11.0)
+                        .color(pal::GOLD),
+                );
+                ui.label(
+                    RichText::new(format!("Wave {} doctrine", g.wave))
+                        .strong()
+                        .size(25.0),
+                );
+                ui.label(
+                    RichText::new(
+                        "The battle is paused. Choose one permanent upgrade for this run.",
+                    )
+                    .size(12.0)
+                    .color(pal::DIM),
+                );
+            });
+            ui.add_space(14.0);
+
+            for doctrine in Doctrine::ALL {
+                let rank = g.doctrine_rank(doctrine);
+                let accent = match doctrine {
+                    Doctrine::Arsenal => Color32::from_rgb(239, 116, 72),
+                    Doctrine::Overdrive => pal::ACC,
+                    Doctrine::Reach => pal::GOOD,
+                };
+                let total = match doctrine {
+                    Doctrine::Arsenal => format!("{}% total damage", (rank + 1) * 12),
+                    Doctrine::Overdrive => format!("{}% total attack speed", (rank + 1) * 10),
+                    Doctrine::Reach => format!("+{:.1} total range", (rank + 1) as f32 * 0.6),
+                };
+                let text = format!(
+                    "{}   RANK {} -> {}\n{}   |   {}",
+                    doctrine.label(),
+                    rank,
+                    rank + 1,
+                    doctrine.effect(),
+                    total
+                );
+                let button =
+                    egui::Button::new(RichText::new(text).size(12.0).strong().color(pal::INK))
+                        .fill(pal::CARD)
+                        .stroke(Stroke::new(1.25, accent))
+                        .corner_radius(7.0);
+                if ui
+                    .add_sized(vec2(ui.available_width(), 58.0), button)
+                    .clicked()
+                {
+                    picked = Some(doctrine);
+                }
+                ui.add_space(7.0);
+            }
+            ui.vertical_centered(|ui| {
+                ui.label(
+                    RichText::new(
+                        "There is no wrong pick: reinforce the weakness in your current board.",
+                    )
+                    .size(10.5)
+                    .color(pal::DIM),
+                );
+            });
+        });
+    if let Some(doctrine) = picked {
+        g.choose_doctrine(doctrine);
     }
 }
 
@@ -1810,6 +2824,18 @@ fn game_over(g: &mut Game, ctx: &Context) {
                         .color(if won { pal::GOOD } else { pal::BAD }),
                 );
                 ui.label(
+                    RichText::new(format!(
+                        "{}  |  COMMAND RATING {}  |  SCORE {}",
+                        g.difficulty.label().to_ascii_uppercase(),
+                        g.command_rating(),
+                        gold_str(g.command_score() as i64)
+                    ))
+                    .monospace()
+                    .strong()
+                    .size(12.0)
+                    .color(pal::GOLD),
+                );
+                ui.label(
                     RichText::new(if won {
                         format!("All {N_WAVES} waves cleared, and the ring emptied.",)
                     } else if g.endless {
@@ -1828,15 +2854,18 @@ fn game_over(g: &mut Game, ctx: &Context) {
                             ("Kills", short(g.stats.kills as f64)),
                             ("Damage", short(g.stats.damage)),
                             ("Gold earned", gold_str(g.stats.gold_earned as i64)),
+                            ("Rush gold", gold_str(g.stats.rush_gold as i64)),
+                            ("Clean sweeps", g.stats.clean_sweeps.to_string()),
                             ("Net worth", gold_str(g.net_worth())),
                             ("Towers built", g.stats.towers_built.to_string()),
+                            ("Command upgrades", g.doctrine_picks().to_string()),
                             // Not "leaked" - nothing can leak off a circuit,
                             // and a stat that is always zero is worse than no
                             // stat at all. How full the ring ever got is the
                             // number that describes the run.
                             (
                                 "Fullest ring",
-                                format!("{} / {FLOOD_LIMIT}", g.stats.peak_circling),
+                                format!("{} / {}", g.stats.peak_circling, g.flood_limit()),
                             ),
                         ] {
                             ui.label(RichText::new(k).color(pal::DIM));
@@ -1865,9 +2894,13 @@ fn game_over(g: &mut Game, ctx: &Context) {
                     }
                     if ui
                         .add(
-                            egui::Button::new(RichText::new("Play again").strong().size(14.0))
-                                .fill(Color32::from_rgb(43, 110, 190))
-                                .min_size(vec2(150.0, 34.0)),
+                            egui::Button::new(
+                                RichText::new(format!("Play {} again", g.difficulty.label()))
+                                    .strong()
+                                    .size(14.0),
+                            )
+                            .fill(Color32::from_rgb(43, 110, 190))
+                            .min_size(vec2(150.0, 34.0)),
                         )
                         .clicked()
                     {
@@ -1896,18 +2929,21 @@ fn help(ctx: &Context, ust: &mut UiState) {
         .show(ctx, |ui| {
             ui.set_max_width(600.0);
             ui.label(RichText::new("How to play").strong().size(20.0));
+            ui.label(
+                RichText::new("The essentials first; details appear in tower and wave tooltips.")
+                    .size(12.0)
+                    .color(pal::DIM),
+            );
             ui.add_space(6.0);
             for (title, body) in [
-                ("The lane is a shuttle", "The map orders your creeps down a three-tile corridor and then sends them back up it, forever. There is no exit and no lives: what you defend is a RATE. Anything your towers cannot kill comes round again, and the field fills up."),
-                ("Seven hundred and it is over", "The map's own leaderboard says it: when enemies pass seven hundred, the game ends. The CIRCLING gauge counts what is still walking against that. Green is comfortable, amber is falling behind, red is nearly over."),
-                ("Waves never stop", "A wave arrives every forty-five to fifty seconds whether the last one is dead or not, and its whole count streams in evenly across forty-five of those. There is no build phase - you spend gold while the corridor is busy."),
-                ("Eleven towers, and a graph behind them", "Eleven can be bought. The other hundred and twenty are reached by upgrading, and upgrading is a graph rather than a ladder: most towers have one next step, but three of them fork."),
-                ("The ten gold seed", "The cheapest tower is a Single shot Tower at ten gold, and it is a door. It becomes a Slow, Poison, Critical, Troll, Fire or One-Strike Kill Tower, and none of those six can be bought at any price."),
-                ("Every fifth wave is Immune", "An Immune wave takes five percent from everything - Normal, Siege, Magic, Spells, all of it - except Chaos, which it takes in full, and Hero, which is multiplied by a hundred. Chaos, Destruction, Troll and the One-Strike Kill Tower exist for those waves and for nothing else."),
-                ("Armour is a number", "It is not a category. Each point takes six percent off what lands, with diminishing returns, and it climbs to seven hundred - which is two percent of the damage getting through. That is why the roster ends in six figures."),
-                ("Something has to answer the air", "Waves 7, 17, 23, 27 and 35 fly. The Siege ladder is the longest in the game and never elevates; nine of the ten Air Towers can hit nothing else. Buy one before wave seven."),
-                ("Waves are streams, not bursts", "A wave is up to a hundred and sixty monsters arriving one at a time. Splash, bouncing shots and multishot are worth far more than one enormous hit, because what kills you is throughput."),
-                ("Thirty-six waves, then forever", "You win by surviving all thirty-six AND clearing the field - outlasting the last stream is not the same as killing it. You may keep going afterwards; endless waves grow faster than the purse does."),
+                ("Win condition", "Enemies circle forever. Keep CIRCLING below the mode's limit, clear all 36 waves, then choose whether to continue into endless."),
+                ("Read both lanes", "Each enemy chooses clockwise or counter-clockwise at the source. Build for coverage on both sides of the circuit instead of making one kill box."),
+                ("Build and upgrade", "Choose a tower below and place it on a highlighted fortified pad. Pads protect each tower's footprint; shallow tower spam falls behind, so select towers to upgrade or sell. The 10-gold Single tower branches into six specialist families."),
+                ("Read the next-wave warning", "Flying waves need anti-air. Immune waves need Chaos or Hero damage. The HUD warns you when your current board has no answer."),
+                ("Choose your tempo", "After the current stream has fully deployed, call the next wave early for a Rush bonus and overlap its survivors. Or let the clock expire with an empty ring for a Clean Sweep bonus."),
+                ("Use area damage", "Large waves are a throughput test. Splash, bounce and multishot clear streams; slow and poison buy them more time on the road."),
+                ("Command upgrades", "Veteran and Nightmare pause before waves 10, 20 and 30. Choose permanent damage, attack-speed or range upgrades that reinforce your current build."),
+                ("Veterans and Vanguards", "Survivors gain speed, but never extra bounty, on completed laps. Gold-ringed Vanguards are tougher, faster and control-resistant. A commander reaching lap 4 ends Veteran; lap 3 ends Nightmare."),
             ] {
                 ui.label(RichText::new(title).strong().size(13.0));
                 ui.label(RichText::new(body).size(12.0).color(pal::DIM));
@@ -1915,7 +2951,7 @@ fn help(ctx: &Context, ust: &mut UiState) {
             }
             ui.separator();
             ui.label(
-                RichText::new("1-9 pick tower · Esc cancel · Space pause · F speed · Enter send wave · U upgrade · S sell · Shift+click keeps building · arrows or WASD scroll · wheel zooms")
+                RichText::new("1-9, 0, - pick tower · Esc cancel · Space pause · F speed · Enter send wave · U upgrade · S sell · Shift+click keeps building · arrows or WASD scroll · wheel zooms")
                     .size(11.0)
                     .color(pal::DIM),
             );
@@ -1985,23 +3021,119 @@ pub fn board_text(g: &Game, ui: &Ui, cam: &Camera, rect: Rect) {
                 shadow,
             );
         }
-        p.text(
-            pos,
-            Align2::CENTER_CENTER,
-            txt,
-            font,
-            col.gamma_multiply(a),
-        );
+        p.text(pos, Align2::CENTER_CENTER, txt, font, col.gamma_multiply(a));
     }
 
-    if let Some((msg, t)) = &g.toast {
+    if let Some((msg, t, tone)) = &g.toast {
         let a = (t / 2.2).clamp(0.0, 1.0);
+        let color = match tone {
+            ToastTone::Info => pal::ACC,
+            ToastTone::Good => pal::GOOD,
+            ToastTone::Bad => pal::BAD,
+        };
         p.text(
             pos2(rect.center().x, rect.top() + 30.0),
             Align2::CENTER_CENTER,
             msg,
             FontId::proportional(15.0),
-            pal::BAD.gamma_multiply(a),
+            color.gamma_multiply(a),
+        );
+    }
+
+    // Progressive, contextual guidance. It disappears as soon as the action is
+    // understood and returns only for a strategically dangerous counter. This
+    // replaces a wall of instructions with the one decision that matters now.
+    let guidance = if g.wave == 0 && g.towers.is_empty() && g.build_choice.is_none() {
+        Some((
+            "STEP 1 OF 3  ·  CHOOSE A TOWER".to_owned(),
+            "Pick a tower below. Single is flexible; Siege controls crowds.".to_owned(),
+            pal::ACC,
+        ))
+    } else if g.wave == 0 && g.build_choice.is_some() {
+        Some((
+            "STEP 2 OF 3  ·  PLACE IT".to_owned(),
+            "Click a highlighted fortified pad. Each pad reserves a clear tower footprint."
+                .to_owned(),
+            pal::ACC,
+        ))
+    } else if g.wave == 0 && !g.towers.is_empty() {
+        Some((
+            "STEP 3 OF 3  ·  CALL WAVE 1".to_owned(),
+            "Press Enter or SEND. Calling early trades setup time for bonus gold.".to_owned(),
+            pal::GOOD,
+        ))
+    } else if g.flood() > 0.72 {
+        Some((
+            "DANGER  ·  THE RING IS FILLING".to_owned(),
+            format!(
+                "{} of {} enemies are circling. Upgrade damage or crowd control now.",
+                g.creeps.len(),
+                g.flood_limit()
+            ),
+            pal::BAD,
+        ))
+    } else if g.wave < g.last_wave() {
+        let next = g.next_wave_def();
+        let has_air = g.towers.iter().any(|t| t.targets().can_hit(true));
+        let has_chaos = g
+            .towers
+            .iter()
+            .any(|t| matches!(t.attack(), Attack::Chaos | Attack::Hero));
+        if next.flying && !has_air {
+            Some((
+                format!("COUNTER NEEDED  ·  AIR ON WAVE {}", g.wave + 1),
+                "Build an Air Tower, or one whose target line says Ground + Air.".to_owned(),
+                pal::BAD,
+            ))
+        } else if next.armour_type == ArmourType::Divine && !has_chaos {
+            Some((
+                format!("COUNTER NEEDED  ·  IMMUNE ON WAVE {}", g.wave + 1),
+                "Build Chaos or Hero damage; other attacks deal almost nothing.".to_owned(),
+                pal::BAD,
+            ))
+        } else if g.creeps.iter().map(|c| c.laps).max().unwrap_or(0) >= 2 {
+            let veterans = g.creeps.iter().filter(|c| c.laps > 0).count();
+            Some((
+                "VETERANS ARE GAINING SPEED".to_owned(),
+                format!(
+                    "{veterans} survivors have completed a lap. Default First targeting prioritises them."
+                ),
+                pal::GOLD,
+            ))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    if let Some((title, detail, accent)) = guidance {
+        let width = (rect.width() - 32.0).min(430.0).max(220.0);
+        let card = Rect::from_min_size(rect.left_top() + vec2(16.0, 16.0), vec2(width, 58.0));
+        p.rect_filled(
+            card,
+            CornerRadius::same(7),
+            Color32::from_rgba_unmultiplied(10, 17, 16, 226),
+        );
+        p.rect_stroke(
+            card,
+            CornerRadius::same(7),
+            Stroke::new(1.5, accent.gamma_multiply(0.9)),
+            StrokeKind::Inside,
+        );
+        p.text(
+            card.left_top() + vec2(12.0, 9.0),
+            Align2::LEFT_TOP,
+            title,
+            FontId::monospace(11.0),
+            accent,
+        );
+        p.text(
+            card.left_top() + vec2(12.0, 31.0),
+            Align2::LEFT_TOP,
+            detail,
+            FontId::proportional(11.5),
+            pal::INK,
         );
     }
 }

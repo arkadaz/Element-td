@@ -71,6 +71,30 @@ pub fn ladder_len(f: Family) -> u32 {
     TOWERS.iter().filter(|t| t.family == f).count() as u32
 }
 
+/// Map any statistical rung onto the same four visual milestones used by the
+/// battlefield renderer and the icon atlas.
+pub fn tower_visual_stage(def: &TowerLevel) -> usize {
+    use Family::*;
+    let n = ladder_len(def.family).max(2) - 1;
+    let progress = (def.step as f32 / n as f32).clamp(0.0, 1.0);
+    let climbed = if progress < 0.20 {
+        0
+    } else if progress < 0.50 {
+        1
+    } else if progress < 0.80 {
+        2
+    } else {
+        3
+    };
+    let floor = match def.family {
+        Damage | Speed | Slow | Poison | Critical | Troll => 1,
+        Frost | Fire => 2,
+        SuperChaos | SuperDestruct | SuperMulti | SuperBounce | OneStrike => 3,
+        _ => 0,
+    };
+    climbed.max(floor).min(3)
+}
+
 pub fn tower_color(t: &TowerLevel) -> [f32; 3] {
     t.color()
 }

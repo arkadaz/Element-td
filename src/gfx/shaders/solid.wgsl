@@ -25,7 +25,7 @@ struct Uniforms {
 /// map's own strength; this is softer, because the camera looks down at fifty-
 /// two degrees and a full-strength normal on a floor seen from above turns into
 /// noise rather than relief.
-const GROUND_RELIEF: f32 = 0.55;
+const GROUND_RELIEF: f32 = 0.14;
 
 /// Must match `mesh::POS_RANGE`. Vertex positions are stored as a fraction of
 /// it so they fit in sixteen bits.
@@ -129,7 +129,14 @@ fn vs(in: VsIn) -> VsOut {
     o.color = vec4<f32>(o.color.rgb * in.v_col.rgb, o.color.a);
     o.tex = in.i_params.y;
     o.material = in.i_material;
-    o.tint = 0.94 + fract(sin(dot(in.i_pos.xy, vec2<f32>(12.9898, 78.233))) * 43758.5453) * 0.12;
+    // Variation helps repeated props, but on one-instance-per-tile terrain it
+    // exposes the mesh grid as a checkerboard. Ground gets continuous
+    // world-space variation in the fragment shader instead.
+    if (in.i_params.y >= 0.5) {
+        o.tint = 1.0;
+    } else {
+        o.tint = 0.94 + fract(sin(dot(in.i_pos.xy, vec2<f32>(12.9898, 78.233))) * 43758.5453) * 0.12;
+    }
     // Offset along the normal to keep sloped faces off their own shadow.
     o.light_pos = U.light_view_proj * vec4<f32>(world + nrm * 0.045, 1.0);
     return o;
@@ -155,7 +162,7 @@ fn shadow_at(light_pos: vec4<f32>, ndl: f32) -> f32 {
     let bias = mix(0.0016, 0.0004, ndl);
     let t = U.misc.w;
     if (SHADOW_TAPS == 1) {
-        return textureSampleCompare(shadow_map, shadow_samp, uv, proj.z - bias);
+        return textureSampleCompareLevel(shadow_map, shadow_samp, uv, proj.z - bias);
     }
     // A nine tap box, wider than the old four. Four taps on a hard edge is a
     // stair; nine across a wider kernel is a soft edge, and soft edges are most
@@ -164,7 +171,7 @@ fn shadow_at(light_pos: vec4<f32>, ndl: f32) -> f32 {
     for (var i = -1; i <= 1; i = i + 1) {
         for (var j = -1; j <= 1; j = j + 1) {
             let o = vec2<f32>(f32(i), f32(j)) * t * 1.35;
-            sum = sum + textureSampleCompare(shadow_map, shadow_samp, uv + o, proj.z - bias);
+            sum = sum + textureSampleCompareLevel(shadow_map, shadow_samp, uv + o, proj.z - bias);
         }
     }
     return sum / 9.0;
@@ -207,13 +214,13 @@ fn sky_occlusion(light_pos: vec4<f32>) -> f32 {
     // anything stands *near* the point, not whether the point is lit, and a
     // tight bias turns the answer into a second copy of the shadow.
     let z = proj.z - 0.0035;
-    var sum = textureSampleCompare(shadow_map, shadow_samp, uv + vec2<f32>(r, r), z);
-    sum = sum + textureSampleCompare(shadow_map, shadow_samp, uv + vec2<f32>(-r, -r), z);
+    var sum = textureSampleCompareLevel(shadow_map, shadow_samp, uv + vec2<f32>(r, r), z);
+    sum = sum + textureSampleCompareLevel(shadow_map, shadow_samp, uv + vec2<f32>(-r, -r), z);
     if (SHADOW_TAPS == 1) {
         return sum * 0.5;
     }
-    sum = sum + textureSampleCompare(shadow_map, shadow_samp, uv + vec2<f32>(-r, r), z);
-    sum = sum + textureSampleCompare(shadow_map, shadow_samp, uv + vec2<f32>(r, -r), z);
+    sum = sum + textureSampleCompareLevel(shadow_map, shadow_samp, uv + vec2<f32>(-r, r), z);
+    sum = sum + textureSampleCompareLevel(shadow_map, shadow_samp, uv + vec2<f32>(r, -r), z);
     return sum * 0.25;
 }
 
@@ -268,16 +275,34 @@ fn env_brdf(f0: vec3<f32>, rough: f32, ndv: f32) -> vec3<f32> {
 
 @fragment
 fn fs(o: VsOut) -> @location(0) vec4<f32> {
-    // Ground texture, addressed by world position so the terrain needs no UVs
-    // and neighbouring tiles line up with no seam. Tiled a little under once
-    // per tile, which is deliberately not exactly once: on an exact tile the
-    // repeat lands on the grid and the field reads as wallpaper.
+    // Every visible surface is textured. Terrain uses planar UVs; props, towers
+    // and creatures use material-selected triplanar detail because the baked
+    // browser mesh deliberately carries no UV/tangent stream. This keeps one
+    // compact texture array and still gives vertical stone, wood, hide, leaves
+    // and metal real grain instead of flat vertex colour.
     var albedo_tex = vec3<f32>(1.0);
     var n = normalize(o.nrm);
+    // Derivatives must be evaluated before the material branch. Passing them
+    // explicitly keeps mip filtering while satisfying WebGPU's uniform-control
+    // rule on Chromium/Edge.
+    let ground_uv = o.world.xy * 0.73;
+    let ground_uv_dx = dpdx(ground_uv);
+    let ground_uv_dy = dpdy(ground_uv);
+    let world_dx = dpdx(o.world);
+    let world_dy = dpdy(o.world);
     if (o.tex >= 0.5) {
         let layer = i32(o.tex - 1.0);
-        let uv = o.world.xy * 0.73;
-        albedo_tex = textureSample(ground_tex, ground_smp, uv, layer).rgb;
+        // The terrain/material selector is a per-fragment value, so this branch
+        // is non-uniform. WebGPU therefore forbids an implicit-derivative
+        // textureSample here even though native backends accept it.
+        albedo_tex = textureSampleGrad(
+            ground_tex,
+            ground_smp,
+            ground_uv,
+            layer,
+            ground_uv_dx,
+            ground_uv_dy,
+        ).rgb;
 
         // The surface's shape, not just its colour.
         //
@@ -286,7 +311,14 @@ fn fs(o: VsOut) -> @location(0) vec4<f32> {
         // three-line perturbation with no tangent basis to carry through the
         // vertex format - and it is the single largest difference between a
         // field that reads as ground and one that reads as painted card.
-        let tn = textureSample(ground_tex, ground_smp, uv, layer + GROUND_LAYERS).xyz * 2.0 - 1.0;
+        let tn = textureSampleGrad(
+            ground_tex,
+            ground_smp,
+            ground_uv,
+            layer + GROUND_LAYERS,
+            ground_uv_dx,
+            ground_uv_dy,
+        ).xyz * 2.0 - 1.0;
         n = normalize(vec3<f32>(
             n.x + tn.x * GROUND_RELIEF,
             n.y + tn.y * GROUND_RELIEF,
@@ -296,7 +328,89 @@ fn fs(o: VsOut) -> @location(0) vec4<f32> {
         // the sample averages to exactly one: the texture multiplies the tile's
         // measured colour without changing how bright it is on average. The mix
         // is how much grain to let through.
-        albedo_tex = mix(vec3<f32>(1.0), albedo_tex * 2.0, 0.75);
+        albedo_tex = mix(vec3<f32>(1.0), albedo_tex * 2.0, 0.24);
+        if (layer == 0) {
+            // Broad world-space variation, continuous over tile boundaries.
+            // It keeps the field alive without photographic speckle or square
+            // patches competing with units.
+            let broad = sin(o.world.x * 0.23 + 0.8) * sin(o.world.y * 0.19 - 1.4);
+            albedo_tex = albedo_tex * (0.96 + broad * 0.035);
+        }
+    } else {
+        // Pick a physical texture from the material numbers carried by each
+        // instance: grass for foliage, timber for wood, rock for masonry and
+        // metal, packed earth for skin/chitin. `textureSampleGrad` keeps this
+        // dynamic array selection valid on strict Chromium WebGPU backends.
+        var layer = 1;
+        var strength = 0.25;
+        if (o.material.y > 0.10) {
+            layer = 3;
+            strength = 0.16;
+        } else if (o.material.x > 0.945) {
+            layer = 1;
+            strength = 0.24;
+        } else if (o.material.x > 0.885) {
+            layer = 3;
+            strength = 0.31;
+        } else if (o.material.x > 0.815) {
+            layer = 0;
+            strength = 0.27;
+        } else if (o.material.x > 0.745) {
+            layer = 2;
+            strength = 0.34;
+        }
+
+        // Mixed-material props can combine masonry and timber in one baked
+        // draw. Their material colour survives per vertex, so brown beams can
+        // receive wood grain while stone courses keep rock detail without
+        // another binding or draw call.
+        let timber = o.color.r > o.color.g * 1.24
+            && o.color.g > o.color.b * 1.18;
+        if (o.material.x > 0.885 && o.material.x < 0.945 && timber) {
+            layer = 2;
+            strength = 0.36;
+        }
+
+        // Sharpened triplanar weights avoid muddy diagonal faces. World-space
+        // addressing also means adjacent wall pieces share their stone grain.
+        var weights = pow(abs(n), vec3<f32>(5.0));
+        weights = weights / max(weights.x + weights.y + weights.z, 1e-4);
+        let detail_scale = select(1.72, 2.35, o.material.y > 0.10);
+        let uv_x = o.world.yz * detail_scale;
+        let uv_y = o.world.xz * detail_scale;
+        let uv_z = o.world.xy * detail_scale;
+        let sx = textureSampleGrad(
+            ground_tex,
+            ground_smp,
+            uv_x,
+            layer,
+            world_dx.yz * detail_scale,
+            world_dy.yz * detail_scale,
+        ).rgb;
+        let sy = textureSampleGrad(
+            ground_tex,
+            ground_smp,
+            uv_y,
+            layer,
+            world_dx.xz * detail_scale,
+            world_dy.xz * detail_scale,
+        ).rgb;
+        let sz = textureSampleGrad(
+            ground_tex,
+            ground_smp,
+            uv_z,
+            layer,
+            world_dx.xy * detail_scale,
+            world_dy.xy * detail_scale,
+        ).rgb;
+        let surface = sx * weights.x + sy * weights.y + sz * weights.z;
+        albedo_tex = mix(vec3<f32>(1.0), surface * 2.0, strength);
+
+        // A second, broad variation breaks up large tower walls and creature
+        // bodies without erasing their authored vertex colours.
+        let macro_tone = sin(o.world.x * 3.17 + o.world.z * 2.31)
+            * sin(o.world.y * 2.73 - o.world.z * 1.91);
+        albedo_tex = albedo_tex * (0.965 + macro_tone * 0.035);
     }
 
     let l = normalize(U.light_dir.xyz);
@@ -321,7 +435,16 @@ fn fs(o: VsOut) -> @location(0) vec4<f32> {
     let rough = min(sqrt(mat_rough * mat_rough + smear), 1.0);
     let metal = clamp(o.material.y, 0.0, 1.0);
 
-    let albedo = o.color.rgb * o.tint * albedo_tex;
+    var albedo = o.color.rgb * o.tint * albedo_tex;
+    if (o.tex < 0.5) {
+        // Tiny models lose authored material separation faster than terrain
+        // does. Lift their midtones and colour contrast before lighting so an
+        // orc stays green and leather stays brown instead of both becoming
+        // grey silhouettes at tactical zoom.
+        albedo = pow(max(albedo, vec3<f32>(0.0)), vec3<f32>(0.86));
+        let object_lum = dot(albedo, vec3<f32>(0.2126, 0.7152, 0.0722));
+        albedo = mix(vec3<f32>(object_lum), albedo, 1.14);
+    }
 
     // Dielectrics reflect ~4%; metals reflect their own colour.
     let f0 = mix(vec3<f32>(0.04), albedo, metal);
@@ -335,7 +458,7 @@ fn fs(o: VsOut) -> @location(0) vec4<f32> {
     // near-white key and lets the terrain's own colour carry the scene; the key
     // light is the only term here that carries a surface's albedo, so it has to
     // beat the ambient rather than lose to it.
-    let sun = vec3<f32>(1.00, 0.96, 0.88) * 2.25;
+    let sun = vec3<f32>(1.00, 0.96, 0.88) * 1.78;
     let d = distribution_ggx(ndh, rough);
     let g = geometry_smith(ndv, ndl, rough);
     let f = fresnel_schlick(vdh, f0);
@@ -348,8 +471,8 @@ fn fs(o: VsOut) -> @location(0) vec4<f32> {
     // Daylight: a blue sky overhead and green bounce off the field, which is
     // what a grass level actually looks like and what makes a tower's shaded
     // side read as *in shadow on grass* rather than as grey.
-    let sky = vec3<f32>(0.42, 0.54, 0.74) * 0.40;
-    let ground = vec3<f32>(0.26, 0.30, 0.16) * 0.40;
+    let sky = vec3<f32>(0.42, 0.54, 0.74) * 0.32;
+    let ground = vec3<f32>(0.24, 0.28, 0.18) * 0.32;
     let irradiance = mix(ground, sky, n.z * 0.5 + 0.5);
     let fa = fresnel_roughness(ndv, f0, rough);
     let kda = (vec3<f32>(1.0) - fa) * (1.0 - metal);
@@ -381,7 +504,7 @@ fn fs(o: VsOut) -> @location(0) vec4<f32> {
 
     var col = direct + ambient;
     // Emissive parts ignore lighting entirely - cores, runes, flames.
-    col = mix(col, o.color.rgb * 2.2, clamp(o.emissive, 0.0, 1.0));
+    col = mix(col, o.color.rgb * 1.72, clamp(o.emissive, 0.0, 1.0));
 
     // Distance fog, so the far edge of the board recedes.
     let dist = length(U.cam_pos.xyz - o.world);

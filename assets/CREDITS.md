@@ -61,3 +61,20 @@ baked by `tools/bake_models.py` from the sources below.
 | CommandAura | Crown | Quaternius | https://static.poly.pizza/1381b02a-8310-437b-a2a7-82cab0a94a4c.glb |
 | Infernal | Goleling Evolved | Quaternius | https://static.poly.pizza/d6308fbf-fa2e-4cfe-b235-def7ede1ab90.glb |
 | Harpy | Birb | Quaternius | https://static.poly.pizza/05dac745-bdd0-4169-9e64-f497ca21f69a.glb |
+
+## Tower and environment models
+
+Forty-four staged weapon towers are selected from
+Quaternius' [Steampunk Turret Pack](https://quaternius.com/packs/turretpack.html), released under CC0 1.0. Trees, rocks, brush and ground details are selected
+from Kenney's 330-model [Nature Kit](https://kenney.nl/assets/nature-kit), also released under CC0 1.0. Both source sets are downloaded and cached by
+`tools/bake_models.py`; only the baked runtime mesh is shipped.
+
+## Interface artwork
+
+`title_backdrop.png` was created for this project with OpenAI's built-in image
+generation on 2026-09-04. It contains no third-party logo or game UI.
+
+`tower_icons.png` is an in-engine 24x4 contact sheet of the exact staged Quaternius
+weapon towers used on the battlefield. It contains no separate concept art;
+the source and runtime assets are produced by the ignored roster render test
+and `tools/bake_icons.py`.

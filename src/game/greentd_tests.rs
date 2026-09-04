@@ -376,7 +376,11 @@ fn the_damage_table_is_generated_from_the_map() {
         ] {
             assert_eq!(DAMAGE[a.idx()][d.idx()], 1.0, "{a:?} vs {d:?}");
         }
-        assert_eq!(DAMAGE[a.idx()][ArmourType::Divine.idx()], 0.05, "{a:?} vs Immune");
+        assert_eq!(
+            DAMAGE[a.idx()][ArmourType::Divine.idx()],
+            0.05,
+            "{a:?} vs Immune"
+        );
     }
     // Chaos is the engine's, not the file's, and Hero is the file's hundred.
     for d in [ArmourType::Unarmoured, ArmourType::Hero, ArmourType::Divine] {

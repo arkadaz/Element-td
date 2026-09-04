@@ -101,9 +101,18 @@ fn run_ui(
                 .show(ui, |ui| ui::command_bar(g, ui, ust));
             board = egui::CentralPanel::default()
                 .frame(egui::Frame::NONE)
-                .show(ui, |ui| ui.available_rect_before_wrap())
+                .show(ui, |ui| {
+                    let rect = ui.available_rect_before_wrap();
+                    let rig = Rig::new(
+                        rect.width() / rect.height().max(1.0),
+                        crate::CAM_PITCH_DEG.to_radians(),
+                        crate::CAM_YAW_DEG.to_radians(),
+                    );
+                    let camera = rig.camera(crate::lane_middle(), crate::CAM_SPAN);
+                    ui::board_text(g, ui, &camera, rect);
+                    rect
+                })
                 .inner;
-            ui::scoreboard(g, &ctx);
             ui::modals(g, &ctx, ust);
         }));
         if let Some(o) = &mut out {

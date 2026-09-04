@@ -1,14 +1,20 @@
-# Green Circle TD - the design, and where it came from
+# Green Circle TD - the current Legacy design, and where it came from
 
-This game is a port. It does not have a design of its own to defend: the design
-is `GREEN TD 9.3c PEIN.w3x`, a Warcraft III custom map, and almost every number
-in the build is that map's own.
+> **Implementation status:** this document describes the playable extracted
+> Legacy ruleset. The curated commercial Campaign is specified separately in
+> [`MASTERCLASS_PLAN.md`](MASTERCLASS_PLAN.md); its 28 encounters, six jobs,
+> Ring Pressure, bounded economy, and 32-pad layouts are not yet represented by
+> the tables below.
 
-So this document is not a specification. **The map is the specification.** This
-is the record of what was taken out of it, what had to be worked out before the
-numbers meant anything, the one thing that had to be invented, and the handful
-of oddities that were copied rather than corrected. Where this file and the map
-disagree, this file is wrong.
+This game begins with `GREEN TD 9.3c PEIN.w3x`, a Warcraft III custom map. Its
+131-tower roster, upgrade graph, combat numbers and 36 waves are the mechanical
+foundation. The standalone edition then makes explicit product decisions the
+eight-player source never needed: a compact solo arena, three difficulty
+rulesets, readable threat forecasting, tempo rewards, hard-mode command drafts,
+run ratings and endless play.
+
+The map is the specification for extracted content. This document records both
+that faithful base and the clearly labelled standalone systems layered over it.
 
 How the numbers are got out is in [`../tools/README.md`](../tools/README.md).
 
@@ -24,8 +30,9 @@ exit. The map's own leaderboard states the loss condition in five words:
 
 > When enemies > 700, game over.
 
-The port is one arena, single player. Everything else - the roster, the waves,
-the terrain, the lane, the purse and that loss condition - is the map's.
+The port is one arena, single player. Its compact runtime board preserves the
+source identity while the roster, waves, purse, and Legacy loss condition stay
+faithful to the map.
 
 ---
 
@@ -127,6 +134,12 @@ three, the King Tower five. `TowerLevel::upgrades` is therefore a slice, and a
 tower with more than one way up takes over the command card rather than being
 served by an "upgrade" button that could only pick one.
 
+The desktop console follows the same proven RTS hierarchy without copying the
+reference game's artwork: a square minimap, a selected-defense dossier with
+threat forecast, and a fixed 4x3 command grid. The icon in that grid and the
+portrait in the dossier are rendered from the same staged 3D assembly as the
+tower on the field, so the shop never promises a different silhouette.
+
 ### 3.4 There is no family field
 
 The map has no notion of a tower family. It has a naming convention it keeps
@@ -145,24 +158,23 @@ grid, one byte a tile, is the only thing that says where a creep can walk and
 where a tower can stand. `greentd_map::TEXTURE` is that grid, and
 `board::is_corridor` is the whole of the level geometry.
 
-### 3.6 The lane is a shuttle
+### 3.6 The lane splits in both directions
 
-The map orders the Red player's creeps through four regions: the spawn box in
-the corner, the foot of the entry corridor, the junction where it meets the long
-run, and the far end of the north-south corridor. Reaching the last one sends
-them back to the one before it, forever.
+The map orders Red through the spawn box and into the north-west junction. Its
+source trigger then rolls a fifty-fifty branch: one creep is sent clockwise and
+the next may go counter-clockwise around the same outer circuit. The compact
+solo board preserves that branch and offsets the streams onto opposite sides
+of its lane, so they pass instead of occupying the same line.
 
-So the lane is a corridor walked down and back, and it is written here as a
-closed loop - down one half of the three-tile passage and up the other, which is
-how two streams pass each other in Warcraft III. A creep's entire position is
-then one scalar, how far along the loop it has walked, and a creep on its fourth
-lap is handled by exactly the same code as one on its first.
+A creep's progress is still one scalar plus a direction sign. Completed laps
+wrap onto the same closed circuit, which keeps cumulative pressure intact while
+making tower coverage on both approaches strategically important.
 
 ---
 
-## 4. What had to be invented
+## 4. Standalone economy and progression
 
-**The kill bounty, and nothing else.**
+**The kill bounty is the first standalone economy rule.**
 
 Warcraft III keeps its bounty formula in the game's own gameplay constants
 rather than in the map file, and this map leaves them at their defaults. Those
@@ -174,7 +186,7 @@ by its armour value, divided down.
 
 ```rust
 pub fn bounty_of(w: &WaveDef) -> u32 {
-    (w.payable_hp() / 900.0).round().max(1.0) as u32
+    (w.payable_hp() / 350.0).round().max(1.0) as u32
 }
 ```
 
@@ -192,19 +204,33 @@ thirty such ladders and forty boards of them - loose bounds, because the point
 is to catch a bounty that has come adrift from the roster, not to pin a balance
 number nobody tuned.
 
-Two payouts are expressed in terms of it, and are invented to the same extent:
+Three payouts are expressed in terms of it:
 
 - **A stipend of twelve kills' worth when a wave is called.** On a circuit no
   wave ever ends, so there is no "wave cleared" moment to pay at. Without it a
   board that falls behind can never buy its way back out, and one bad wave
   quietly decides the whole run.
-- **Four gold a second for calling a wave early.** The only speed control in the
-  game that is also a decision: whatever you have not killed does not go
-  anywhere, so calling early stacks the new stream on top of the old one.
+- **Four gold a second for calling a wave early.** Rush unlocks after the
+  current stream has fully entered, then begins the new stream on top of all
+  survivors. It remains a pressure/reward decision without letting Enter skip
+  the authored deployment time.
+- **Four kills' bounty for a Clean Sweep.** Letting the clock expire with no
+  previous-wave survivor alive rewards control. Calling early earns Rush gold;
+  waiting earns Clean Sweep gold; the player cannot claim both for one boundary.
+
+Veteran and Nightmare also stop before waves 10, 20 and 30 for one permanent
+command upgrade: +12% global damage, +10% global attack speed, or +0.6 global
+range per rank. Three choices across a campaign are enough to define a build
+without turning the game into an inventory system.
 
 Past wave 36 the run may continue: health climbs 35% a wave and armour by 20.
 The roster does not climb with it, because the top of every ladder has already
 been bought by then, so endless always ends. How far is the score.
+
+Campaign speed cycles between 1x and 2x. The 3x setting unlocks only in endless,
+after the player has already completed the authored run. Even on 2x, the full
+deployment windows keep every difficulty above ten minutes before build pauses,
+targeting decisions and any time spent recovering from pressure.
 
 ---
 
@@ -240,22 +266,24 @@ assertion in `src/game/greentd_tests.rs`.
 
 ## 6. The board
 
-The whole 96 by 96 field is drawn from the map's texture grid, so the other
-seven arenas and the corridors between them are there on screen. One quarter of
-it is played.
+The runtime board is a compact **39 by 39** solo battlefield centred on the
+source terrain's tactical loop. It keeps the circular Green TD pressure model
+without asking one player to patrol an eight-player-sized landscape.
 
-- The lane is **85 tiles** round, so a lap takes between twenty-one and
-  thirty-six seconds at the map's own walking speeds, and a good deal longer
-  under a Slow Tower.
-- The arena holds **816 build plots**, and they are every tile of it that is not
-  corridor. That is the map's own rule and it is not a small one: Warcraft III
-  lets you build on any ground you own, which is what makes this a question of
-  *where* as well as *what*, and what makes the field feel like a field rather
-  than a row of sockets.
-- A tower stands on its own tile and the corridor is the tile beside it. Nothing
-  else is excluded.
+- The lane is **109.5 tiles** round: long enough for placement and aura coverage
+  to matter, short enough that the whole threat can be read without constant
+  camera travel.
+- The arena holds **56 fortified build pads** sampled from both shoulders of
+  the route. Every pad is 1.4–2.8 tiles from the road and keeps at least 2.2
+  tiles of centre spacing, so towers stay connected to combat without their
+  silhouettes merging.
+- The pad set still supports inside, outside, corner and aura-cluster plans; it
+  removes overlap and fake decorative placements rather than the placement game.
 - The camera frames the lane plus a tower's reach around it, which is roughly
   what a Warcraft III camera sees from edge to edge.
+- WASD/arrows and the literal top or bottom of the window pan the camera;
+  middle-drag pans directly and the wheel zooms. Vertical edge scrolling reads
+  the viewport rather than the board widget, so the HUD cannot swallow it.
 
 There is no mazing. The corridors are painted into the terrain and the creeps
 walk them whatever is built.
@@ -288,6 +316,21 @@ better one than a life counter for three reasons:
 - it cannot be gamed by shoving creeps backwards, because on a loop backwards is
   the same direction.
 
+On Veteran and Nightmare, completed laps also accelerate a survivor by 6% or
+10% per lap. The warning ring turns red after three laps, but a survivor never
+mints extra bounty by living longer. Veteran commanders must fall before lap
+four; Nightmare commanders before lap three. Default First targeting includes
+total lap distance, so it never abandons the most dangerous survivor when
+distance wraps back to zero.
+
+A wave tagged Boss retains the source map's full authored stream but promotes
+only its first enemy to commander. That commander is 28% larger, has eight
+times the wave health and bounty, resists 75% of control, and repairs escorts
+within 4.5 tiles for 0.8% maximum health per second. Its gold range ring exposes
+that rule on the battlefield. Strongest targeting isolates it and Corruption
+suppresses escort repair for two seconds, giving the encounter a readable
+answer beyond raw damage.
+
 Winning means the last wave has finished arriving **and** the ring is empty.
 Outlasting the final stream is not the same as clearing it.
 
@@ -304,9 +347,9 @@ shop card that answer an Immune wave. And the Air Tower is the only one built
 and Destruction cannot reach it at any rung, which is most of the splash damage
 in the game.
 
-**Where to put it.** Eight hundred and sixteen plots, one lane, and auras that
-only reach what is near them. A Damage Tower gives every tower within fifteen
-tiles up to eighty percent more damage and a Speed Tower does the same for
+**Where to put it.** Seventy-two protected plots, two directions of traffic,
+and auras that only reach what is near them. A Damage Tower gives every tower
+within fifteen tiles up to eighty percent more damage and a Speed Tower does the same for
 attack rate, so tight clusters are worth more than the same gold spread thin -
 and neither of them fires a shot.
 
@@ -324,22 +367,31 @@ The two ways to lose are both failures of coverage rather than of throughput.
 loses every single flyer of wave 7 regardless; a board with no Chaos on it does
 a twentieth of its damage every fifth wave, and what it fails to kill stays on
 the lane for the next one. `a_sensible_build_clears_the_campaign` plays the
-whole thirty-six with a bot that follows exactly two rules - cover what is
-coming next, otherwise buy the cheapest thing available - and wins.
+whole thirty-six with a bot that covers the next counter-check, spreads useful
+lane coverage and then deepens efficient towers. The complementary
+`shallow_mixed_spam_cannot_clear_veteran` gives a randomly placed level-one
+carpet every shop family and a damage doctrine; it still loses, pinning the
+requirement to upgrade and specialise.
 
 ---
 
 ## 9. Rendering
 
-The map is Lordaeron Summer in daylight: a bright green field with tan corridors
-cut through it. The palette is the tileset's own texture names - `Agrs` and
+The map is a cooler, high-contrast take on Lordaeron Summer: a dense green field
+cut by worn grey rock corridors. The palette begins with the tileset's texture names - `Agrs` and
 `Agrd` for the turf, `Adrt` for the corridors, `Arck` for the stone - as albedo
 values, so the lighting does its own work.
 
-Nothing here loads a `.mdl`. The map dresses its towers and creeps in stock
-Warcraft III models, and each one is mapped to the archetype it reads as and
-rebuilt out of primitives in `view/towers.rs` and `view/monsters.rs`. Fifty-six
-archetypes cover all 131 towers and all 36 waves.
+Nothing here redistributes Warcraft III `.mdl` files. Runtime art is baked from
+free assets: 44 staged Quaternius combat turrets, 56 Poly Pizza enemy/world
+models, and Kenney Nature Kit scenery. Procedural constructions remain as
+corruption fallbacks, while every shipped roster entry is tested to select its
+baked model and fit the tactical silhouette budget.
+
+Four ambientCG surface sets are baked into one texture array. Terrain uses
+world-planar albedo and normal detail; every prop, tower and creature receives
+material-selected triplanar stone, timber, foliage, hide or metal grain, so the
+browser mesh remains compact without falling back to flat vertex colour.
 
 The frame is two render passes at Performance, three at Balanced and six at
 Ultra. Pass count is the number that decides whether this runs in a browser: the
@@ -352,15 +404,16 @@ opening seconds and stepping down until the frame budget is met.
 
 ## 10. What is deliberately not here
 
-- **The other seven players.** The field is drawn whole because the map's
-  terrain is one grid, but only one arena is played and only one lane is walked.
+- **The other seven arenas.** Multiplayer compares separate compact boards;
+  rendering unused battlefield acreage would only weaken solo readability.
 - **Mazing.** The corridors are painted into the terrain. There is nothing to
   block.
-- **A difficulty menu.** The map has one curve. Adding two more would mean two
-  more that nobody has played through.
-- **Invented balance.** No tower is retuned, no wave is softened, no price is
-  made monotonic. If something is unfair, it is unfair in Green Circle TD, and
-  the fix is a better board rather than a better number.
+- **Hidden difficulty.** Classic exposes the source curve; Veteran and Nightmare
+  state their capacity, Vanguard cadence, lap rage and reward pressure before
+  the player starts.
+- **Tower-number retuning.** Tower costs, rungs, attacks and abilities remain
+  extracted. Standalone challenge is layered around pressure, cadence, elites
+  and player-visible command upgrades instead of secretly changing the roster.
 - **Server-side simulation.** Every client runs its own board from a shared
   seed. The server relays scoreboards and nothing else, which is what lets it
   hold a thousand players in a gigabyte.

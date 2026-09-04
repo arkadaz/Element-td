@@ -4,9 +4,9 @@
 struct PostU {
     dir: vec2<f32>,
     texel: vec2<f32>,
-    // x: bright threshold, y: bloom strength, z: encode sRGB, w: unused
+    // x: bright threshold, y: bloom strength, z: encode sRGB, w: Ultra detail
     params: vec4<f32>,
-    // xy: where the key light's bearing lands in composite UV, zw: unused
+    // xy: where the key light's bearing lands, z: wrapped time, w: unused
     sun: vec4<f32>,
 };
 
@@ -96,6 +96,14 @@ fn srgb_encode(c: vec3<f32>) -> vec3<f32> {
     return select(hi, lo, c <= vec3<f32>(0.0031308));
 }
 
+fn hash12(p: vec2<f32>) -> f32 {
+    // Screen-space film grain. Its amplitude is deliberately sub-visible in a
+    // still frame; in motion it breaks perfectly smooth gradients and stops
+    // the tone-mapped fog from banding on an 8-bit browser swapchain.
+    let h = dot(p, vec2<f32>(127.1, 311.7));
+    return fract(sin(h + P.sun.z * 41.37) * 43758.5453);
+}
+
 /// Two sheared sine layers. One sine reads as a test card; shearing it against
 /// x and beating it with a second, faster and weaker one breaks the repeat up
 /// enough that the eye takes it for banded haze instead of counting the bands.
@@ -117,12 +125,15 @@ fn haze(uv: vec2<f32>) -> f32 {
 /// be a cloud buried in a hillside. What the backdrop can honestly carry is
 /// depth and the light's bearing, so that is what it carries.
 fn sky(uv: vec2<f32>) -> vec3<f32> {
-    let top = vec3<f32>(0.115, 0.235, 0.470);
-    let bottom = vec3<f32>(0.480, 0.610, 0.760);
+    // The tactical camera looks down beyond a finite forest plateau. A pale
+    // blue clear made that empty space read as a missing level; deep woodland
+    // haze lets the playable field remain the brightest readable surface.
+    let top = vec3<f32>(0.025, 0.050, 0.070);
+    let bottom = vec3<f32>(0.075, 0.125, 0.115);
     var c = mix(top, bottom, smoothstep(0.0, 1.0, uv.y));
     // Warm haze sitting on the horizon line, where the field meets the sky.
-    let halo = exp(-pow((uv.y - 0.46) * 3.0, 2.0)) * 0.30;
-    c = c + vec3<f32>(0.60, 0.52, 0.36) * halo;
+    let halo = exp(-pow((uv.y - 0.46) * 3.0, 2.0)) * 0.20;
+    c = c + vec3<f32>(0.18, 0.16, 0.10) * halo;
     // Strata. The window is where the backdrop is actually seen: the board is
     // finite and fills the middle of the frame, so all that ever shows of this
     // is the top fifth and the two upper corners. Bands outside that are bands
@@ -132,30 +143,52 @@ fn sky(uv: vec2<f32>) -> vec3<f32> {
     // The light's bearing, so the backdrop brightens on the same side the
     // towers are lit from rather than being lit from nowhere.
     let d = (uv - P.sun.xy) / vec2<f32>(0.45, 0.40);
-    c = c + vec3<f32>(0.28, 0.22, 0.11) * exp(-dot(d, d)) * 0.26;
+    c = c + vec3<f32>(0.12, 0.10, 0.05) * exp(-dot(d, d)) * 0.20;
     return c;
 }
 
 @fragment
 fn fs_composite(o: VsOut) -> @location(0) vec4<f32> {
     let scene = textureSample(tex0, samp, o.uv);
+    var scene_rgb = scene.rgb;
+    if (P.params.w > 0.5 && scene.a > 0.0) {
+        // A restrained unsharp mask recovers the small model facets softened by
+        // MSAA and the browser's final canvas scaling. This is the kind of
+        // micro-contrast that makes metal edges and creature silhouettes feel
+        // materially richer without an extra geometry or post-processing pass.
+        let x = vec2<f32>(P.texel.x, 0.0);
+        let y = vec2<f32>(0.0, P.texel.y);
+        let neighbours = textureSampleLevel(tex0, samp, o.uv + x, 0.0).rgb
+            + textureSampleLevel(tex0, samp, o.uv - x, 0.0).rgb
+            + textureSampleLevel(tex0, samp, o.uv + y, 0.0).rgb
+            + textureSampleLevel(tex0, samp, o.uv - y, 0.0).rgb;
+        let detail = scene.rgb - neighbours * 0.25;
+        scene_rgb = max(scene.rgb + detail * 0.16, vec3<f32>(0.0));
+    }
     // Anything the scene pass did not cover shows the sky.
-    var c = mix(sky(o.uv), scene.rgb, clamp(scene.a, 0.0, 1.0));
+    var c = mix(sky(o.uv), scene_rgb, clamp(scene.a, 0.0, 1.0));
     let b = textureSample(tex1, samp, o.uv).rgb;
     c = c + b * P.params.y;
 
     // Exposure, then a filmic curve.
-    c = aces(c * 0.92);
+    c = aces(c * 0.94);
     // Grade: cool the shadows a touch, warm the highlights, then lift the
-    // saturation. A filmic curve desaturates as it rolls off, and a Warcraft
-    // III tileset is *saturated* - a green field that tone-maps to grey-green
-    // is the single biggest reason this did not look like the game it copies.
+    // saturation. The battlefield already carries strong faction colours; the
+    // grade only restores what the filmic shoulder removes instead of pushing
+    // grass and spell effects into neon.
     let lum = dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
     c = mix(c * vec3<f32>(0.97, 0.99, 1.04), c * vec3<f32>(1.04, 1.00, 0.96), lum);
-    c = mix(vec3<f32>(lum), c, 1.28);
+    c = mix(vec3<f32>(lum), c, 1.10);
+    c = (c - vec3<f32>(0.5)) * 1.035 + vec3<f32>(0.5);
 
-    let d = distance(o.uv, vec2<f32>(0.5, 0.5));
-    c = c * (1.0 - smoothstep(0.66, 1.20, d) * 0.34);
+    let vignette_uv = (o.uv - vec2<f32>(0.5)) * vec2<f32>(0.92, 1.08);
+    let d = length(vignette_uv);
+    c = c * (1.0 - smoothstep(0.48, 0.82, d) * 0.17);
+
+    if (P.params.w > 0.5) {
+        let grain = hash12(o.uv * vec2<f32>(1920.0, 1080.0)) - 0.5;
+        c = c + vec3<f32>(grain * 0.0065);
+    }
 
     if (P.params.z > 0.5) {
         c = srgb_encode(c);

@@ -12,6 +12,19 @@ impl Rng {
         })
     }
 
+    /// Exact internal state for deterministic save/resume checkpoints.
+    pub fn state(&self) -> u64 {
+        self.0
+    }
+
+    pub fn from_state(state: u64) -> Self {
+        Self(if state == 0 {
+            0x9E37_79B9_7F4A_7C15
+        } else {
+            state
+        })
+    }
+
     #[inline]
     pub fn next_u64(&mut self) -> u64 {
         let mut x = self.0;

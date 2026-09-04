@@ -4,20 +4,23 @@ A playable port of the Warcraft III custom map **GREEN TD 9.3c PEIN.w3x**,
 written in **pure Rust** and rendered with wgpu. It runs in the browser and on
 the desktop from the same code.
 
-It is a port rather than a homage. The 131 towers, their upgrade graph, their
-gold and damage and cooldowns and abilities, the 36 waves with their health and
-armour and counts, the terrain, the lane, the thousand starting gold and the
-seven-hundred-creep loss condition are all read straight out of the map file by
-[`tools/`](tools/README.md) and compiled in. Nothing was retuned to taste.
+The Warcraft III map remains the content foundation: 131 towers and their full
+upgrade graph, 36 waves, abilities, armour rules and starting economy are
+extracted by [`tools/`](tools/README.md). The standalone edition layers a
+compact solo arena, visible difficulty rules, tempo rewards, command upgrades,
+endless play and run ratings over that foundation.
 
 - **Rendering**: [`wgpu`](https://wgpu.rs) - WebGPU in the browser, automatic
   WebGL2 fallback, native Vulkan or DX12 on the desktop.
-- **Look**: Lordaeron Summer in daylight, the tileset's own colours. Real
-  perspective camera, shadow-mapped key light, MSAA and bloom at the top preset.
-- **UI**: [`egui`](https://github.com/emilk/egui), also pure Rust. No HTML or JS
-  for game chrome.
-- **No art assets.** Nothing here loads a `.mdl`. Every tower, creep, tree and
-  rock is built from one instanced cube.
+- **Look**: a compact forest battlefield with staged CC0 towers, command-card
+  portraits rendered from those exact 3D models, triplanar albedo/normal ground
+  detail, shadowed daylight, MSAA and restrained bloom at the top preset.
+- **UI**: [`egui`](https://github.com/emilk/egui), also pure Rust. A carved RTS
+  console separates the minimap, selected-defense dossier and 4x3 command card.
+- **Sound**: original Web Audio cues for commands, waves, bosses and throttled
+  weapon impacts; no borrowed samples and no combat-noise pile-up.
+- **Models**: 44 staged Quaternius combat turrets, 56 Poly Pizza enemy/world
+  models, and Kenney Nature Kit scenery, baked into one runtime mesh pack.
 
 What was taken, what had to be worked out, and the one number that had to be
 invented are written up in [`docs/DESIGN.md`](docs/DESIGN.md).
@@ -49,25 +52,28 @@ Same code, same shaders, real backtraces. In debug builds `G` grants gold and
 
 | Input | Action |
 | --- | --- |
-| `1`-`9` | pick from the command card - the shop, or the branches of a forking upgrade |
+| `1`-`9`, `0`, `-` | pick any of the eleven command-card slots |
 | Click a plot | build there |
 | Click a tower | select it; its stats and commands appear in the bottom bar |
 | `Shift`+click | build and keep the same tower selected for the next plot |
 | Right click / `Esc` | cancel |
 | `U` / `S` | upgrade / sell the selected tower |
-| `Enter` | call the next wave early (pays 4 gold per second skipped) |
+| `Enter` | rush after the current stream deploys (pays for time skipped) |
 | `Space` | pause |
-| `F` | speed 1x / 2x / 3x |
+| `F` | speed 1x / 2x in campaign; 3x unlocks in endless |
 | `B` | cycle the quality preset |
 | `H` | help |
+| Mouse at top/bottom edge or WASD/arrows | pan the camera |
+| Middle-drag / mouse wheel | pan / zoom the battlefield |
 
 ## How it plays
 
-- **The lane is a loop, and there are no lives.** The map walks its creeps down
-  a corridor and shuttles them back, forever, so nothing ever gets past you and
-  nothing ever leaks. What you defend is a *rate*. Anything your towers cannot
-  kill comes round again, and the lane fills up; you lose when more than **700**
-  are circling at once.
+- **The lane splits around a loop, and there are no lives.** Each creep takes
+  the clockwise or counter-clockwise branch at the source and keeps circling,
+  so nothing ever leaks. What you defend is a *rate*. Anything your towers cannot
+  kill comes round again, and the lane fills up. Capacity is **700** on Classic;
+  Veteran contracts from **450 to 280** after wave 9, and Nightmare from
+  **400 to 200** after wave 7.
 - **Waves are streams.** A wave's whole count - sixty to a hundred and sixty
   creeps, mostly - arrives evenly across forty-five seconds, on the map's own
   clock, whether the last wave is dead or not. Throughput is what kills you, not
@@ -89,13 +95,24 @@ Same code, same shaders, real backtraces. In debug builds `G` grants gold and
 - **Five waves fly.** Nine of the ten Air Tower rungs can hit nothing but the
   air, and Siege, Chaos and Destruction can never touch it - which is most of
   the splash damage in the game.
-- **Build anywhere.** Every tile of your arena that is not corridor is a plot,
-  eight hundred and sixteen of them, exactly as Warcraft III would let you. The
-  two auras only reach what is near them, so where a tower stands is a real
-  question.
-- **Calling a wave early pays.** On a loop it is a gamble rather than a
-  fast-forward: whatever you have not killed does not go anywhere, so the new
-  stream stacks on top of the old one.
+- **Build beside the fight.** Fifty-six inner/outer shoulder pads follow the
+  circuit at 1.4–2.8 tiles from the road with at least 2.2 tiles between
+  centres. Towers never overlap, decorative dead ground is not presented as a
+  fake choice, and each placement commits valuable lane coverage.
+- **Tempo is a decision, not a skip button.** Rush unlocks after the current
+  stream has fully entered, then pays a bonus for stacking the next stream on
+  every survivor. Waiting for the timer while keeping the ring empty pays a
+  Clean Sweep bonus instead. Campaign speed is capped at 2x; 3x unlocks after
+  victory for endless play.
+- **Hard modes evolve during the run.** Vanguards resist control, surviving
+  enemies accelerate across their first four laps, and waves 10, 20 and 30
+  pause for a permanent damage, attack-speed or range command upgrade.
+- **Boss banners have one commander.** The commander has eight times the wave
+  health and repairs nearby escorts for 0.8% health per second. Strongest
+  targeting focuses it; Corruption shuts the repair down for two seconds.
+- **Runs have an ending worth comparing.** Victory requires an empty ring after
+  wave 36, then reports a difficulty-weighted score and command rating. Endless
+  mode remains available after the campaign.
 
 ## How it's built
 
@@ -109,18 +126,19 @@ src/
     greentd_types.rs  the types those two are written in, and the Warcraft III
                       rules they depend on: the attack table and the armour curve
     defs.rs        the layer the game reads the tables through, plus the economy
-    board.rs       the lane, and the 816 build plots around it
-    mod.rs         entities, the wave loop, player actions
+    board.rs       the compact circuit and build plots around it
+    mod.rs         entities, difficulty, tempo, doctrines and player actions
     combat.rs      targeting, firing, splash, bounces, auras, damage resolution
     fx.rs          particle spawn queue
   gfx/
     mod.rs         pipelines, shadow pass, MSAA, bloom chain, buffers
     draw.rs        the drawing vocabulary (cubes, bars, glows, rings)
-    mesh.rs        the one instanced mesh everything is drawn from
+    mesh.rs        primitives plus the baked CC0 model pack
     shaders/*.wgsl solid / shadow / billboard / post
   view/            game state to 3D scene: towers.rs, monsters.rs, models.rs
-  decor.rs         static set dressing: trees, rocks, torches
-  ui.rs            resource strip, scoreboard, minimap, command card
+  decor.rs         baked forest scenery, cliffs, portal and ground details
+  audio.rs         original browser SFX synthesis and combat mix throttling
+  ui.rs            onboarding, threat intel, minimap, command card and modals
   menu.rs, net.rs  title screen and the scoreboard-only lobby
   save.rs          resuming a run
   rng.rs           deterministic xorshift
@@ -133,9 +151,9 @@ different map version, see [`tools/README.md`](tools/README.md).
 
 ### Why it's fast
 
-- **One instanced draw for the whole board.** Terrain, trees, towers, creeps and
-  shots are all the same unit cube with a per-instance transform and colour. A
-  busy frame is a handful of draw calls, not thousands.
+- **Bucketed instancing across the board.** Terrain, scenery, towers, creeps and
+  shots are grouped by their shared mesh and material. A busy frame is a bounded
+  set of mesh-bucket draws, not one draw call per object.
 - **Two render passes** at the Performance preset, three at Balanced, six at
   Ultra. Pass count, not instance count, is what decides whether this runs in a
   browser - on a packed board the simulation and the draw-list build together
@@ -148,7 +166,7 @@ different map version, see [`tools/README.md`](tools/README.md).
 - **A creep's position is one number** - how far along the loop it has walked -
   so there is no pathfinding at all, however many are circling.
 - **Spatial hash for targeting**, so towers only test nearby creeps.
-- **Fixed 120 Hz timestep**, so 3x speed and a slow frame behave identically -
+- **Fixed 120 Hz timestep**, so fast-forward and a slow frame behave identically -
   and on the desktop the frame rate is held to a cap rather than rendering
   frames the display will never show.
 
@@ -158,8 +176,8 @@ different map version, see [`tools/README.md`](tools/README.md).
 cargo test --release
 ```
 
-Seventy-seven tests, in four groups, plus nine ignored diagnostics that print
-rather than assert.
+The suite currently contains 138 tests: 125 automated checks and 13 deliberate
+rendering/diagnostic captures.
 
 **The extraction is faithful** (`game/greentd_tests.rs`). The family sizes, the
 numbering, that the long ladders climb, that the six branches off the ten gold
@@ -173,15 +191,17 @@ targets at once on the Super Multi.
 damage; armour reduces by `1/(1+0.06A)`; Siege, Chaos and Destruction cannot
 touch the air at any rung, and the first Air Tower cannot touch the ground.
 
-**The risky parts hold.** Index bookkeeping when creeps die mid-iteration and
-towers are sold from under projectiles, splash into a dense pack, auras
-appearing and disappearing, saves that must never rebuild a board the game would
-refuse, HUD layout at every window size, and the guarantee that no wall of
+**The risky parts hold.** Same-frame kills stay index-stable until every splash
+and multishot resolves; projectiles and effects have browser-safe ceilings;
+towers can be sold from under shots; auras appear and disappear safely; saves
+never rebuild a board the game would refuse; the HUD survives every window
+size; wave 35 remains inside every live combat/visual queue; and no wall of
 rooting towers can pin a wave in place forever.
 
 **It is a game.** `a_sensible_build_clears_the_campaign` plays all thirty-six
-waves with a bot following two rules - cover what is coming next, otherwise buy
-the cheapest thing available - and has to win.
+Classic waves, while `a_sensible_build_can_master_veteran` proves the intended
+Veteran campaign remains beatable when the player reads counters and uses the
+three command drafts.
 `a_ground_only_board_drowns_in_the_air` builds sixty maxed Siege towers and has
 to lose every flyer of the first air wave. `kill_money_keeps_pace_with_the_roster`
 checks that the one invented number still buys the roster it has to buy.

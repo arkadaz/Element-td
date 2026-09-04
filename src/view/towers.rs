@@ -1,14 +1,16 @@
 //! Towers on their pads.
 //!
-//! A hundred and thirty-one towers is far too many to hand-sculpt, and the map
-//! does not ask anyone to: it dresses each one in a stock Warcraft III model,
-//! and reuses those freely. So the body comes from [`super::models`] - the same
-//! library the monsters draw through - and what lives here is everything that
-//! is about the *tower* rather than the model:
+//! The reference roster has a hundred and thirty-one statistical rungs. Drawing
+//! one mesh for every rung made upgrades look duplicated; drawing 131 unrelated
+//! meshes would destroy family recognition. Each command family now has four
+//! staged CC0 weapon turrets (foundation, fortified, empowered, apex), with moving
+//! branch-specific silhouettes layered here:
 //!
 //!   - the **plinth** it stands on, cut to its attack type,
 //!   - the **level ring**: one notch of light per step up its family's path, so
 //!     investment reads from across the board without any text, and
+//!   - the **family dressing**: orbiting glaives, bolt fans, antennae, furnaces,
+//!     crystals, horns and crowns that say what the tower does, and
 //!   - the range ring and glow when it is selected.
 //!
 //! Colour is the tower's attack type throughout, which is the one thing a
@@ -25,11 +27,23 @@ use crate::gfx::draw::{DrawList, Material, Shape, mix, rgba};
 /// Top of the stone plinth every tower stands on.
 const DECK: f32 = PLOT_TOP + 0.20;
 
+/// Quaternius' OBJ turrets point along source +Z. The bake converts that to
+/// local -Y, while the simulation defines yaw zero as aiming along world +X.
+/// Rotating the imported body a quarter turn makes its barrel agree with
+/// `Tower::angle`, projectile launch effects, and procedural family dressing.
+const DOWNLOADED_TURRET_YAW: f32 = std::f32::consts::FRAC_PI_2;
+
+#[inline]
+fn downloaded_turret_yaw(aim_yaw: f32) -> f32 {
+    aim_yaw + DOWNLOADED_TURRET_YAW
+}
+
 pub fn draw(d: &mut DrawList, tw: &Tower, selected: bool, now: f32) {
     let def = tw.def();
     let base = def.color();
     let grow = (((now - tw.built_at) * 4.0).min(1.0)).max(0.06);
     let skin = Skin::wearing(def.model, base, tw.flash * 0.5);
+    let stage = tower_visual_stage(def);
 
     plinth(d, tw, base);
     level_ring(d, tw, base);
@@ -48,7 +62,30 @@ pub fn draw(d: &mut DrawList, tw: &Tower, selected: bool, now: f32) {
         walk: false,
         lights: true,
     };
-    models::draw(d, def.model, &pose, &skin);
+    let model_scale = tw.visual_model_scale() * grow;
+    let tint = rgba(mix([1.0, 1.0, 1.0], family_accent(tw.family()), 0.07), 1.0);
+    if !models::draw_downloaded(
+        d,
+        family_asset(tw.family(), stage),
+        [tw.pos[0], tw.pos[1], DECK],
+        model_scale,
+        downloaded_turret_yaw(tw.angle),
+        tint,
+        Material::METAL,
+        0.0,
+    ) {
+        models::draw(d, def.model, &pose, &skin);
+    }
+    family_dressing(d, tw, stage, model_scale, now, grow);
+
+    // A restrained family-colour beacon keeps attack identity readable without
+    // washing the downloaded model in a single tint.
+    d.sphere_lit(
+        [tw.pos[0], tw.pos[1], DECK + model_scale * 0.88],
+        0.075 + tw.progress() * 0.035,
+        rgba(family_accent(tw.family()), 1.0),
+        0.18,
+    );
 
     // A tower in a frenzy is visibly working - the Troll Tower's own ability.
     if tw.ramp > 0.0 {
@@ -74,8 +111,14 @@ pub fn draw(d: &mut DrawList, tw: &Tower, selected: bool, now: f32) {
     }
 
     if selected {
-        d.ground_ring(tw.pos, tw.range(), 0.11, rgba(base, 0.85), 80);
-        d.glow([tw.pos[0], tw.pos[1], 0.55], 1.2, 2.2, rgba(base, 0.16));
+        d.ground_ring(
+            tw.pos,
+            tw.range(),
+            0.038,
+            rgba(family_accent(tw.family()), 0.34),
+            72,
+        );
+        d.glow([tw.pos[0], tw.pos[1], 0.55], 0.72, 2.4, rgba(base, 0.08));
         // What its aura actually covers, in the colour of what it does.
         if a.is_aura() {
             d.ground_ring(
@@ -218,7 +261,7 @@ fn level_ring(d: &mut DrawList, tw: &Tower, base: [f32; 3]) {
     let total = tw.ladder_len().max(1);
     let done = tw.level().min(total);
     let p = tw.pos;
-    let n = total.min(20);
+    let n = total.min(12);
     let lit = ((done as f32 / total as f32) * n as f32).round() as u32;
     for k in 0..n {
         let a = k as f32 / n as f32 * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2;
@@ -227,7 +270,7 @@ fn level_ring(d: &mut DrawList, tw: &Tower, base: [f32; 3]) {
         d.shape(
             Shape::Quad,
             [q[0], q[1], DECK + 0.02],
-            [0.062, 0.062, 1.0],
+            [0.046, 0.046, 1.0],
             a,
             0.0,
             if on {
@@ -236,7 +279,7 @@ fn level_ring(d: &mut DrawList, tw: &Tower, base: [f32; 3]) {
                 rgba(mix(theme::STONE_DARK, [0.0, 0.0, 0.0], 0.35), 1.0)
             },
             Material::METAL,
-            if on { 0.25 } else { 0.0 },
+            if on { 0.08 } else { 0.0 },
         );
     }
 }
@@ -247,6 +290,238 @@ fn boost3(c: [f32; 3], k: f32) -> [f32; 3] {
         (c[1] * k).min(1.0),
         (c[2] * k).min(1.0),
     ]
+}
+
+/// Four construction milestones per command-card identity. Statistical rungs
+/// inside a milestone retain continuity; crossing a milestone replaces the
+/// whole downloaded assembly, so an upgrade is visible without selecting it.
+fn family_asset(family: Family, stage: usize) -> &'static str {
+    use Family::*;
+    const SEED: [&str; 4] = ["TowerSeed0", "TowerSeed1", "TowerSeed2", "TowerSeed3"];
+    const SIEGE: [&str; 4] = ["TowerSiege0", "TowerSiege1", "TowerSiege2", "TowerSiege3"];
+    const BOUNCE: [&str; 4] = [
+        "TowerBounce0",
+        "TowerBounce1",
+        "TowerBounce2",
+        "TowerBounce3",
+    ];
+    const MULTI: [&str; 4] = ["TowerMulti0", "TowerMulti1", "TowerMulti2", "TowerMulti3"];
+    const CORRUPT: [&str; 4] = [
+        "TowerCorrupt0",
+        "TowerCorrupt1",
+        "TowerCorrupt2",
+        "TowerCorrupt3",
+    ];
+    const AIR: [&str; 4] = ["TowerAir0", "TowerAir1", "TowerAir2", "TowerAir3"];
+    const CHAOS: [&str; 4] = ["TowerChaos0", "TowerChaos1", "TowerChaos2", "TowerChaos3"];
+    const DESTROY: [&str; 4] = [
+        "TowerDestroy0",
+        "TowerDestroy1",
+        "TowerDestroy2",
+        "TowerDestroy3",
+    ];
+    const AURA: [&str; 4] = ["TowerAura0", "TowerAura1", "TowerAura2", "TowerAura3"];
+    const DEMON: [&str; 4] = ["TowerDemon0", "TowerDemon1", "TowerDemon2", "TowerDemon3"];
+    const KING: [&str; 4] = ["TowerKing0", "TowerKing1", "TowerKing2", "TowerKing3"];
+
+    let stages = match family {
+        Single => &SEED,
+        Siege => &SIEGE,
+        Bouncing | SuperBounce => &BOUNCE,
+        Multi | Critical | SuperMulti => &MULTI,
+        Corruption | Poison => &CORRUPT,
+        Air | Frost | Slow => &AIR,
+        Chaos | SuperChaos => &CHAOS,
+        Destruction | SuperDestruct | Fire => &DESTROY,
+        Aura | Damage | Speed => &AURA,
+        Demon | Troll => &DEMON,
+        King | OneStrike => &KING,
+    };
+    stages[stage.min(3)]
+}
+
+fn local(p: [f32; 2], yaw: f32, x: f32, y: f32, z: f32) -> [f32; 3] {
+    let (s, c) = yaw.sin_cos();
+    [p[0] + x * c - y * s, p[1] + x * s + y * c, z]
+}
+
+/// Branch identity and moving parts layered onto the staged CC0 body. These
+/// are silhouettes, not decoration: orbiting shot for Bounce, a fan of bolts
+/// for Multi, antenna for Air, furnace for Destruction, crown for King.
+fn family_dressing(d: &mut DrawList, tw: &Tower, stage: usize, scale: f32, now: f32, grow: f32) {
+    use Family::*;
+    let p = tw.pos;
+    let yaw = tw.angle;
+    let z = DECK + scale * 0.86;
+    let col = family_accent(tw.family());
+    let lit = rgba(col, grow);
+    let dark = rgba(mix(col, [0.05, 0.06, 0.07], 0.58), grow);
+    let n = (stage + 1) as u32;
+
+    match tw.family() {
+        Single => {
+            for k in 0..n.min(3) {
+                let a = now * 0.7 + k as f32 * std::f32::consts::TAU / n.min(3) as f32;
+                d.sphere_lit(
+                    [p[0] + a.cos() * 0.24, p[1] + a.sin() * 0.24, z],
+                    0.09,
+                    lit,
+                    0.32,
+                );
+            }
+        }
+        Siege => {
+            for side in [-1.0f32, 1.0] {
+                let q = local(p, yaw, -0.26, side * 0.34, DECK + 0.30);
+                d.sphere_lit(q, 0.13 + stage as f32 * 0.015, dark, 0.0);
+            }
+        }
+        Bouncing | SuperBounce => {
+            for k in 0..(n + 1).min(4) {
+                let a = now * (1.3 + stage as f32 * 0.12)
+                    + k as f32 * std::f32::consts::TAU / (n + 1).min(4) as f32;
+                d.sphere_lit(
+                    [
+                        p[0] + a.cos() * 0.34,
+                        p[1] + a.sin() * 0.34,
+                        z + a.sin() * 0.05,
+                    ],
+                    0.10,
+                    lit,
+                    0.26,
+                );
+            }
+        }
+        Multi | SuperMulti | Critical => {
+            let bolts = (2 + stage).min(5);
+            for k in 0..bolts {
+                let spread = (k as f32 - (bolts - 1) as f32 * 0.5) * 0.12;
+                let a = local(p, yaw, 0.05, spread, z - 0.03);
+                let b = local(p, yaw, 0.46, spread * 1.35, z + 0.05);
+                d.link(Shape::Taper, a, b, 0.035, lit, Material::METAL, 0.12);
+            }
+        }
+        Corruption | Poison => {
+            let acid = if tw.family() == Poison {
+                [0.35, 1.0, 0.12]
+            } else {
+                col
+            };
+            for k in 0..n.min(3) {
+                let a = k as f32 * 2.094 + 0.5;
+                d.sphere_lit(
+                    [
+                        p[0] + a.cos() * 0.29,
+                        p[1] + a.sin() * 0.29,
+                        z - 0.06 + k as f32 * 0.04,
+                    ],
+                    0.10 + 0.015 * stage as f32,
+                    rgba(acid, grow),
+                    0.28,
+                );
+            }
+        }
+        Air | Frost | Slow => {
+            let turn = now * if tw.family() == Frost { 0.45 } else { 1.1 };
+            for arm in 0..2 {
+                let a = turn + arm as f32 * std::f32::consts::FRAC_PI_2;
+                let from = [p[0] - a.cos() * 0.30, p[1] - a.sin() * 0.30, z];
+                let to = [p[0] + a.cos() * 0.30, p[1] + a.sin() * 0.30, z];
+                d.link(Shape::Taper, from, to, 0.035, lit, Material::METAL, 0.18);
+            }
+            d.sphere_lit([p[0], p[1], z + 0.08], 0.095, lit, 0.35);
+        }
+        Chaos | SuperChaos => {
+            for k in 0..(3 + stage).min(6) {
+                let a = k as f32 * std::f32::consts::TAU / (3 + stage).min(6) as f32;
+                d.cone(
+                    [p[0] + a.cos() * 0.35, p[1] + a.sin() * 0.35, DECK + 0.29],
+                    0.09,
+                    0.32 + stage as f32 * 0.04,
+                    a,
+                    dark,
+                    Material::DARK_METAL,
+                );
+            }
+        }
+        Destruction | SuperDestruct | Fire => {
+            let flame = if tw.family() == Fire {
+                [1.0, 0.62, 0.10]
+            } else {
+                col
+            };
+            d.sphere_lit(
+                [p[0], p[1], z - 0.08],
+                0.16 + stage as f32 * 0.025,
+                rgba(flame, grow),
+                0.46,
+            );
+            d.cone(
+                [p[0], p[1], z + 0.13 + (now * 4.0).sin() * 0.025],
+                0.15,
+                0.34 + stage as f32 * 0.05,
+                now,
+                rgba(flame, grow),
+                Material::GEM,
+            );
+        }
+        Aura | Damage | Speed => {
+            let orbit = match tw.family() {
+                Damage => [1.0, 0.36, 0.18],
+                Speed => [0.22, 0.88, 1.0],
+                _ => col,
+            };
+            for k in 0..(2 + stage).min(5) {
+                let a = -now * 0.75 + k as f32 * std::f32::consts::TAU / (2 + stage).min(5) as f32;
+                d.prism(
+                    [
+                        p[0] + a.cos() * 0.34,
+                        p[1] + a.sin() * 0.34,
+                        z + a.cos() * 0.05,
+                    ],
+                    0.10,
+                    0.20,
+                    a,
+                    rgba(orbit, grow),
+                    Material::GEM,
+                );
+            }
+        }
+        Demon | Troll => {
+            for side in [-1.0f32, 1.0] {
+                let base = local(p, yaw, 0.0, side * 0.25, z - 0.05);
+                let tip = local(p, yaw, 0.15, side * (0.42 + stage as f32 * 0.04), z + 0.24);
+                d.link(
+                    Shape::Cone,
+                    base,
+                    tip,
+                    0.08,
+                    dark,
+                    Material::DARK_METAL,
+                    0.08,
+                );
+            }
+        }
+        King | OneStrike => {
+            for k in 0..5 {
+                let a = k as f32 * std::f32::consts::TAU / 5.0;
+                let q = [p[0] + a.cos() * 0.25, p[1] + a.sin() * 0.25, z + 0.10];
+                d.cone(
+                    q,
+                    0.07,
+                    0.25 + stage as f32 * 0.035,
+                    a,
+                    lit,
+                    Material::METAL,
+                );
+            }
+            d.sphere_lit([p[0], p[1], z + 0.22], 0.10, lit, 0.42);
+        }
+    }
+}
+
+fn family_accent(family: Family) -> [f32; 3] {
+    family.fx_color()
 }
 
 /// A translucent preview of what is about to be built, turning on the spot.
@@ -262,5 +537,66 @@ pub fn draw_ghost(d: &mut DrawList, def_i: usize, p: [f32; 2], now: f32) {
         walk: false,
         lights: true,
     };
-    models::draw(d, def.model, &pose, &skin);
+    if !models::draw_downloaded(
+        d,
+        family_asset(def.family, 0),
+        [p[0], p[1], DECK],
+        0.98,
+        downloaded_turret_yaw(now * 0.6),
+        rgba(def.color(), 0.55),
+        Material::STONE,
+        0.0,
+    ) {
+        models::draw(d, def.model, &pose, &skin);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::game::Game;
+    use crate::gfx::mesh::{model_bucket, model_slots};
+
+    #[test]
+    fn imported_turret_front_matches_the_simulation_aim_vector() {
+        for aim in [
+            0.0,
+            std::f32::consts::FRAC_PI_2,
+            std::f32::consts::PI,
+            -std::f32::consts::FRAC_PI_2,
+            0.73,
+        ] {
+            // The imported mesh's authored front is local -Y.
+            let yaw = downloaded_turret_yaw(aim);
+            let transformed_front = [yaw.sin(), -yaw.cos()];
+            let expected = [aim.cos(), aim.sin()];
+            assert!((transformed_front[0] - expected[0]).abs() < 1e-6);
+            assert!((transformed_front[1] - expected[1]).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn tower_draw_applies_the_imported_asset_axis_correction() {
+        let mut game = Game::new();
+        game.gold = 10_000;
+        let def = family_start(Family::Single).expect("single tower root");
+        game.build_choice = Some((def, 1));
+        assert!(game.try_build(0));
+        game.towers[0].angle = 0.73;
+        game.towers[0].built_at = -10.0;
+
+        let mut list = DrawList::default();
+        draw(&mut list, &game.towers[0], false, 1.0);
+        let slot = model_slots()
+            .iter()
+            .find(|(name, _)| name == "TowerSeed0")
+            .map(|(_, slot)| *slot)
+            .expect("TowerSeed0 model");
+        let instances = &list.solid[model_bucket(slot)];
+        assert_eq!(instances.len(), 1);
+        assert!(
+            (instances[0].rot[0] - downloaded_turret_yaw(0.73)).abs() < 1e-6,
+            "draw bypassed the imported turret axis correction"
+        );
+    }
 }

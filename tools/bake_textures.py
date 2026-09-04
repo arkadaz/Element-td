@@ -24,11 +24,12 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 CACHE = os.path.join(HERE, 'tex')
 OUT = os.path.abspath(os.path.join(HERE, '..', 'assets'))
 
-# Every layer is this square. 256 is small for a close-up and exactly right for
+# Every layer is this square. 512 is detailed enough for a close-up and right for
 # what this is: ground seen from a camera twenty-six tiles up, tiled once per
-# tile, where the job of the texture is to break up a flat fill rather than to
-# survive being looked at.
-SIZE = 256
+# tile. 512 keeps bark, masonry, grass blades and worn road aggregate visible
+# at the close camera while the shared eight-layer array remains inexpensive
+# enough for integrated GPUs and Chromium/WebGPU.
+SIZE = 512
 
 # The layer order is the contract with `view::mod`, which picks a layer per
 # tile. Adding one means adding it here and using it there; nothing else.
@@ -111,9 +112,28 @@ def normal_layer(asset):
     name = next((n for n in z.namelist() if n.lower().endswith('_normalgl.jpg')), None)
     if name is None:
         # No normal map in this pack: a flat one, which perturbs nothing.
-        return Image.new('RGB', (SIZE, SIZE), (128, 128, 255))
-    im = Image.open(io.BytesIO(z.read(name))).convert('RGB')
-    return im.resize((SIZE, SIZE), Image.LANCZOS)
+        im = Image.new('RGB', (SIZE, SIZE), (128, 128, 255))
+    else:
+        im = Image.open(io.BytesIO(z.read(name))).convert('RGB')
+        im = im.resize((SIZE, SIZE), Image.LANCZOS)
+
+    # The colour and normal layers share one sRGB texture array so they stay one
+    # binding on WebGL. Sampling that texture decodes every channel to linear.
+    # Raw normal bytes are already linear data, therefore storing 128 directly
+    # would sample as 0.216 and bend a flat normal hard towards (-x, -y). Encode
+    # each component as sRGB here so the GPU's decode restores the intended
+    # linear 0..1 vector. This was the source of the acid-green, shimmering
+    # terrain in oblique gameplay views.
+    def to_srgb(v):
+        v = max(0.0, min(1.0, v))
+        v = v * 12.92 if v <= 0.0031308 else 1.055 * (v ** (1 / 2.4)) - 0.055
+        return int(round(v * 255.0))
+
+    im.putdata([
+        tuple(to_srgb(c / 255.0) for c in p)
+        for p in im.getdata()
+    ])
+    return im
 
 
 def main():

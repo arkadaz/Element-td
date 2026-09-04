@@ -12,7 +12,7 @@
 
 use super::models::{Pose, Skin};
 use super::{models, theme};
-use crate::game::Creep;
+use crate::game::{BOSS_MENDER_RANGE, Creep};
 use crate::gfx::draw::{DrawList, Material, Shape, rgba};
 
 /// Draws one monster.
@@ -42,28 +42,104 @@ pub fn draw(d: &mut DrawList, c: &Creep, detail: bool) {
         0.0,
     );
 
+    // Vanguards are a gameplay rule, not a hidden multiplier. Their restrained
+    // gold seal survives a crowded wave without bleaching the creature itself.
+    if c.elite {
+        d.ground_ring(
+            c.pos,
+            r * 1.55,
+            (r * 0.12).clamp(0.045, 0.085),
+            rgba([1.0, 0.67, 0.20], 0.82),
+            24,
+        );
+    }
+
+    // A commander's repair field is a rule the player must be able to see.
+    // It is deliberately a thin ground ring rather than another glow over the
+    // model: escorts inside the radius are the thing the player is deciding
+    // whether to suppress or separate from their leader.
+    if c.is_boss() {
+        d.ground_ring(
+            c.pos,
+            BOSS_MENDER_RANGE,
+            0.065,
+            rgba([1.0, 0.66, 0.20], 0.38),
+            48,
+        );
+    }
+
+    // A survivor that completed the circuit is no longer ordinary pressure on
+    // Veteran or Nightmare: it has accelerated without minting extra bounty.
+    // A thin outer warning ring makes that escalation readable without tinting
+    // away the monster's armour identity. Red means three or more laps.
+    if c.laps > 0 && (detail || c.laps >= 3 || c.is_boss()) {
+        let warning = if c.laps >= 3 {
+            [1.0, 0.24, 0.15]
+        } else {
+            [1.0, 0.55, 0.14]
+        };
+        d.ground_ring(
+            c.pos,
+            r * (1.72 + c.laps.min(4) as f32 * 0.07),
+            (r * 0.07).clamp(0.03, 0.055),
+            rgba(warning, 0.78),
+            24,
+        );
+    }
+
     let pose = Pose {
         pos: c.pos,
         z: ground,
         yaw: c.facing,
-        // Drawn a little larger than it collides, so a silhouette survives
-        // being forty pixels tall.
-        r: r * 1.2,
+        // Collision remains generous for targeting; the render footprint is
+        // smaller so the authored high-count waves do not become one mesh.
+        r: r * 0.92,
         t: c.bob,
         walk: c.stun <= 0.0,
-        lights: detail || c.is_boss(),
+        lights: detail || c.is_boss() || c.elite,
     };
     models::draw(d, c.model, &pose, &skin);
 
-    status(d, c);
+    status(d, c, detail);
     health_bar(d, c);
 }
 
 // ---------------------------------------------------------------- overlays
 
-fn status(d: &mut DrawList, c: &Creep) {
+fn status(d: &mut DrawList, c: &Creep, detail: bool) {
     let r = c.radius;
     let bz = c.height();
+    // The model already flashes under damage. This short, tight energy bloom
+    // adds contact at the exact body position so even a fast bolt feels like it
+    // struck something rather than merely disappearing. Crowds suppress the
+    // extra facets; commanders and Vanguards always keep the reaction.
+    if c.flash > 0.03 && (detail || c.is_boss() || c.elite) {
+        let hit = c.flash.clamp(0.0, 1.0);
+        let col = c.armour_type.color();
+        d.glow(
+            [c.pos[0], c.pos[1], bz],
+            r * (1.20 + hit * 0.95),
+            2.4,
+            rgba(
+                [1.0, 0.88 + col[1] * 0.12, 0.72 + col[2] * 0.20],
+                hit * 0.22,
+            ),
+        );
+        let facets = if c.is_boss() { 3 } else { 2 };
+        for i in 0..facets {
+            let a = c.bob * 1.7 + i as f32 * std::f32::consts::TAU / facets as f32;
+            d.sphere_lit(
+                [
+                    c.pos[0] + a.cos() * r * 0.82,
+                    c.pos[1] + a.sin() * r * 0.82,
+                    bz + (a * 1.3).sin() * r * 0.42,
+                ],
+                r * 0.10 * hit,
+                rgba([1.0, 0.93, 0.76], hit),
+                1.0,
+            );
+        }
+    }
     // At most one glow per monster, and a faint one. A wave is a hundred and
     // fifty creeps, and a hundred and fifty additive sprites on top of each
     // other is a white sheet rather than a status effect.
@@ -78,6 +154,62 @@ fn status(d: &mut DrawList, c: &Creep) {
     };
     if let Some(col) = tint {
         d.glow([c.pos[0], c.pos[1], bz], r * 1.9, 0.7, rgba(col, 0.13));
+    }
+    if detail || c.is_boss() || c.elite {
+        if c.burn.t > 0.0 {
+            // Two little tongues crawl up the silhouette instead of painting
+            // the entire creature orange.
+            for i in 0..2 {
+                let a = c.bob * (2.1 + i as f32 * 0.3) + i as f32 * 2.7;
+                let h = r * (0.42 + 0.20 * (a * 1.7).sin().abs());
+                d.shape(
+                    Shape::Cone,
+                    [
+                        c.pos[0] + a.cos() * r * 0.55,
+                        c.pos[1] + a.sin() * r * 0.55,
+                        bz + a.sin() * r * 0.28,
+                    ],
+                    [r * 0.16, r * 0.16, h],
+                    a,
+                    0.0,
+                    rgba([1.0, 0.38 + i as f32 * 0.16, 0.06], 0.92),
+                    Material::GEM,
+                    0.92,
+                );
+            }
+        } else if c.poison.t > 0.0 {
+            for i in 0..2 {
+                let a = c.bob * 1.3 + i as f32 * 3.1;
+                d.sphere_lit(
+                    [
+                        c.pos[0] + a.cos() * r * 0.62,
+                        c.pos[1] + a.sin() * r * 0.62,
+                        bz - r * (0.15 + 0.32 * a.sin().abs()),
+                    ],
+                    r * 0.12,
+                    rgba([0.48, 1.0, 0.24], 0.86),
+                    0.78,
+                );
+            }
+        } else if c.slow.t > 0.0 {
+            for i in 0..3 {
+                let a = c.bob * 0.55 + i as f32 * 2.094;
+                d.shape(
+                    Shape::Prism,
+                    [
+                        c.pos[0] + a.cos() * r * 0.76,
+                        c.pos[1] + a.sin() * r * 0.76,
+                        0.25 + r * 0.18,
+                    ],
+                    [r * 0.13, r * 0.13, r * 0.48],
+                    a,
+                    -0.28,
+                    rgba([0.44, 0.82, 1.0], 0.78),
+                    Material::GEM,
+                    0.58,
+                );
+            }
+        }
     }
     if c.stun > 0.0 {
         // Roots: a ring of sparks spinning overhead.
@@ -113,7 +245,7 @@ fn status(d: &mut DrawList, c: &Creep) {
 /// the wave qualifies at any instant.
 fn health_bar(d: &mut DrawList, c: &Creep) {
     let hp = c.hp_frac();
-    if hp >= 0.999 || (hp > 0.5 && !c.is_boss()) {
+    if hp >= 0.999 || (hp > 0.5 && !c.is_boss() && !c.elite && c.laps == 0) {
         return;
     }
     let r = c.radius;

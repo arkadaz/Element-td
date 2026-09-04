@@ -72,9 +72,9 @@ two tests that enforce them:
 ## The board
 
 `game/board.rs` builds everything from `greentd_map.rs`: the lane polyline from
-`LAP`, the plots from every non-corridor tile of `ARENA`. There is no waypoint
-list to edit. `VIEW` is what the camera frames and `ARENA` is what may be built
-on; `tools/emit_map.py` computes both from the lane the map's own triggers walk.
+`LAP`, then 56 protected inner/outer shoulder pads sampled beside useful parts
+of that lane. There is no runtime waypoint list to edit. `VIEW` is what the
+camera may pan across and `ARENA` bounds the compact solo adaptation.
 
 ---
 

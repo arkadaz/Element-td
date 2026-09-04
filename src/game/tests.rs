@@ -7,7 +7,6 @@
 //! thirty-six waves, that a board with no answer to the air does not, and that
 //! nothing can wedge a wave open forever.
 
-use super::board::ROAD_HALF;
 use super::defs::*;
 use super::*;
 
@@ -177,6 +176,23 @@ fn the_road_is_a_closed_circuit_with_no_exit() {
     assert!((b.wrap(-1.0) - (b.total - 1.0)).abs() < 0.01);
 }
 
+#[test]
+fn red_creeps_split_both_ways_like_the_reference_trigger() {
+    let b = super::board::Board::new();
+    let start_a = b.sample_travel(0.0, 1.0);
+    let start_b = b.sample_travel(0.0, -1.0);
+    assert!((start_a[0] - start_b[0]).abs() < 0.01);
+    assert!((start_a[1] - start_b[1]).abs() < 0.01);
+
+    let cw = b.heading_travel(0.5, 1.0);
+    let ccw = b.heading_travel(0.5, -1.0);
+    let dot = cw[0] * ccw[0] + cw[1] * ccw[1];
+    assert!(
+        dot < 0.25,
+        "the two Red streams do not take separate arms of the junction: {cw:?} / {ccw:?}"
+    );
+}
+
 /// Prints the board the map produced. Diagnostic:
 ///     cargo test --release show_the_board -- --ignored --nocapture
 #[test]
@@ -213,7 +229,12 @@ fn show_the_board() {
 #[test]
 fn pads_sit_beside_the_road_never_on_it() {
     let b = super::board::Board::new();
-    assert!(b.slots.len() > 40, "only {} pads", b.slots.len());
+    assert!(
+        (48..=super::board::PAD_LIMIT).contains(&b.slots.len()),
+        "expected 48..={} road-hugging pads, got {}",
+        super::board::PAD_LIMIT,
+        b.slots.len()
+    );
     for s in &b.slots {
         let tx = s.pos[0].floor() as i32;
         let ty = s.pos[1].floor() as i32;
@@ -222,11 +243,23 @@ fn pads_sit_beside_the_road_never_on_it() {
             "a pad sits in the corridor at {:?}",
             s.pos
         );
+        let road_dist = b.dist_to_road(s.pos);
         assert!(
-            b.dist_to_road(s.pos) > ROAD_HALF,
-            "a pad overlaps the lane at {:?}",
+            (super::board::PAD_ROAD_MIN..=super::board::PAD_ROAD_MAX).contains(&road_dist),
+            "pad {:?} is {road_dist:.2} from the road, outside the tactical shoulder",
             s.pos
         );
+    }
+    for (i, a) in b.slots.iter().enumerate() {
+        for b in &b.slots[i + 1..] {
+            let d2 = (a.pos[0] - b.pos[0]).powi(2) + (a.pos[1] - b.pos[1]).powi(2);
+            assert!(
+                d2 >= super::board::PAD_SPACING.powi(2) - 1e-4,
+                "tower pads overlap at {:?} and {:?}",
+                a.pos,
+                b.pos
+            );
+        }
     }
 }
 
@@ -283,6 +316,66 @@ fn selling_refunds_what_the_map_says() {
     );
 }
 
+#[test]
+fn a_source_refund_anomaly_cannot_mint_gold() {
+    let mut g = rich_game();
+    let ti = build(&mut g, Family::Chaos, 0.0);
+    for _ in 0..2 {
+        let (into, _) = g.upgrade_choices(ti)[0];
+        g.upgrade_into(ti, into);
+    }
+
+    let invested = g.towers[ti].invested;
+    let raw_source_refund = g.towers[ti].def().refund;
+    assert!(
+        raw_source_refund > invested,
+        "the regression path no longer exercises a source refund anomaly"
+    );
+    assert_eq!(g.towers[ti].sell_value(), invested);
+
+    let before_sale = g.gold;
+    g.sell(ti);
+    assert_eq!(g.gold - before_sale, invested as i64);
+}
+
+#[test]
+fn hard_modes_charge_a_visible_respec_cost() {
+    let mut veteran = rich_game();
+    veteran.difficulty = Difficulty::Veteran;
+    let ti = build(&mut veteran, Family::Siege, 0.0);
+    let invested = veteran.towers[ti].invested;
+    assert_eq!(veteran.tower_sell_value(ti), invested * 80 / 100);
+    veteran.spawn_left = 1;
+    assert_eq!(veteran.tower_sell_value(ti), invested * 65 / 100);
+    let before = veteran.gold;
+    veteran.sell(ti);
+    assert_eq!(veteran.gold - before, (invested * 65 / 100) as i64);
+
+    let mut nightmare = rich_game();
+    nightmare.difficulty = Difficulty::Nightmare;
+    let ti = build(&mut nightmare, Family::Siege, 0.0);
+    let invested = nightmare.towers[ti].invested;
+    assert_eq!(nightmare.tower_sell_value(ti), invested * 70 / 100);
+    nightmare.spawn_left = 1;
+    assert_eq!(nightmare.tower_sell_value(ti), invested * 50 / 100);
+}
+
+#[test]
+fn commander_hunters_default_to_strongest_without_overriding_player_intent() {
+    let mut g = rich_game();
+    let king = build(&mut g, Family::King, 0.0);
+    assert_eq!(g.towers[king].mode, TargetMode::Strongest);
+
+    let seed = build(&mut g, Family::Single, 2.0);
+    g.upgrade_into(seed, root(Family::OneStrike));
+    assert_eq!(g.towers[seed].mode, TargetMode::Strongest);
+
+    let chosen = build(&mut g, Family::Single, 4.0);
+    g.towers[chosen].mode = TargetMode::Closest;
+    g.upgrade_into(chosen, root(Family::OneStrike));
+    assert_eq!(g.towers[chosen].mode, TargetMode::Closest);
+}
+
 // ---------------------------------------------------------------- the loss
 
 #[test]
@@ -295,6 +388,44 @@ fn an_undefended_ring_floods_and_the_run_is_lost() {
         Phase::Defeat,
         "an empty board survived; ring holds {}/{FLOOD_LIMIT}",
         g.creeps.len()
+    );
+}
+
+#[test]
+fn a_hard_mode_commander_cannot_circle_forever_below_the_crowd_cap() {
+    for (difficulty, limit) in [(Difficulty::Veteran, 4), (Difficulty::Nightmare, 3)] {
+        let mut hard = Game::new();
+        hard.start_run_with_difficulty(99, difficulty);
+        hard.wave = 31;
+        let boss_wave = hard.wave_def(31);
+        hard.spawn_creep_ranked(&boss_wave, boss_wave.hp, 1.0, 0.0, false, true);
+        hard.creeps[0].laps = limit - 1;
+        hard.check_end();
+        assert_ne!(
+            hard.phase,
+            Phase::Defeat,
+            "{difficulty:?} ended one lap early"
+        );
+
+        hard.creeps[0].laps = limit;
+        hard.check_end();
+        assert_eq!(
+            hard.phase,
+            Phase::Defeat,
+            "{difficulty:?} ignored its commander lap limit"
+        );
+    }
+
+    let mut classic = Game::new();
+    classic.wave = 31;
+    let boss_wave = classic.wave_def(31);
+    classic.spawn_creep_ranked(&boss_wave, boss_wave.hp, 1.0, 0.0, false, true);
+    classic.creeps[0].laps = 3;
+    classic.check_end();
+    assert_ne!(
+        classic.phase,
+        Phase::Defeat,
+        "Legacy rules must stay faithful"
     );
 }
 
@@ -573,6 +704,54 @@ fn ground_towers_are_lethal_on_the_ground() {
     );
 }
 
+#[test]
+fn an_in_flight_shot_keeps_its_target_rules_after_its_tower_is_sold() {
+    let mut g = rich_game();
+    isolate(&mut g);
+    let ti = build(&mut g, Family::Siege, 3.0);
+    let def = g.towers[ti].def;
+    assert_eq!(TOWERS[def].targets, Targets::GroundOnly);
+
+    let ground = creep(1.0e9, 0, ArmourType::Unarmoured, false);
+    let air = creep(1.0e9, 0, ArmourType::Unarmoured, true);
+    g.spawn_creep(&ground, ground.hp, 1.0, 3.0);
+    g.spawn_creep(&air, air.hp, 1.0, 3.0);
+    let at = g.creeps[0].pos;
+    g.creeps[1].pos = at;
+    let target_uid = g.creeps[0].uid;
+    let ground_before = g.creeps[0].hp;
+    let air_before = g.creeps[1].hp;
+
+    g.projs.push(Proj {
+        pos: at,
+        z: g.creeps[0].height(),
+        vel: [0.0, 0.0],
+        kind: ProjKind::Shell,
+        tower: ti,
+        def,
+        dmg: 10_000.0,
+        splash: 3.0,
+        bounces: 0,
+        crit: false,
+        target_idx: 0,
+        target_uid,
+        life: 1.0,
+        trail: 1.0,
+    });
+    g.sell(ti);
+    g.spatial.rebuild(&g.creeps);
+    combat::step_projectiles(&mut g, 1.0 / 120.0);
+
+    assert!(
+        g.creeps[0].hp < ground_before,
+        "the primary ground target was missed"
+    );
+    assert_eq!(
+        g.creeps[1].hp, air_before,
+        "selling the Siege tower turned its ground-only splash into an air hit"
+    );
+}
+
 // ---------------------------------------------------------------- abilities
 
 #[test]
@@ -597,6 +776,29 @@ fn poison_keeps_working_after_the_shot_lands() {
         g.creeps[0].hp < hp,
         "poison stopped the moment the tower did"
     );
+}
+
+#[test]
+fn a_weaker_poison_never_truncates_a_stronger_stack() {
+    let mut g = rich_game();
+    isolate(&mut g);
+
+    let strong = build(&mut g, Family::Single, 3.0);
+    g.upgrade_into(strong, root(Family::Poison));
+    max_out(&mut g, strong);
+    let weak = build(&mut g, Family::Single, 5.0);
+    g.upgrade_into(weak, root(Family::Poison));
+    assert!(g.towers[strong].abil().poison_dps > g.towers[weak].abil().poison_dps);
+
+    let w = creep(1.0e9, 0, ArmourType::Unarmoured, false);
+    g.spawn_creep(&w, w.hp, 1.0, 0.0);
+    combat::on_hit_riders(&mut g, strong, 0);
+    let amount = g.creeps[0].poison.amt;
+    let duration = g.creeps[0].poison.t;
+    combat::on_hit_riders(&mut g, weak, 0);
+
+    assert!(g.creeps[0].poison.amt >= amount);
+    assert!(g.creeps[0].poison.t >= duration);
 }
 
 #[test]
@@ -665,6 +867,31 @@ fn an_aura_tower_buffs_its_neighbours_and_stops_when_sold() {
             "a tower kept its aura after the Damage Tower was sold"
         );
     }
+}
+
+#[test]
+fn identical_local_auras_use_the_strongest_source_instead_of_multiplying() {
+    let mut g = rich_game();
+    isolate(&mut g);
+    let attacker = build(&mut g, Family::Siege, 6.0);
+    let base = g.towers[attacker].buff_dmg;
+
+    let make_damage_aura = |game: &mut Game, along: f32| {
+        let aura = build(game, Family::Aura, along);
+        for name in ["Damage Tower", "Damage Tower 2", "Damage Tower 3"] {
+            game.upgrade_into(aura, t(name));
+        }
+        aura
+    };
+    make_damage_aura(&mut g, 5.5);
+    let one = g.towers[attacker].buff_dmg;
+    assert!(one > base);
+    make_damage_aura(&mut g, 6.5);
+    let two = g.towers[attacker].buff_dmg;
+    assert!(
+        (two - one).abs() < 1e-5,
+        "two identical auras stacked from {one:.2} to {two:.2}"
+    );
 }
 
 #[test]
@@ -764,14 +991,150 @@ fn wave_table_is_well_formed() {
 
 #[test]
 fn a_wave_finishes_arriving_within_its_window() {
-    for n in [1u32, 12, 24, 36] {
-        let w = wave_at(n);
-        let window = w.spawn_gap * w.count as f32;
-        assert!(
-            window <= WAVE_SPAWN_WINDOW + 0.5,
-            "wave {n} takes {window:.0}s to arrive"
+    for difficulty in Difficulty::ALL {
+        let mut g = Game::new();
+        g.start_run_with_difficulty(7, difficulty);
+        for n in [1u32, 12, 24, 36] {
+            let w = g.wave_def(n);
+            let window = w.spawn_gap * w.count.saturating_sub(1) as f32;
+            assert!(
+                window <= w.lead_in,
+                "{difficulty:?} wave {n} needs {window:.1}s to arrive but advances in {:.1}s",
+                w.lead_in
+            );
+            assert!(
+                window <= WAVE_SPAWN_WINDOW + 0.5,
+                "{difficulty:?} wave {n} takes {window:.0}s to arrive"
+            );
+        }
+    }
+}
+
+#[test]
+fn boss_waves_have_one_real_commander_and_keep_every_authored_enemy() {
+    let mut g = Game::new();
+    g.start_run_with_difficulty(0xB055, Difficulty::Veteran);
+    g.wave = 34;
+    g.prep = false;
+    g.begin_wave(false);
+    let w = g.wave_def(35);
+    assert_eq!(w.tag, "Boss");
+
+    while g.spawn_left > 0 {
+        g.spawn_timer = 0.0;
+        g.spawn_step(0.0);
+    }
+
+    assert_eq!(g.creeps.len(), w.count as usize);
+    let leaders: Vec<&Creep> = g.creeps.iter().filter(|c| c.is_boss()).collect();
+    assert_eq!(
+        leaders.len(),
+        1,
+        "a boss banner became a mass of boss units"
+    );
+    assert!((leaders[0].max_hp / w.hp - BOSS_HP_MULT).abs() < 0.01);
+    assert_eq!(leaders[0].bounty, g.bounty_for_wave(35) * BOSS_REWARD_MULT);
+    assert!(
+        g.creeps
+            .iter()
+            .filter(|c| !c.is_boss() && !c.elite)
+            .all(|c| (c.max_hp - w.hp).abs() < 0.01)
+    );
+}
+
+#[test]
+fn boss_repair_has_visible_corruption_counterplay() {
+    let mut g = rich_game();
+    isolate(&mut g);
+    g.wave = 35;
+    let boss_wave = g.wave_def(35);
+    g.spawn_creep_ranked(&boss_wave, boss_wave.hp, 1.0, 4.0, false, true);
+    g.spawn_creep_ranked(&boss_wave, boss_wave.hp, 1.0, 4.2, false, false);
+    g.creeps[1].hp *= 0.5;
+    let hurt = g.creeps[1].hp;
+    g.step_creeps(1.0);
+    assert!(g.creeps[1].hp > hurt, "the commander repaired no escort");
+
+    let ti = build(&mut g, Family::Corruption, 4.2);
+    combat::on_hit_riders(&mut g, ti, 1);
+    assert!(g.creeps[1].suppress > 0.0);
+    let suppressed = g.creeps[1].hp;
+    g.step_creeps(0.5);
+    assert_eq!(
+        g.creeps[1].hp, suppressed,
+        "Corruption did not suppress commander repair"
+    );
+}
+
+#[test]
+fn wave_35_cannot_overflow_live_combat_or_visual_queues() {
+    let mut g = rich_game();
+    isolate(&mut g);
+    g.wave = 35;
+    let super_multi = t("Super Multi Tower : Perfect");
+    for slot in 0..g.board.slots.len() {
+        g.build_choice = Some((super_multi, 1));
+        let _ = g.try_build(slot);
+    }
+    g.build_choice = None;
+    g.selected = None;
+    for tower in &mut g.towers {
+        tower.cooldown = 0.0;
+    }
+
+    let w = g.wave_def(35);
+    for i in 0..w.count {
+        // Deliberately enormous health keeps every target alive while the
+        // fully packed board fires its first volley.
+        g.spawn_creep_ranked(
+            &w,
+            1.0e12,
+            1.0,
+            i as f32 / w.count as f32 * g.board.total,
+            false,
+            i == 0,
         );
     }
+    g.spatial.rebuild(&g.creeps);
+    combat::step_towers(&mut g, 1.0 / 120.0);
+    combat::step_projectiles(&mut g, 1.0 / 120.0);
+
+    assert!(g.projs.len() <= MAX_PROJECTILES);
+    assert!(g.beams.len() <= MAX_BEAMS);
+    assert!(g.texts.len() <= MAX_FLOAT_TEXTS);
+    assert!(g.fx.particles.len() <= 8192);
+    assert!(
+        g.creeps
+            .iter()
+            .all(|c| c.hp.is_finite() && c.hp > 0.0 && c.pos.into_iter().all(f32::is_finite))
+    );
+}
+
+#[test]
+fn same_frame_kills_keep_creep_indices_stable_until_damage_is_resolved() {
+    let mut g = rich_game();
+    isolate(&mut g);
+    let ti = build(&mut g, Family::Single, 2.0);
+    let w = g.wave_def(1);
+    g.spawn_creep(&w, w.hp, 1.0, 2.0);
+    g.spawn_creep(&w, w.hp, 1.0, 3.0);
+    let uids = [g.creeps[0].uid, g.creeps[1].uid];
+
+    assert!(combat::damage_creep(&mut g, 0, 1.0e20, ti, false));
+    assert_eq!(
+        g.creeps.len(),
+        2,
+        "the first kill invalidated later hit indices"
+    );
+    assert_eq!(g.creeps[1].uid, uids[1]);
+    assert!(combat::damage_creep(&mut g, 1, 1.0e20, ti, false));
+    assert_eq!(g.creeps.iter().map(|c| c.uid).collect::<Vec<_>>(), uids);
+
+    combat::step_projectiles(&mut g, 0.0);
+    assert!(
+        g.creeps.is_empty(),
+        "dead targets survived the resolution barrier"
+    );
 }
 
 #[test]
@@ -812,6 +1175,184 @@ fn the_purse_starts_where_the_map_starts_it() {
     let g = Game::new();
     assert_eq!(g.gold, 1_000, "the map hands out a thousand gold");
     assert_eq!(FLOOD_LIMIT, 700, "the map loses at seven hundred");
+}
+
+#[test]
+fn difficulty_modes_preserve_classic_and_add_real_pressure() {
+    let mut classic = Game::new();
+    classic.start_run_with_difficulty(7, Difficulty::Classic);
+    let base = wave_at(CAMPAIGN_WAVES);
+    let faithful = classic.wave_def(CAMPAIGN_WAVES);
+    assert_eq!(faithful.hp, base.hp);
+    assert_eq!(faithful.speed, base.speed);
+    assert_eq!(faithful.spawn_gap, base.spawn_gap);
+    assert_eq!(faithful.lead_in, base.lead_in);
+    assert_eq!(classic.flood_limit(), FLOOD_LIMIT);
+    assert_eq!(Difficulty::Classic.elite_stride(36), None);
+
+    let mut veteran = Game::new();
+    veteran.start_run_with_difficulty(7, Difficulty::Veteran);
+    let hard = veteran.wave_def(CAMPAIGN_WAVES);
+    assert!(hard.hp >= base.hp * 1.54);
+    assert!(hard.speed > base.speed);
+    assert!(hard.spawn_gap < base.spawn_gap);
+    assert!(hard.lead_in < base.lead_in);
+    assert_eq!(veteran.flood_limit(), 450);
+    veteran.wave = CAMPAIGN_WAVES;
+    assert_eq!(veteran.flood_limit(), 280);
+    assert_eq!(Difficulty::Veteran.elite_stride(4), Some(8));
+
+    let mut nightmare = Game::new();
+    nightmare.start_run_with_difficulty(7, Difficulty::Nightmare);
+    let brutal = nightmare.wave_def(CAMPAIGN_WAVES);
+    assert!(brutal.hp > hard.hp);
+    assert!(brutal.speed > hard.speed);
+    assert!(brutal.spawn_gap < hard.spawn_gap);
+    assert!(nightmare.bounty_for_wave(20) < veteran.bounty_for_wave(20));
+    assert_eq!(nightmare.flood_limit(), 400);
+    nightmare.wave = CAMPAIGN_WAVES;
+    assert_eq!(nightmare.flood_limit(), 200);
+    assert_eq!(Difficulty::Nightmare.elite_stride(2), Some(6));
+
+    nightmare.restart();
+    assert_eq!(nightmare.difficulty, Difficulty::Nightmare);
+}
+
+#[test]
+fn tempo_rewards_patience_or_risk_but_not_both() {
+    let mut patient = Game::new();
+    patient.wave = 1;
+    let before = patient.gold;
+    patient.begin_wave(false);
+    assert_eq!(patient.stats.clean_sweeps, 1);
+    assert!(patient.gold >= before + 20);
+    assert_eq!(patient.stats.rush_gold, 0);
+
+    let mut rushing = Game::new();
+    rushing.wave = 1;
+    rushing.wave_timer = 15.0;
+    rushing.send_wave();
+    assert_eq!(rushing.stats.clean_sweeps, 0);
+    assert!(rushing.stats.rush_gold > 0);
+
+    let mut full_stream = Game::new();
+    full_stream.send_wave();
+    let first_wave = full_stream.spawn_left;
+    let first_gold = full_stream.gold;
+    assert!(first_wave > 0);
+    full_stream.send_wave();
+    assert_eq!(full_stream.wave, 1, "Enter skipped a deploying wave");
+    assert_eq!(full_stream.spawn_left, first_wave);
+    assert_eq!(full_stream.gold, first_gold, "blocked Rush still paid gold");
+    assert!(full_stream.creeps.is_empty());
+
+    full_stream.spawn_left = 0;
+    full_stream.send_wave();
+    assert_eq!(full_stream.wave, 2, "Rush did not unlock after deployment");
+}
+
+#[test]
+fn campaign_speed_is_readable_and_three_x_is_an_endless_reward() {
+    let mut g = Game::new();
+    g.cycle_speed();
+    assert_eq!(g.speed, MAX_CAMPAIGN_SPEED);
+    g.cycle_speed();
+    assert_eq!(g.speed, 1.0);
+
+    g.endless = true;
+    g.cycle_speed();
+    assert_eq!(g.speed, 2.0);
+    g.cycle_speed();
+    assert_eq!(g.speed, MAX_ENDLESS_SPEED);
+    g.cycle_speed();
+    assert_eq!(g.speed, 1.0);
+}
+
+#[test]
+fn no_difficulty_can_be_fast_forwarded_into_a_five_minute_campaign() {
+    for difficulty in Difficulty::ALL {
+        let mut g = Game::new();
+        g.start_run_with_difficulty(7, difficulty);
+        let deployment: f32 = (1..=CAMPAIGN_WAVES)
+            .map(|wave| {
+                let w = g.wave_def(wave);
+                w.spawn_gap * w.count.saturating_sub(1) as f32
+            })
+            .sum();
+        let fastest_wall_clock = deployment / MAX_CAMPAIGN_SPEED;
+        assert!(
+            fastest_wall_clock >= 10.0 * 60.0,
+            "{difficulty:?} can still be compressed to {:.1} minutes",
+            fastest_wall_clock / 60.0
+        );
+    }
+}
+
+#[test]
+fn command_drafts_pause_hard_modes_and_buff_the_whole_board() {
+    let mut g = Game::new();
+    g.start_run_with_difficulty(11, Difficulty::Veteran);
+    g.gold = 10_000;
+    let ti = build(&mut g, Family::Siege, 2.0);
+    let before = g.towers[ti].dmg();
+
+    g.wave = 9;
+    g.begin_wave(false);
+    assert!(g.pending_doctrine && g.paused);
+    g.choose_doctrine(Doctrine::Arsenal);
+    assert!(!g.pending_doctrine && !g.paused);
+    assert_eq!(g.doctrine_rank(Doctrine::Arsenal), 1);
+    assert!((g.towers[ti].dmg() / before - 1.12).abs() < 0.001);
+
+    let mut classic = Game::new();
+    classic.wave = 9;
+    classic.begin_wave(false);
+    assert!(!classic.pending_doctrine && !classic.paused);
+}
+
+#[test]
+fn hard_mode_survivors_accelerate_without_minting_gold_each_lap() {
+    let mut g = Game::new();
+    g.start_run_with_difficulty(13, Difficulty::Veteran);
+    g.wave = 1;
+    let w = g.wave_def(1);
+    g.spawn_creep(&w, w.hp, 1.0, g.board.total - 0.01);
+    g.creeps[0].dist = g.board.total - 0.01;
+    let speed = g.creeps[0].base_speed;
+    let bounty = g.creeps[0].bounty;
+    g.step_creeps(0.1);
+    assert_eq!(g.creeps[0].laps, 1);
+    assert!((g.creeps[0].base_speed / speed - 1.06).abs() < 0.001);
+    assert_eq!(g.creeps[0].bounty, bounty);
+}
+
+#[test]
+fn nightmare_streams_visible_vanguards_with_double_bounty() {
+    let mut g = Game::new();
+    g.start_run_with_difficulty(9, Difficulty::Nightmare);
+    g.wave = 2;
+    g.send_wave();
+    let w = g.wave_def(3);
+    let normal_bounty = g.bounty_for_wave(3);
+
+    for _ in 0..6 {
+        g.spawn_timer = 0.0;
+        g.spawn_step(0.0);
+    }
+
+    let elites: Vec<&Creep> = g.creeps.iter().filter(|c| c.elite).collect();
+    assert_eq!(elites.len(), 1, "one in six should be a Vanguard");
+    let elite = elites[0];
+    assert!((elite.max_hp - w.hp * 3.2).abs() < 0.1);
+    assert!((elite.base_speed - w.speed * 1.14).abs() < 0.001);
+    assert_eq!(elite.bounty, normal_bounty * 2);
+    assert_eq!(elite.control_scale(), 0.5);
+    assert!(
+        g.creeps
+            .iter()
+            .filter(|c| !c.elite)
+            .all(|c| c.max_hp == w.hp)
+    );
 }
 
 #[test]
@@ -914,6 +1455,201 @@ fn a_sensible_build_clears_the_campaign() {
     );
 }
 
+/// The recommended mode is harder, but its milestone choices must make a
+/// thoughtful counter-build viable. A default mode that only the test-friendly
+/// Classic curve can finish would be a trap on the title screen.
+#[test]
+fn a_sensible_build_can_master_veteran() {
+    let mut g = Game::new();
+    g.start_run_with_difficulty(0x5CA1_AB1E, Difficulty::Veteran);
+    let mut plan = Planner::default();
+
+    for _ in 0..(CAMPAIGN_WAVES + 8) {
+        if matches!(g.phase, Phase::Defeat | Phase::Victory) {
+            break;
+        }
+        if g.pending_doctrine {
+            let pick = match g.doctrine_picks() {
+                0 | 2 => Doctrine::Arsenal,
+                _ => Doctrine::Overdrive,
+            };
+            g.choose_doctrine(pick);
+        }
+        plan.spend(&mut g);
+        let target = g.wave;
+        let mut elapsed = 0.0;
+        while g.wave == target && elapsed < WAVE_PERIOD * 3.0 {
+            g.update(1.0 / 60.0);
+            elapsed += 1.0 / 60.0;
+            if matches!(g.phase, Phase::Defeat | Phase::Victory) {
+                break;
+            }
+        }
+    }
+    let mut elapsed = 0.0;
+    while !matches!(g.phase, Phase::Defeat | Phase::Victory) && elapsed < 500.0 {
+        if g.pending_doctrine {
+            g.choose_doctrine(Doctrine::Arsenal);
+        }
+        plan.spend(&mut g);
+        for _ in 0..60 {
+            g.update(1.0 / 60.0);
+        }
+        elapsed += 1.0;
+    }
+
+    let surviving_commanders: Vec<(u32, u32, u32, bool)> = g
+        .creeps
+        .iter()
+        .filter(|c| c.is_boss())
+        .map(|c| (c.uid, c.laps, c.hp.max(0.0).round() as u32, c.flying))
+        .collect();
+    assert_eq!(
+        g.phase,
+        Phase::Victory,
+        "Veteran ended on wave {} with {}/{} circling, {} towers ({}), {}g cash, {}g earned, {}g spent, peak {}, commanders {:?}, and doctrines {:?}",
+        g.wave,
+        g.creeps.len(),
+        g.flood_limit(),
+        g.towers.len(),
+        board_summary(&g),
+        g.gold,
+        g.stats.gold_earned,
+        g.stats.gold_spent,
+        g.stats.peak_circling,
+        surviving_commanders,
+        g.doctrines
+    );
+    assert_eq!(g.doctrine_picks(), 3);
+    assert!(
+        g.stats.peak_circling >= 350,
+        "Veteran never created meaningful ring pressure: peak {}",
+        g.stats.peak_circling
+    );
+    assert!(
+        g.stats.gold_spent * 10 >= g.stats.gold_earned * 7,
+        "Veteran still handed the winning plan a large idle surplus: earned {}, spent {}",
+        g.stats.gold_earned,
+        g.stats.gold_spent
+    );
+}
+
+/// Spending every coin on a carpet of unupgraded starter towers is not a
+/// strategy. This board deliberately includes all eleven shop families and
+/// spreads them across random free pads, so it cannot fail merely because it
+/// forgot Air or Chaos. It must fail because late armour and Vanguards demand
+/// positioning, upgrades and a coherent damage plan.
+#[test]
+fn shallow_mixed_spam_cannot_clear_veteran() {
+    let mut g = Game::new();
+    g.start_run_with_difficulty(0xBAD5_EED, Difficulty::Veteran);
+    let shop = shop_order();
+    let mut next_family = 0usize;
+    let mut shuffle = crate::rng::Rng::new(0x5A11_0BAD);
+
+    for _ in 0..(CAMPAIGN_WAVES + 8) {
+        if matches!(g.phase, Phase::Defeat | Phase::Victory) {
+            break;
+        }
+        if g.pending_doctrine {
+            // Even giving spam the straightforward damage doctrine must not
+            // turn it into an accidental winning plan.
+            g.choose_doctrine(Doctrine::Arsenal);
+        }
+
+        for _ in 0..g.board.slots.len() {
+            let def = shop[next_family % shop.len()];
+            if !g.can_afford(TOWERS[def].gold) {
+                break;
+            }
+            let free: Vec<usize> = g
+                .board
+                .slots
+                .iter()
+                .enumerate()
+                .filter_map(|(i, s)| s.tower.is_none().then_some(i))
+                .collect();
+            if free.is_empty() {
+                break;
+            }
+            let slot = free[shuffle.next_u32() as usize % free.len()];
+            g.build_choice = Some((def, 1));
+            assert!(
+                g.try_build(slot),
+                "spam build should fit a free protected pad"
+            );
+            g.build_choice = None;
+            next_family += 1;
+        }
+
+        let target = g.wave;
+        let mut elapsed = 0.0;
+        while g.wave == target && elapsed < WAVE_PERIOD * 3.0 {
+            g.update(1.0 / 60.0);
+            elapsed += 1.0 / 60.0;
+            if matches!(g.phase, Phase::Defeat | Phase::Victory) {
+                break;
+            }
+        }
+    }
+
+    assert_eq!(
+        g.phase,
+        Phase::Defeat,
+        "{} randomly placed, unupgraded towers cleared Veteran at wave {}",
+        g.towers.len(),
+        g.wave
+    );
+    assert!(
+        g.wave >= 8,
+        "mixed spam failed on wave {} before all core counters were readable",
+        g.wave
+    );
+}
+
+/// Nightmare is the optimisation mode. The broad, forgiving plan that clears
+/// Veteran should make real progress but eventually drown here; otherwise the
+/// third button is only a different label on the same solved campaign.
+#[test]
+fn a_generalist_plan_does_not_trivialize_nightmare() {
+    let mut g = Game::new();
+    g.start_run_with_difficulty(0x5CA1_AB1E, Difficulty::Nightmare);
+    let mut plan = Planner::default();
+
+    for _ in 0..(CAMPAIGN_WAVES + 8) {
+        if matches!(g.phase, Phase::Defeat | Phase::Victory) {
+            break;
+        }
+        if g.pending_doctrine {
+            g.choose_doctrine(Doctrine::Arsenal);
+        }
+        plan.spend(&mut g);
+        let target = g.wave;
+        let mut elapsed = 0.0;
+        while g.wave == target && elapsed < WAVE_PERIOD * 3.0 {
+            g.update(1.0 / 60.0);
+            elapsed += 1.0 / 60.0;
+            if matches!(g.phase, Phase::Defeat | Phase::Victory) {
+                break;
+            }
+        }
+    }
+
+    assert_eq!(
+        g.phase,
+        Phase::Defeat,
+        "the generalist Veteran plan trivialised Nightmare at wave {} with {}/{} circling",
+        g.wave,
+        g.creeps.len(),
+        g.flood_limit()
+    );
+    assert!(
+        g.wave >= 7,
+        "Nightmare collapsed on wave {} before the first warned Air counter-check",
+        g.wave
+    );
+}
+
 /// And a board with no answer to the air does not.
 #[test]
 fn a_ground_only_board_drowns_in_the_air() {
@@ -950,7 +1686,7 @@ fn a_ground_only_board_drowns_in_the_air() {
 
 /// Buys towers the way a player would.
 ///
-/// Two rules, and between them they are the whole of the game's strategy:
+/// Three rules form the benchmark's basic strategy:
 ///
 ///   1. **Cover what is coming.** If an air wave is due and nothing on the
 ///      board can reach the air, or an Immune wave is due and nothing deals
@@ -958,6 +1694,8 @@ fn a_ground_only_board_drowns_in_the_air() {
 ///      rule the roster exists for: throughput alone loses on wave five.
 ///   2. **Otherwise, buy whatever is cheapest** - the next tower on the plan or
 ///      the cheapest upgrade on the board. A player with spare gold spends it.
+///   3. **Answer commanders with single-target burst.** Crowd splash cannot be
+///      allowed to masquerade as a complete build once marked bosses arrive.
 #[derive(Default)]
 struct Planner {
     built: usize,
@@ -966,12 +1704,9 @@ struct Planner {
 /// The order a board gets built in when nothing is urgent, as a repeating
 /// pattern rather than a fixed list.
 ///
-/// It used to be a list of exactly twenty-six, which was a sensible number when
-/// the lane was eighty-five tiles. The map's real circuit is two hundred and
-/// thirty-six, and a fixed twenty-six towers on it is a board with holes you
-/// could walk an army through - which is exactly what happened: the campaign
-/// test died on wave fifteen with twelve towers built and seven hundred and one
-/// monsters circling.
+/// Twenty-six entries are enough variety to keep the compact circuit covered,
+/// while repeating the pattern lets the plan add a third late-game layer when
+/// the final command waves justify it.
 const PLAN: [Family; 26] = [
     Family::Siege,
     Family::Siege,
@@ -1046,16 +1781,25 @@ impl Planner {
             // 2. Cover the lane before deepening anything on it, at whatever
             //    length this map's lane happens to be - see `coverage_target`.
             let target = coverage_target(g);
-            let build = if self.built < target * 2 {
+            // A third layer is late-game reinforcement, not cheap-tower spam:
+            // establish two layers, finish their upgrade paths, then add and
+            // finish one reserve tower at a time.
+            let mature = g
+                .towers
+                .iter()
+                .enumerate()
+                .all(|(ti, _)| g.upgrade_choices(ti).is_empty());
+            let can_expand = self.built < target * 2 || (self.built < target * 3 && mature);
+            let build = if can_expand {
                 let f = plan_at(self.built);
                 Some((f, seed_cost(f)))
             } else {
                 None
             };
             let up = cheapest_upgrade(g);
-            // Cover the whole lane before deepening any of it. Four very good
-            // towers watch a fraction of a two-hundred-tile circuit and the rest
-            // walks past them.
+            // Cover the whole lane before deepening any of it. A few very good
+            // towers still watch only a fraction of the compact circuit, while
+            // the rest of the wave walks past them.
             let spread = g.towers.len() < target;
             let take_build = match (build, up) {
                 (Some((_, bc)), Some((_, _, uc))) => spread || bc <= uc as i64,
@@ -1080,10 +1824,9 @@ impl Planner {
     /// Puts one tower of `family` down, through the seed if that is the only
     /// way to reach it. False if there is no pad or no money.
     ///
-    /// Beside the lane, spread along it. The arena is a thousand plots and only
-    /// the ones within a tower's reach of the corridor are worth anything - the
-    /// first free pad in index order is in the far corner of the field, and a
-    /// board built there fires at nothing at all.
+    /// Beside the lane, spread along it. The compact arena offers a deliberate
+    /// set of protected pads and only the ones within a tower's reach of the
+    /// corridor are worth anything.
     fn place(&mut self, g: &mut Game, family: Family) -> bool {
         // Spread along the whole lane, wrapping so a second pass fills the gaps
         // between the first rather than piling up past the end of it.
@@ -1141,6 +1884,13 @@ fn urgent(g: &Game) -> Option<Family> {
         .any(|t| matches!(t.attack(), Attack::Chaos | Attack::Hero));
     if !has_chaos && soon(|w| w.armour_type == ArmourType::Divine) {
         return Some(Family::Chaos);
+    }
+    let has_commander_hunter = g
+        .towers
+        .iter()
+        .any(|t| matches!(t.family(), Family::OneStrike | Family::King));
+    if !has_commander_hunter && soon(|w| w.tag == "Boss") {
+        return Some(Family::OneStrike);
     }
     None
 }

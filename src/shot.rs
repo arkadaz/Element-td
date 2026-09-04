@@ -289,7 +289,15 @@ pub fn capture_list(
             let light = shadow_view_proj(BW, BH, LIGHT_DIR);
             for _ in 0..2 {
                 renderer.prepare(
-                    device, queue, encoder, list, &[], &camera, &light, width, height,
+                    device,
+                    queue,
+                    encoder,
+                    list,
+                    &[],
+                    &camera,
+                    &light,
+                    width,
+                    height,
                     1.0 / 60.0,
                 );
             }

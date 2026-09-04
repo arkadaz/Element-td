@@ -298,10 +298,9 @@ impl Camera {
 
     /// Frames an arbitrary rectangle of the board: min x, min y, max x, max y.
     ///
-    /// The map is ninety-six tiles square and one player defends a corner of
-    /// it, so the camera frames that corner rather than the whole field - the
-    /// other seven arenas are scenery, and framing them would put this
-    /// player's lane in a twelfth of the screen.
+    /// The runtime board is the compact solo arena rather than all eight
+    /// sectors of the extracted Warcraft III terrain, so callers pass exactly
+    /// the rectangle the player is allowed to see.
     pub fn frame_rect(r: [f32; 4], aspect: f32, pitch: f32, yaw: f32, zoom: f32) -> Self {
         let (x0, y0, x1, y1) = (r[0], r[1], r[2], r[3]);
         let aspect = aspect.clamp(0.20, 8.0);
@@ -567,24 +566,28 @@ impl Rig {
     /// is what a check in this module's tests holds it to.
     pub fn pan_range(&self, span: f32, bounds: [f32; 4], reach: [f32; 4]) -> [f32; 4] {
         let d = self.distance(span);
-        let axis = |lo: f32, hi: f32, want: (f32, f32), foot: (f32, f32), inner: (f32, f32)| {
+        let axis = |lo: f32, hi: f32, want: (f32, f32), foot: (f32, f32), _inner: (f32, f32)| {
             // Where the arena alone would let the centre sit.
-            let (mut blo, mut bhi) = (lo - foot.0 * d, hi - foot.1 * d);
-            if blo > bhi {
+            let (blo, bhi) = (lo - foot.0 * d, hi - foot.1 * d);
+            let (blo, bhi) = if blo > bhi {
                 // Zoomed out far enough that one view already holds this axis
                 // of the arena, so there is nothing left to scroll towards:
-                // centre it. Collapsing *here*, before the reach below, is what
-                // stops the allowance growing without limit as the camera pulls
-                // back - it used to be applied to the combined range, so at full
-                // zoom-out the player could scroll a third of a screen onto
-                // ground with neither arena nor pads on it.
+                // centre the arena range before applying pad reach.
                 let mid = (blo + bhi) * 0.5;
-                blo = mid;
-                bhi = mid;
-            }
+                (mid, mid)
+            } else {
+                (blo, bhi)
+            };
             // Then widened, if that is what it takes to bring the outermost
-            // pads on screen. When the arena already fits, it is not.
-            (blo.min(want.0 - inner.0 * d), bhi.max(want.1 - inner.1 * d))
+            // pads on screen. A forty-five-degree perspective view does not
+            // have an axis-aligned guaranteed rectangle: clamping x and y
+            // independently to its bounding box could still leave a corner
+            // pad just outside a narrow portrait viewport. Letting the camera
+            // aim as far as the outermost pad is the small, exact guarantee.
+            // At extreme portrait ratios even the nominal fitted view misses
+            // the near corner of this perspective footprint, so pad reach is
+            // retained at the widest zoom too.
+            (blo.min(want.0), bhi.max(want.1))
         };
         let (x0, x1) = axis(
             bounds[0],

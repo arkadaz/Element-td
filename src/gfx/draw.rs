@@ -38,6 +38,7 @@ pub struct Instance {
 pub enum GroundTex {
     Grass = 0,
     Dirt = 1,
+    Stone = 3,
 }
 
 /// Common surface finishes, so call sites read as materials rather than numbers.
@@ -337,15 +338,7 @@ impl DrawList {
     /// a little muscle near `a`, which is most of what separates a drawn
     /// creature from a diagram of one.
     #[allow(clippy::too_many_arguments)]
-    pub fn limb(
-        &mut self,
-        a: [f32; 3],
-        b: [f32; 3],
-        w: f32,
-        color: Color,
-        mat: Material,
-        em: f32,
-    ) {
+    pub fn limb(&mut self, a: [f32; 3], b: [f32; 3], w: f32, color: Color, mat: Material, em: f32) {
         self.link(Shape::Taper, a, b, w, color, mat, em);
     }
 

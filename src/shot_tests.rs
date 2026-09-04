@@ -11,7 +11,7 @@ use std::path::PathBuf;
 
 use crate::decor::Decor;
 use crate::game::defs::*;
-use crate::game::{FLOOD_LIMIT, Game, Phase, WAVE_PERIOD};
+use crate::game::{Difficulty, Game, Phase, WAVE_PERIOD};
 use crate::gfx::Quality;
 use crate::shot;
 
@@ -34,7 +34,7 @@ fn out_dir() -> PathBuf {
 fn capture_a_playthrough() {
     let dir = out_dir();
     let mut g = Game::new();
-    g.start_run(0x5CA1_AB1E);
+    g.start_run_with_difficulty(0x5CA1_AB1E, Difficulty::Veteran);
     let decor = Decor::build(&g.board);
     let mut built = 0usize;
     let mut shots = 0;
@@ -43,6 +43,13 @@ fn capture_a_playthrough() {
     for target in AT {
         // Play forward to the wave we want a picture of.
         while g.wave < target && !matches!(g.phase, Phase::Defeat | Phase::Victory) {
+            if g.pending_doctrine {
+                let pick = match g.doctrine_picks() {
+                    0 | 2 => crate::game::Doctrine::Arsenal,
+                    _ => crate::game::Doctrine::Overdrive,
+                };
+                g.choose_doctrine(pick);
+            }
             super::game::tests::spend_for_shot(&mut g, &mut built);
             let dt = 1.0 / 60.0;
             let mut t = 0.0;
@@ -67,15 +74,27 @@ fn capture_a_playthrough() {
         }
         g.selected = None;
 
+        // Land on an active firing frame instead of photographing the quiet
+        // gap between two cooldowns. This makes the review capture exercise
+        // projectile silhouettes and impact shockwaves as well as towers.
+        for _ in 0..120 {
+            g.fx.particles.clear();
+            g.update(1.0 / 120.0);
+            if !g.projs.is_empty() || !g.beams.is_empty() {
+                break;
+            }
+        }
+
         let shot = shot::capture(&g, &decor, W, H, Quality::Ultra);
         let path = dir.join(format!("wave{:02}.png", g.wave));
         shot::write_png(&path, &shot).expect("could not write the PNG");
         shots += 1;
         println!(
-            "  wave {:>2}  {:>3} towers  {:>3}/{FLOOD_LIMIT} circling  ->  {}",
+            "  wave {:>2}  {:>3} towers  {:>3}/{} circling  ->  {}",
             g.wave,
             g.towers.len(),
             g.creeps.len(),
+            g.flood_limit(),
             path.display()
         );
     }
@@ -248,13 +267,31 @@ fn capture_the_interface() {
 
     // 1. The very first thing a run shows: the opening essence draft.
     let mut g = Game::new();
-    g.start_run(0x5CA1_AB1E);
+    g.start_run_with_difficulty(0x5CA1_AB1E, Difficulty::Veteran);
     let decor = Decor::build(&g.board);
     save(&dir, "ui_draft", &mut g, &decor);
+
+    // 1b. The premium hard-mode milestone choice. Keep this as an explicit
+    // state so the capture never has to play ten waves merely to inspect a
+    // modal's spacing and information hierarchy.
+    let mut doctrine = Game::new();
+    doctrine.start_run_with_difficulty(0x5CA1_AB1E, Difficulty::Veteran);
+    doctrine.wave = 10;
+    doctrine.pending_doctrine = true;
+    doctrine.paused = true;
+    let doctrine_decor = Decor::build(&doctrine.board);
+    save(&dir, "ui_command_upgrade", &mut doctrine, &doctrine_decor);
 
     // 2. Mid-game: a full build palette, the essence strip, a live wave.
     let mut built = 0usize;
     while g.wave < 30 && !matches!(g.phase, Phase::Defeat | Phase::Victory) {
+        if g.pending_doctrine {
+            let pick = match g.doctrine_picks() {
+                0 | 2 => crate::game::Doctrine::Arsenal,
+                _ => crate::game::Doctrine::Overdrive,
+            };
+            g.choose_doctrine(pick);
+        }
         super::game::tests::spend_for_shot(&mut g, &mut built);
         let was = g.wave;
         let mut t = 0.0;
@@ -262,6 +299,9 @@ fn capture_the_interface() {
             g.update(1.0 / 60.0);
             t += 1.0 / 60.0;
         }
+    }
+    if g.pending_doctrine {
+        g.choose_doctrine(crate::game::Doctrine::Arsenal);
     }
     for _ in 0..(WAVE_PERIOD * 0.5 * 60.0) as u32 {
         g.update(1.0 / 60.0);
@@ -274,6 +314,9 @@ fn capture_the_interface() {
 
     // 3. Under pressure, with the ring most of the way full.
     while g.wave < 66 && !matches!(g.phase, Phase::Defeat | Phase::Victory) {
+        if g.pending_doctrine {
+            g.choose_doctrine(crate::game::Doctrine::Arsenal);
+        }
         super::game::tests::spend_for_shot(&mut g, &mut built);
         let was = g.wave;
         let mut t = 0.0;
@@ -294,10 +337,11 @@ fn save(dir: &std::path::Path, name: &str, g: &mut Game, decor: &Decor) {
     let path = dir.join(format!("{name}.png"));
     crate::shot_ui::write_png(&path, &s).expect("could not write the PNG");
     println!(
-        "  {name:<12} wave {:>2}  {:>3} towers  {:>3}/{FLOOD_LIMIT} circling  {:>7} gold  ->  {}",
+        "  {name:<12} wave {:>2}  {:>3} towers  {:>3}/{} circling  {:>7} gold  ->  {}",
         g.wave,
         g.towers.len(),
         g.creeps.len(),
+        g.flood_limit(),
         g.gold,
         path.display()
     );
@@ -373,7 +417,7 @@ fn what_colour_is_the_grass() {
             shot.rgba[i + 2] as u32,
         )
     };
-    let mut patch = |name: &str, x0: usize, y0: usize, w: usize, h: usize| {
+    let patch = |name: &str, x0: usize, y0: usize, w: usize, h: usize| {
         let (mut r, mut gg, mut b) = (0u32, 0u32, 0u32);
         for y in y0..y0 + h {
             for x in x0..x0 + w {
@@ -384,7 +428,12 @@ fn what_colour_is_the_grass() {
             }
         }
         let n = (w * h) as u32;
-        println!("  {name:<10} rgb({:>3}, {:>3}, {:>3})", r / n, gg / n, b / n);
+        println!(
+            "  {name:<10} rgb({:>3}, {:>3}, {:>3})",
+            r / n,
+            gg / n,
+            b / n
+        );
     };
     println!();
     println!("frame averages:");
@@ -469,7 +518,7 @@ fn how_bright_is_a_busy_frame() {
     );
 
     // Band means: the lane runs across the upper third, the open field below.
-    let mut band = |name: &str, y0: usize, y1: usize| {
+    let band = |name: &str, y0: usize, y1: usize| {
         let (mut r, mut gg, mut b, mut n) = (0u64, 0u64, 0u64, 0u64);
         for y in y0..y1 {
             for x in 0..w {
@@ -574,4 +623,145 @@ fn capture_the_model_sheet() {
         n += 1;
     }
     assert!(n > 0, "TD_MODELS matched nothing");
+}
+
+/// One close render per command-card tower family. These are downloaded CC0
+/// assemblies, so a loader regression, bad source orientation, or mismatched
+/// scale must be visible before it reaches the board screenshots.
+#[test]
+#[ignore = "renders PNGs; run it deliberately"]
+fn capture_the_tower_roster() {
+    use crate::gfx::draw::DrawList;
+    use crate::view::towers;
+
+    let dir = out_dir();
+    let families = [
+        Family::Single,
+        Family::Siege,
+        Family::Bouncing,
+        Family::Multi,
+        Family::Corruption,
+        Family::Air,
+        Family::Chaos,
+        Family::Destruction,
+        Family::Aura,
+        Family::Demon,
+        Family::King,
+    ];
+    for family in families {
+        let mut g = Game::new();
+        g.start_run(17);
+        g.gold = 1_000_000;
+        g.build_choice = Some((family_start(family).expect("shop family"), 1));
+        let slot = g
+            .board
+            .slots
+            .iter()
+            .position(|s| s.tower.is_none())
+            .expect("free plot");
+        assert!(g.try_build(slot));
+        let tw = g.towers[0].clone();
+        let levels: Vec<usize> = TOWERS
+            .iter()
+            .enumerate()
+            .filter(|(_, def)| def.family == family)
+            .map(|(i, _)| i)
+            .collect();
+        let picks = if levels.len() <= 1 {
+            vec![0]
+        } else {
+            vec![0, levels.len() / 3, levels.len() * 2 / 3, levels.len() - 1]
+        };
+        let mut d = DrawList::default();
+        let middle = (picks.len().saturating_sub(1)) as f32 * 0.5;
+        for (column, pick) in picks.iter().copied().enumerate() {
+            let mut stage = tw.clone();
+            stage.def = levels[pick];
+            // Across the camera's right axis, not world X: at the game's
+            // 45-degree yaw, a row on X recedes into depth and the near tower
+            // fills the frame while the far one becomes a dot.
+            let across = (column as f32 - middle) * 1.65;
+            stage.pos = [
+                tw.pos[0] + across * std::f32::consts::FRAC_1_SQRT_2,
+                tw.pos[1] - across * std::f32::consts::FRAC_1_SQRT_2,
+            ];
+            stage.angle = 0.55;
+            towers::draw(&mut d, &stage, false, 2.0);
+        }
+        let centre = tw.pos;
+        let span = if picks.len() == 1 { 3.6 } else { 7.4 };
+        let image = crate::shot::capture_list(&d, centre, span, 42.0, 0.72, 960, 420);
+        let path = dir.join(format!("tower_{family:?}.png"));
+        crate::shot::write_png(&path, &image).expect("could not write the tower sheet");
+        println!("  {family:?} -> {}", path.display());
+    }
+}
+
+/// Rebuild the command-card atlas from the renderer itself. Every family gets
+/// its own column (so branch dressing and colour remain truthful) and each of
+/// the four construction milestones gets a row. Stages a short ladder cannot
+/// reach are filled with its nearest real stage but are never addressed by UI.
+#[test]
+#[ignore = "writes the production tower icon atlas; run it deliberately"]
+fn bake_matching_tower_icon_atlas() {
+    use crate::gfx::draw::DrawList;
+    use crate::shot::Shot;
+    use crate::view::towers;
+
+    const CELL: u32 = 128;
+    const STAGES: u32 = 4;
+    let width = CELL * Family::ALL.len() as u32;
+    let height = CELL * STAGES;
+    let mut atlas = Shot {
+        width,
+        height,
+        rgba: vec![0; (width * height * 4) as usize],
+    };
+
+    for family in Family::ALL {
+        let mut g = Game::new();
+        g.start_run(17);
+        g.gold = 1_000_000;
+        g.build_choice = Some((family_start(Family::Single).expect("seed tower"), 1));
+        assert!(g.try_build(0));
+        let base = g.towers[0].clone();
+        let levels: Vec<usize> = TOWERS
+            .iter()
+            .enumerate()
+            .filter(|(_, def)| def.family == family)
+            .map(|(i, _)| i)
+            .collect();
+        assert!(!levels.is_empty(), "{family:?} has no tower levels");
+
+        let centre = base.pos;
+        for stage in 0..STAGES as usize {
+            let def_i = *levels
+                .iter()
+                .min_by_key(|&&i| tower_visual_stage(&TOWERS[i]).abs_diff(stage))
+                .expect("family level");
+            let mut tower = base.clone();
+            tower.def = def_i;
+            tower.angle = 0.55;
+            tower.built_at = 0.0;
+            let mut draw = DrawList::default();
+            towers::draw(&mut draw, &tower, false, 10.0);
+            // Match the close roster camera but render one square at a time.
+            // That keeps each tower centred and stops adjacent silhouettes
+            // leaking across atlas cells.
+            let icon = crate::shot::capture_list(&draw, centre, 2.9, 42.0, 0.72, CELL, CELL);
+            let dst_col = family.icon_slot() as u32;
+            for y in 0..CELL {
+                let src = (y * CELL * 4) as usize;
+                let dst = ((((stage as u32 * CELL + y) * width) + dst_col * CELL) * 4) as usize;
+                atlas.rgba[dst..dst + (CELL * 4) as usize]
+                    .copy_from_slice(&icon.rgba[src..src + (CELL * 4) as usize]);
+            }
+        }
+    }
+
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("assets")
+        .join("tower_icons.png");
+    crate::shot::write_png(&path, &atlas).expect("could not write matching icon atlas");
+    println!("  matching tower icon atlas -> {}", path.display());
 }

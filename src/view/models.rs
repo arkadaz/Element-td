@@ -95,6 +95,9 @@ impl Pose {
 /// the colour the material actually is.
 #[derive(Clone, Copy)]
 pub struct Skin {
+    /// 0..1 damage/upgrade flash. Baked models use this as their instance tint;
+    /// generated models apply it while constructing every material colour.
+    pub flash: f32,
     /// The identity colour. Cloth, banners, crests, gems.
     pub body: Color,
     /// A darker version of it, for trim and shadowed cloth.
@@ -127,6 +130,7 @@ impl Skin {
         let b = mix(accent, [1.0, 1.0, 1.0], flash * 0.5);
         let hit = |c: [f32; 3]| rgba(mix(c, [1.0, 0.86, 0.76], flash * 0.55), 1.0);
         Skin {
+            flash,
             // Banners, crests and gems - the only parts wearing the accent.
             body: rgba(b, 1.0),
             dark: rgba(mix(b, [0.04, 0.04, 0.06], 0.55), 1.0),
@@ -147,6 +151,7 @@ impl Skin {
         let b = mix(base, [1.0, 1.0, 1.0], flash * 0.75);
         let hit = |c: [f32; 3]| rgba(mix(c, [1.0, 0.85, 0.75], flash * 0.7), 1.0);
         Skin {
+            flash,
             body: rgba(b, 1.0),
             dark: rgba(mix(b, [0.04, 0.04, 0.06], 0.55), 1.0),
             bone: hit([0.58, 0.55, 0.44]),
@@ -204,67 +209,322 @@ fn hide_of(m: Model) -> Hide {
     use Model::*;
     match m {
         // ------------------------------------------------------------ people
-        Acolyte => hide([0.55, 0.57, 0.49], [0.17, 0.13, 0.21], IRON_C, [0.45, 0.95, 0.55]),
-        Archer => hide([0.60, 0.53, 0.68], [0.15, 0.35, 0.29], STEEL_C, [0.70, 0.95, 0.60]),
-        Mage => hide([0.71, 0.55, 0.43], [0.19, 0.27, 0.56], STEEL_C, [0.45, 0.80, 1.00]),
-        Warrior => hide([0.34, 0.49, 0.24], [0.36, 0.22, 0.14], IRON_C, [0.95, 0.70, 0.25]),
-        Demon => hide([0.50, 0.19, 0.20], [0.16, 0.10, 0.14], IRON_C, [0.55, 1.00, 0.30]),
-        Brute => hide([0.53, 0.38, 0.26], [0.36, 0.25, 0.16], BRONZE_C, [0.95, 0.75, 0.35]),
-        Troll => hide([0.28, 0.45, 0.44], [0.46, 0.30, 0.16], BRONZE_C, [0.60, 1.00, 0.75]),
-        Gnoll => hide([0.50, 0.40, 0.26], [0.37, 0.26, 0.17], IRON_C, [0.95, 0.80, 0.40]),
+        Acolyte => hide(
+            [0.55, 0.57, 0.49],
+            [0.17, 0.13, 0.21],
+            IRON_C,
+            [0.45, 0.95, 0.55],
+        ),
+        Archer => hide(
+            [0.60, 0.53, 0.68],
+            [0.15, 0.35, 0.29],
+            STEEL_C,
+            [0.70, 0.95, 0.60],
+        ),
+        Mage => hide(
+            [0.71, 0.55, 0.43],
+            [0.19, 0.27, 0.56],
+            STEEL_C,
+            [0.45, 0.80, 1.00],
+        ),
+        Warrior => hide(
+            [0.34, 0.49, 0.24],
+            [0.36, 0.22, 0.14],
+            IRON_C,
+            [0.95, 0.70, 0.25],
+        ),
+        Demon => hide(
+            [0.50, 0.19, 0.20],
+            [0.16, 0.10, 0.14],
+            IRON_C,
+            [0.55, 1.00, 0.30],
+        ),
+        Brute => hide(
+            [0.53, 0.38, 0.26],
+            [0.36, 0.25, 0.16],
+            BRONZE_C,
+            [0.95, 0.75, 0.35],
+        ),
+        Troll => hide(
+            [0.28, 0.45, 0.44],
+            [0.46, 0.30, 0.16],
+            BRONZE_C,
+            [0.60, 1.00, 0.75],
+        ),
+        Gnoll => hide(
+            [0.50, 0.40, 0.26],
+            [0.37, 0.26, 0.17],
+            IRON_C,
+            [0.95, 0.80, 0.40],
+        ),
         Skeleton => hide(BONE_C, [0.18, 0.16, 0.15], IRON_C, [0.45, 1.00, 0.50]),
-        Wraith => hide([0.47, 0.58, 0.72], [0.16, 0.19, 0.28], IRON_C, [0.50, 0.85, 1.00]),
-        Naga => hide([0.19, 0.44, 0.46], [0.30, 0.22, 0.36], BRONZE_C, [0.40, 0.95, 1.00]),
-        Rifleman => hide([0.73, 0.55, 0.41], [0.43, 0.21, 0.15], STEEL_C, [0.95, 0.80, 0.35]),
-        Villager => hide([0.72, 0.56, 0.44], [0.54, 0.45, 0.33], IRON_C, [0.95, 0.85, 0.50]),
-        Panda => hide([0.78, 0.76, 0.70], [0.24, 0.42, 0.33], BRONZE_C, [0.95, 0.75, 0.35]),
+        Wraith => hide(
+            [0.47, 0.58, 0.72],
+            [0.16, 0.19, 0.28],
+            IRON_C,
+            [0.50, 0.85, 1.00],
+        ),
+        Naga => hide(
+            [0.19, 0.44, 0.46],
+            [0.30, 0.22, 0.36],
+            BRONZE_C,
+            [0.40, 0.95, 1.00],
+        ),
+        Rifleman => hide(
+            [0.73, 0.55, 0.41],
+            [0.43, 0.21, 0.15],
+            STEEL_C,
+            [0.95, 0.80, 0.35],
+        ),
+        Villager => hide(
+            [0.72, 0.56, 0.44],
+            [0.54, 0.45, 0.33],
+            IRON_C,
+            [0.95, 0.85, 0.50],
+        ),
+        Panda => hide(
+            [0.78, 0.76, 0.70],
+            [0.24, 0.42, 0.33],
+            BRONZE_C,
+            [0.95, 0.75, 0.35],
+        ),
         // ------------------------------------------------------------ beasts
-        Bear => hide([0.36, 0.26, 0.17], [0.30, 0.22, 0.15], BRONZE_C, [0.95, 0.80, 0.40]),
-        Mammoth => hide([0.42, 0.32, 0.22], [0.38, 0.24, 0.15], BRONZE_C, [0.95, 0.85, 0.55]),
-        Centaur => hide([0.43, 0.30, 0.20], [0.34, 0.23, 0.15], BRONZE_C, [0.95, 0.78, 0.35]),
-        Lizard => hide([0.31, 0.44, 0.23], [0.40, 0.28, 0.16], BRONZE_C, [0.95, 0.75, 0.30]),
-        Crab => hide([0.60, 0.30, 0.18], [0.34, 0.22, 0.16], BRONZE_C, [0.95, 0.70, 0.35]),
-        Spider => hide([0.22, 0.16, 0.26], [0.16, 0.12, 0.18], IRON_C, [0.55, 1.00, 0.40]),
-        Serpent => hide([0.23, 0.43, 0.28], [0.20, 0.30, 0.22], BRONZE_C, [0.70, 1.00, 0.50]),
-        Turtle => hide([0.30, 0.38, 0.26], [0.34, 0.30, 0.20], BRONZE_C, [0.60, 0.95, 0.60]),
-        Ent => hide([0.30, 0.24, 0.16], [0.23, 0.42, 0.19], BRONZE_C, [0.70, 1.00, 0.45]),
+        Bear => hide(
+            [0.36, 0.26, 0.17],
+            [0.30, 0.22, 0.15],
+            BRONZE_C,
+            [0.95, 0.80, 0.40],
+        ),
+        Mammoth => hide(
+            [0.42, 0.32, 0.22],
+            [0.38, 0.24, 0.15],
+            BRONZE_C,
+            [0.95, 0.85, 0.55],
+        ),
+        Centaur => hide(
+            [0.43, 0.30, 0.20],
+            [0.34, 0.23, 0.15],
+            BRONZE_C,
+            [0.95, 0.78, 0.35],
+        ),
+        Lizard => hide(
+            [0.31, 0.44, 0.23],
+            [0.40, 0.28, 0.16],
+            BRONZE_C,
+            [0.95, 0.75, 0.30],
+        ),
+        Crab => hide(
+            [0.60, 0.30, 0.18],
+            [0.34, 0.22, 0.16],
+            BRONZE_C,
+            [0.95, 0.70, 0.35],
+        ),
+        Spider => hide(
+            [0.22, 0.16, 0.26],
+            [0.16, 0.12, 0.18],
+            IRON_C,
+            [0.55, 1.00, 0.40],
+        ),
+        Serpent => hide(
+            [0.23, 0.43, 0.28],
+            [0.20, 0.30, 0.22],
+            BRONZE_C,
+            [0.70, 1.00, 0.50],
+        ),
+        Turtle => hide(
+            [0.30, 0.38, 0.26],
+            [0.34, 0.30, 0.20],
+            BRONZE_C,
+            [0.60, 0.95, 0.60],
+        ),
+        Ent => hide(
+            [0.30, 0.24, 0.16],
+            [0.23, 0.42, 0.19],
+            BRONZE_C,
+            [0.70, 1.00, 0.45],
+        ),
         Golem => hide(STONE_C, [0.30, 0.28, 0.24], IRON_C, [0.60, 0.85, 1.00]),
-        Giant => hide([0.35, 0.42, 0.46], [0.26, 0.30, 0.32], STEEL_C, [0.55, 0.85, 1.00]),
-        Infernal => hide([0.25, 0.21, 0.19], [0.20, 0.14, 0.12], IRON_C, [1.00, 0.50, 0.15]),
-        FlameLord => hide([0.55, 0.22, 0.10], [0.35, 0.15, 0.08], IRON_C, [1.00, 0.62, 0.18]),
+        Giant => hide(
+            [0.35, 0.42, 0.46],
+            [0.26, 0.30, 0.32],
+            STEEL_C,
+            [0.55, 0.85, 1.00],
+        ),
+        Infernal => hide(
+            [0.25, 0.21, 0.19],
+            [0.20, 0.14, 0.12],
+            IRON_C,
+            [1.00, 0.50, 0.15],
+        ),
+        FlameLord => hide(
+            [0.55, 0.22, 0.10],
+            [0.35, 0.15, 0.08],
+            IRON_C,
+            [1.00, 0.62, 0.18],
+        ),
         // ------------------------------------------------------------- wings
-        Gyrocopter => hide([0.44, 0.36, 0.24], [0.40, 0.30, 0.18], STEEL_C, [0.95, 0.80, 0.35]),
-        Phoenix => hide([0.80, 0.42, 0.12], [0.60, 0.26, 0.10], BRONZE_C, [1.00, 0.72, 0.25]),
-        Harpy => hide([0.44, 0.30, 0.50], [0.30, 0.20, 0.34], IRON_C, [0.85, 0.60, 1.00]),
-        Dragon => hide([0.52, 0.39, 0.20], [0.38, 0.28, 0.16], BRONZE_C, [0.95, 0.78, 0.30]),
-        FrostWyrm => hide([0.60, 0.70, 0.79], [0.28, 0.36, 0.44], STEEL_C, [0.55, 0.88, 1.00]),
+        Gyrocopter => hide(
+            [0.44, 0.36, 0.24],
+            [0.40, 0.30, 0.18],
+            STEEL_C,
+            [0.95, 0.80, 0.35],
+        ),
+        Phoenix => hide(
+            [0.80, 0.42, 0.12],
+            [0.60, 0.26, 0.10],
+            BRONZE_C,
+            [1.00, 0.72, 0.25],
+        ),
+        Harpy => hide(
+            [0.44, 0.30, 0.50],
+            [0.30, 0.20, 0.34],
+            IRON_C,
+            [0.85, 0.60, 1.00],
+        ),
+        Dragon => hide(
+            [0.52, 0.39, 0.20],
+            [0.38, 0.28, 0.16],
+            BRONZE_C,
+            [0.95, 0.78, 0.30],
+        ),
+        FrostWyrm => hide(
+            [0.60, 0.70, 0.79],
+            [0.28, 0.36, 0.44],
+            STEEL_C,
+            [0.55, 0.88, 1.00],
+        ),
         // ---------------------------------------------------------- machines
         Turret => hide(STEEL_C, [0.30, 0.28, 0.26], IRON_C, [0.95, 0.75, 0.30]),
-        Turbolazer => hide([0.38, 0.42, 0.48], [0.24, 0.28, 0.34], STEEL_C, [0.45, 0.85, 1.00]),
-        RebelTurret => hide([0.42, 0.38, 0.30], [0.34, 0.26, 0.18], IRON_C, [1.00, 0.65, 0.25]),
-        Vulcan => hide([0.34, 0.36, 0.40], [0.26, 0.26, 0.28], IRON_C, [1.00, 0.60, 0.20]),
-        SamSite => hide([0.40, 0.42, 0.44], [0.30, 0.32, 0.34], STEEL_C, [1.00, 0.35, 0.25]),
-        Cannon => hide([0.30, 0.31, 0.34], [0.36, 0.26, 0.16], IRON_C, [1.00, 0.62, 0.20]),
-        MeatWagon => hide([0.36, 0.28, 0.20], [0.44, 0.30, 0.28], IRON_C, [0.60, 1.00, 0.45]),
-        Ship => hide([0.42, 0.31, 0.19], [0.56, 0.50, 0.40], BRONZE_C, [0.95, 0.80, 0.40]),
+        Turbolazer => hide(
+            [0.38, 0.42, 0.48],
+            [0.24, 0.28, 0.34],
+            STEEL_C,
+            [0.45, 0.85, 1.00],
+        ),
+        RebelTurret => hide(
+            [0.42, 0.38, 0.30],
+            [0.34, 0.26, 0.18],
+            IRON_C,
+            [1.00, 0.65, 0.25],
+        ),
+        Vulcan => hide(
+            [0.34, 0.36, 0.40],
+            [0.26, 0.26, 0.28],
+            IRON_C,
+            [1.00, 0.60, 0.20],
+        ),
+        SamSite => hide(
+            [0.40, 0.42, 0.44],
+            [0.30, 0.32, 0.34],
+            STEEL_C,
+            [1.00, 0.35, 0.25],
+        ),
+        Cannon => hide(
+            [0.30, 0.31, 0.34],
+            [0.36, 0.26, 0.16],
+            IRON_C,
+            [1.00, 0.62, 0.20],
+        ),
+        MeatWagon => hide(
+            [0.36, 0.28, 0.20],
+            [0.44, 0.30, 0.28],
+            IRON_C,
+            [0.60, 1.00, 0.45],
+        ),
+        Ship => hide(
+            [0.42, 0.31, 0.19],
+            [0.56, 0.50, 0.40],
+            BRONZE_C,
+            [0.95, 0.80, 0.40],
+        ),
         // --------------------------------------------------------- buildings
         Obelisk => hide(STONE_C, [0.28, 0.30, 0.34], BRONZE_C, [0.55, 0.80, 1.00]),
-        MagicTower => hide([0.44, 0.44, 0.46], [0.22, 0.28, 0.48], STEEL_C, [0.50, 0.80, 1.00]),
-        Observatory => hide([0.46, 0.44, 0.40], [0.28, 0.34, 0.42], BRONZE_C, [0.60, 0.90, 1.00]),
-        DemonGate => hide([0.26, 0.22, 0.24], [0.20, 0.12, 0.16], IRON_C, [0.60, 1.00, 0.35]),
-        Altar => hide([0.44, 0.42, 0.37], [0.34, 0.24, 0.30], BRONZE_C, [0.95, 0.80, 0.35]),
-        Burrow => hide([0.36, 0.28, 0.19], [0.34, 0.30, 0.20], BRONZE_C, [0.95, 0.78, 0.35]),
-        Tentacle => hide([0.40, 0.20, 0.34], [0.26, 0.14, 0.22], IRON_C, [0.80, 0.45, 1.00]),
+        MagicTower => hide(
+            [0.44, 0.44, 0.46],
+            [0.22, 0.28, 0.48],
+            STEEL_C,
+            [0.50, 0.80, 1.00],
+        ),
+        Observatory => hide(
+            [0.46, 0.44, 0.40],
+            [0.28, 0.34, 0.42],
+            BRONZE_C,
+            [0.60, 0.90, 1.00],
+        ),
+        DemonGate => hide(
+            [0.26, 0.22, 0.24],
+            [0.20, 0.12, 0.16],
+            IRON_C,
+            [0.60, 1.00, 0.35],
+        ),
+        Altar => hide(
+            [0.44, 0.42, 0.37],
+            [0.34, 0.24, 0.30],
+            BRONZE_C,
+            [0.95, 0.80, 0.35],
+        ),
+        Burrow => hide(
+            [0.36, 0.28, 0.19],
+            [0.34, 0.30, 0.20],
+            BRONZE_C,
+            [0.95, 0.78, 0.35],
+        ),
+        Tentacle => hide(
+            [0.40, 0.20, 0.34],
+            [0.26, 0.14, 0.22],
+            IRON_C,
+            [0.80, 0.45, 1.00],
+        ),
         // -------------------------------------------------- props and effects
-        Wisp => hide([0.55, 0.80, 0.60], [0.30, 0.45, 0.34], BRONZE_C, [0.65, 1.00, 0.70]),
+        Wisp => hide(
+            [0.55, 0.80, 0.60],
+            [0.30, 0.45, 0.34],
+            BRONZE_C,
+            [0.65, 1.00, 0.70],
+        ),
         SkullPile => hide(BONE_C, [0.22, 0.20, 0.17], IRON_C, [0.50, 1.00, 0.50]),
-        IceTorch => hide([0.58, 0.70, 0.80], [0.28, 0.36, 0.44], STEEL_C, [0.55, 0.88, 1.00]),
-        EggSack => hide([0.38, 0.46, 0.26], [0.28, 0.34, 0.20], BRONZE_C, [0.65, 1.00, 0.45]),
-        Snowman => hide([0.80, 0.83, 0.86], [0.44, 0.24, 0.20], IRON_C, [0.70, 0.90, 1.00]),
-        ThornsAura => hide([0.30, 0.40, 0.22], [0.24, 0.34, 0.18], BRONZE_C, [0.70, 1.00, 0.45]),
-        CommandAura => hide([0.46, 0.38, 0.24], [0.42, 0.28, 0.16], BRONZE_C, [1.00, 0.82, 0.35]),
-        ControlMagic => hide([0.42, 0.40, 0.50], [0.28, 0.26, 0.40], STEEL_C, [0.70, 0.70, 1.00]),
-        DarkPortal => hide([0.28, 0.22, 0.30], [0.20, 0.14, 0.24], IRON_C, [0.75, 0.45, 1.00]),
+        IceTorch => hide(
+            [0.58, 0.70, 0.80],
+            [0.28, 0.36, 0.44],
+            STEEL_C,
+            [0.55, 0.88, 1.00],
+        ),
+        EggSack => hide(
+            [0.38, 0.46, 0.26],
+            [0.28, 0.34, 0.20],
+            BRONZE_C,
+            [0.65, 1.00, 0.45],
+        ),
+        Snowman => hide(
+            [0.80, 0.83, 0.86],
+            [0.44, 0.24, 0.20],
+            IRON_C,
+            [0.70, 0.90, 1.00],
+        ),
+        ThornsAura => hide(
+            [0.30, 0.40, 0.22],
+            [0.24, 0.34, 0.18],
+            BRONZE_C,
+            [0.70, 1.00, 0.45],
+        ),
+        CommandAura => hide(
+            [0.46, 0.38, 0.24],
+            [0.42, 0.28, 0.16],
+            BRONZE_C,
+            [1.00, 0.82, 0.35],
+        ),
+        ControlMagic => hide(
+            [0.42, 0.40, 0.50],
+            [0.28, 0.26, 0.40],
+            STEEL_C,
+            [0.70, 0.70, 1.00],
+        ),
+        DarkPortal => hide(
+            [0.28, 0.22, 0.30],
+            [0.20, 0.14, 0.24],
+            IRON_C,
+            [0.75, 0.45, 1.00],
+        ),
     }
 }
 
@@ -299,13 +559,49 @@ fn baked(m: Model) -> Option<usize> {
     table[i]
 }
 
-/// How tall a baked model stands, in units of `Pose::r`.
+/// Scale applied to the baked model envelope, in units of `Pose::r`.
 ///
-/// The bake normalises every model to exactly one unit tall so that this number
-/// means the same thing for all of them; a creep's `r` is its collision radius,
-/// and a figure roughly two and a half radii tall is what the generated builds
-/// were already drawing.
-const BAKED_HEIGHT: f32 = 2.6;
+/// Upright figures are normalised to one unit tall; wide aircraft and ships are
+/// footprint-limited and therefore shorter. A creep's `r` is its collision
+/// radius, and a figure roughly two and a half radii tall is what the generated
+/// builds were already drawing.
+const BAKED_HEIGHT: f32 = 2.45;
+
+/// Draw a named mesh that is not a Warcraft III archetype, such as one of the
+/// CC0 Quaternius weapon turrets baked into the same runtime asset.
+///
+/// Returns false when the asset is absent so callers can retain a safe
+/// generated fallback without silently drawing nothing.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_downloaded(
+    d: &mut DrawList,
+    name: &str,
+    pos: [f32; 3],
+    scale: f32,
+    yaw: f32,
+    color: Color,
+    mat: Material,
+    em: f32,
+) -> bool {
+    let Some((_, slot)) = crate::gfx::mesh::model_slots()
+        .iter()
+        .find(|(asset, _)| asset == name)
+    else {
+        return false;
+    };
+    d.model(
+        *slot,
+        pos,
+        [scale, scale, scale],
+        yaw,
+        0.0,
+        0.0,
+        color,
+        mat,
+        em,
+    );
+    true
+}
 
 pub fn draw(d: &mut DrawList, m: Model, p: &Pose, s: &Skin) {
     if let Some(slot) = baked(m) {
@@ -316,23 +612,39 @@ pub fn draw(d: &mut DrawList, m: Model, p: &Pose, s: &Skin) {
             // The mesh stands on z = 0 and is one unit tall, so a uniform scale
             // is the whole transform.
             [h, h, h],
-            // The models face +x at rest; the game's yaw has them facing the
-            // way they walk.
-            p.yaw,
+            // The downloaded glTF figures face local -Y after the bake's
+            // Y-up to Z-up conversion. The simulation's zero heading is +X,
+            // so a quarter turn aligns every creature's authored front with
+            // its velocity. Generated fallbacks below are authored +X and do
+            // not receive this correction.
+            p.yaw + std::f32::consts::FRAC_PI_2,
             0.0,
             // Where in the stride this one is. `Pose::t` is already staggered
             // per unit, so a wave does not march in lockstep; a unit that is
             // not walking is frozen at the pose the bake chose.
             if p.walk { p.t * 0.72 } else { 0.0 },
-            // White, so the model's own baked colours come through untouched.
-            // The hit flash still reads, because `Skin::wearing` puts it here.
-            [1.0, 1.0, 1.0, 1.0],
-            Material::CHITIN,
+            // Preserve the author's vertex colours, with a warm, short hit
+            // flash carried by the instance. The old all-white tint meant
+            // downloaded models never reacted when damaged or upgraded.
+            [1.0, 1.0 - s.flash * 0.30, 1.0 - s.flash * 0.40, 1.0],
+            baked_material(m),
             0.0,
         );
         return;
     }
     draw_generated(d, m, p, s)
+}
+
+fn baked_material(m: Model) -> Material {
+    use Model::*;
+    match m {
+        Turret | Turbolazer | RebelTurret | Vulcan | SamSite | Gyrocopter => Material::METAL,
+        Cannon | MeatWagon | Ship | Burrow => Material::WOOD,
+        Obelisk | MagicTower | Observatory | DemonGate | Altar | DarkPortal => Material::STONE,
+        IceTorch | ControlMagic | Wisp | ThornsAura | CommandAura => Material::GEM,
+        Ent | SkullPile | Snowman => Material::EARTH,
+        _ => Material::CHITIN,
+    }
 }
 
 fn draw_generated(d: &mut DrawList, m: Model, p: &Pose, s: &Skin) {
@@ -649,7 +961,15 @@ fn sword(d: &mut DrawList, p: &Pose, grip: [f32; 3], tip: [f32; 3], s: &Skin) {
         STEEL,
         0.0,
     );
-    d.link(Shape::Prism, at(0.14), at(0.94), r * 0.105, s.steel, STEEL, 0.0);
+    d.link(
+        Shape::Prism,
+        at(0.14),
+        at(0.94),
+        r * 0.105,
+        s.steel,
+        STEEL,
+        0.0,
+    );
     d.link(Shape::Cone, at(0.90), tip, r * 0.10, s.steel, STEEL, 0.0);
     if p.fine() {
         d.link(
@@ -824,7 +1144,11 @@ fn wings(d: &mut DrawList, p: &Pose, z: f32, span: f32, col: Color, membrane: bo
 /// A cloak hanging off the shoulders, swaying with the stride.
 fn cloak(d: &mut DrawList, p: &Pose, z: f32, len: f32, col: Color) {
     let r = p.r;
-    let sway = if p.walk { (p.t * 2.0).sin() * 0.14 } else { 0.0 };
+    let sway = if p.walk {
+        (p.t * 2.0).sin() * 0.14
+    } else {
+        0.0
+    };
     d.shape(
         Shape::Cone,
         p.p3(-r * 0.42, 0.0, z - len * 0.42),
@@ -1127,7 +1451,11 @@ fn soldier(d: &mut DrawList, p: &Pose, s: &Skin, arms: Arms) {
         s.glow,
     );
 
-    let swing = if p.walk { (p.t * 2.2).sin() * r * 0.18 } else { 0.0 };
+    let swing = if p.walk {
+        (p.t * 2.2).sin() * r * 0.18
+    } else {
+        0.0
+    };
     match arms {
         Arms::None => {
             for side in [-1.0f32, 1.0] {
@@ -1370,12 +1698,28 @@ fn skeleton(d: &mut DrawList, p: &Pose, s: &Skin) {
         STONE,
         0.0,
     );
-    eyes(d, p, head, p.z + chest + r * 0.64, r * 0.22, r * 0.14, s.glow);
+    eyes(
+        d,
+        p,
+        head,
+        p.z + chest + r * 0.64,
+        r * 0.22,
+        r * 0.14,
+        s.glow,
+    );
     for side in [-1.0f32, 1.0] {
         let shoulder = p.p3(0.0, side * r * 0.46, chest + r * 0.22);
         let elbow = p.p3(r * 0.22, side * r * 0.70, chest - r * 0.22);
         let hand = p.p3(r * 0.44, side * r * 0.66, hip + r * 0.06);
-        d.link(Shape::Capsule, shoulder, elbow, r * 0.062, s.bone, STONE, 0.0);
+        d.link(
+            Shape::Capsule,
+            shoulder,
+            elbow,
+            r * 0.062,
+            s.bone,
+            STONE,
+            0.0,
+        );
         d.link(Shape::Capsule, elbow, hand, r * 0.055, s.bone, STONE, 0.0);
         if side > 0.0 {
             sword(
@@ -1498,7 +1842,15 @@ fn demon(d: &mut DrawList, p: &Pose, s: &Skin) {
         0.0,
     );
     horns(d, p, head, p.z + chest + r * 0.98, r * 0.85, s.bone);
-    eyes(d, p, head, p.z + chest + r * 0.80, r * 0.28, r * 0.18, s.glow);
+    eyes(
+        d,
+        p,
+        head,
+        p.z + chest + r * 0.80,
+        r * 0.28,
+        r * 0.18,
+        s.glow,
+    );
     wings(d, p, chest + r * 0.30, r * 2.3, s.dark, true);
     p.glow(d, p.p3(0.0, 0.0, chest), r * 2.0, 0.25, s.glow);
 }
@@ -1570,7 +1922,15 @@ fn brute(d: &mut DrawList, p: &Pose, s: &Skin) {
         0.0,
     );
     horns(d, p, head, p.z + chest + r * 0.82, r * 0.85, s.bone);
-    eyes(d, p, head, p.z + chest + r * 0.76, r * 0.26, r * 0.20, s.glow);
+    eyes(
+        d,
+        p,
+        head,
+        p.z + chest + r * 0.76,
+        r * 0.26,
+        r * 0.20,
+        s.glow,
+    );
 }
 
 /// The Brewmaster: round, wide-legged, and carrying a barrel.
@@ -1618,7 +1978,12 @@ fn panda(d: &mut DrawList, p: &Pose, s: &Skin) {
     );
     for side in [-1.0f32, 1.0] {
         let e = p.at(r * 0.25, side * r * 0.48);
-        d.sphere([e[0], e[1], p.z + chest + r * 1.40], r * 0.30, s.dark, FLESH);
+        d.sphere(
+            [e[0], e[1], p.z + chest + r * 1.40],
+            r * 0.30,
+            s.dark,
+            FLESH,
+        );
         if p.fine() {
             let q = p.at(r * 0.60, side * r * 0.26);
             d.shape(
@@ -1643,7 +2008,15 @@ fn panda(d: &mut DrawList, p: &Pose, s: &Skin) {
         FLESH,
         0.0,
     );
-    eyes(d, p, head, p.z + chest + r * 1.06, r * 0.20, r * 0.24, s.glow);
+    eyes(
+        d,
+        p,
+        head,
+        p.z + chest + r * 1.06,
+        r * 0.20,
+        r * 0.24,
+        s.glow,
+    );
     let ba = p.p3(-r * 0.85, -r * 0.38, chest + r * 0.10);
     let bb = p.p3(-r * 0.85, r * 0.38, chest + r * 0.10);
     d.link(Shape::Cylinder, ba, bb, r * 0.52, s.wood, WOOD, 0.0);
@@ -1764,7 +2137,15 @@ fn troll(d: &mut DrawList, p: &Pose, s: &Skin) {
             );
         }
     }
-    eyes(d, p, head, p.z + chest + r * 0.46, r * 0.22, r * 0.16, s.glow);
+    eyes(
+        d,
+        p,
+        head,
+        p.z + chest + r * 0.46,
+        r * 0.22,
+        r * 0.16,
+        s.glow,
+    );
     let butt = p.p3(-r * 0.55, -r * 0.80, chest - r * 0.60);
     let tip = p.p3(r * 1.30, -r * 0.62, chest + r * 1.00);
     d.link(Shape::Cylinder, butt, tip, r * 0.055, s.wood, WOOD, 0.0);
@@ -1850,7 +2231,15 @@ fn gnoll(d: &mut DrawList, p: &Pose, s: &Skin) {
             0.0,
         );
     }
-    eyes(d, p, head, p.z + chest + r * 0.52, r * 0.18, r * 0.15, s.glow);
+    eyes(
+        d,
+        p,
+        head,
+        p.z + chest + r * 0.52,
+        r * 0.18,
+        r * 0.15,
+        s.glow,
+    );
     let grip = p.p3(r * 0.45, -r * 0.68, chest - r * 0.10);
     d.shape(
         Shape::Prism,
@@ -1934,7 +2323,15 @@ fn giant(d: &mut DrawList, p: &Pose, s: &Skin) {
         STONE,
         0.0,
     );
-    eyes(d, p, head, p.z + chest + r * 1.00, r * 0.26, r * 0.24, s.glow);
+    eyes(
+        d,
+        p,
+        head,
+        p.z + chest + r * 1.00,
+        r * 0.26,
+        r * 0.24,
+        s.glow,
+    );
     let butt = p.p3(r * 0.30, -r * 1.50, hip - r * 0.40);
     let top = p.p3(r * 0.10, -r * 1.70, chest + r * 1.60);
     d.link(Shape::Cylinder, butt, top, r * 0.20, s.wood, WOOD, 0.0);
@@ -2027,7 +2424,15 @@ fn naga(d: &mut DrawList, p: &Pose, s: &Skin) {
             0.0,
         );
     }
-    eyes(d, p, head, p.z + chest + r * 0.76, r * 0.22, r * 0.16, s.glow);
+    eyes(
+        d,
+        p,
+        head,
+        p.z + chest + r * 0.76,
+        r * 0.22,
+        r * 0.16,
+        s.glow,
+    );
 }
 
 // ---------------------------------------------------------------- beasts
@@ -2235,7 +2640,15 @@ fn centaur(d: &mut DrawList, p: &Pose, s: &Skin) {
         FLESH,
     );
     horns(d, p, head, p.z + chest + r * 0.78, r * 0.60, s.bone);
-    eyes(d, p, head, p.z + chest + r * 0.74, r * 0.22, r * 0.16, s.glow);
+    eyes(
+        d,
+        p,
+        head,
+        p.z + chest + r * 0.74,
+        r * 0.22,
+        r * 0.16,
+        s.glow,
+    );
     let grip = p.p3(r * 1.0, -r * 0.80, chest + r * 0.10);
     let top = p.p3(r * 0.75, -r * 0.95, chest + r * 1.60);
     d.link(Shape::Capsule, grip, top, r * 0.075, s.wood, WOOD, 0.0);
@@ -2305,7 +2718,16 @@ fn spider(d: &mut DrawList, p: &Pose, s: &Skin) {
         Material::CHITIN,
         0.0,
     );
-    blob(d, p, bz, r * 1.00, r * 0.90, r * 0.70, s.dark, Material::CHITIN);
+    blob(
+        d,
+        p,
+        bz,
+        r * 1.00,
+        r * 0.90,
+        r * 0.70,
+        s.dark,
+        Material::CHITIN,
+    );
     let head = p.at(r * 0.85, 0.0);
     d.sphere(
         [head[0], head[1], p.z + bz + r * 0.05],
@@ -2673,7 +3095,15 @@ fn golem(d: &mut DrawList, p: &Pose, s: &Skin) {
         STONE,
         0.0,
     );
-    eyes(d, p, head, p.z + chest + r * 0.78, r * 0.26, r * 0.20, s.glow);
+    eyes(
+        d,
+        p,
+        head,
+        p.z + chest + r * 0.78,
+        r * 0.26,
+        r * 0.20,
+        s.glow,
+    );
     p.glow(d, p.p3(0.0, 0.0, chest), r * 1.6, 0.2, s.glow);
 }
 
@@ -2726,7 +3156,15 @@ fn infernal(d: &mut DrawList, p: &Pose, s: &Skin) {
         s.iron,
         STONE,
     );
-    eyes(d, p, head, p.z + chest + r * 0.80, r * 0.30, r * 0.20, ember);
+    eyes(
+        d,
+        p,
+        head,
+        p.z + chest + r * 0.80,
+        r * 0.30,
+        r * 0.20,
+        ember,
+    );
     for k in 0..5 {
         let a = k as f32 * 1.257 + p.t;
         let q = p.at(a.cos() * r * 0.50, a.sin() * r * 0.50);
@@ -3039,7 +3477,14 @@ fn dragon(d: &mut DrawList, p: &Pose, s: &Skin, skeletal: bool) {
             0.0,
         );
     }
-    horns(d, p, [prev[0], prev[1]], prev[2] + r * 0.15, r * 0.60, s.bone);
+    horns(
+        d,
+        p,
+        [prev[0], prev[1]],
+        prev[2] + r * 0.15,
+        r * 0.60,
+        s.bone,
+    );
     eyes(
         d,
         p,

@@ -8,7 +8,8 @@
 //! stacked cone foliage, a rock is a crushed sphere, a fence is turned posts with
 //! rails between them.
 
-use crate::game::board::{BH, BW, Board, ROAD_HALF};
+use crate::game::board::{BW, Board, ROAD_HALF};
+use crate::game::greentd_map::ARENA;
 use crate::gfx::draw::{DrawList, Material, Shape, rgba};
 use crate::rng::Rng;
 use crate::view::theme;
@@ -34,7 +35,6 @@ impl Decor {
 
         cliffs(&mut d, &mut rng);
         water(&mut d, &mut rng, board);
-        fences(&mut d, board, &mut rng);
         scatter(&mut d, board, &mut rng);
         lamps(&mut d, &mut torches, board);
 
@@ -66,16 +66,18 @@ fn cliffs(d: &mut DrawList, rng: &mut Rng) {
         (4.4, -0.62, [0.062, 0.068, 0.092]),
     ];
     for (out, z, col) in steps {
-        let (w, h) = (BW + out * 2.0, BH + out * 2.0);
+        let (l, b, r, top) = (ARENA[0], ARENA[1], ARENA[2] + 1.0, ARENA[3] + 1.0);
+        let (w, h) = (r - l + out * 2.0, top - b + out * 2.0);
+        let (cx, cy) = ((l + r) * 0.5, (b + top) * 0.5);
         let t = 1.6;
-        for (cx, cy, sx, sy) in [
-            (BW * 0.5, -out, w, t),
-            (BW * 0.5, BH + out, w, t),
-            (-out, BH * 0.5, t, h),
-            (BW + out, BH * 0.5, t, h),
+        for (px, py, sx, sy) in [
+            (cx, b - out, w, t),
+            (cx, top + out, w, t),
+            (l - out, cy, t, h),
+            (r + out, cy, t, h),
         ] {
             d.cube_mat(
-                [cx, cy, z],
+                [px, py, z],
                 [sx, sy, 1.4],
                 0.0,
                 rgba(col, 1.0),
@@ -88,11 +90,12 @@ fn cliffs(d: &mut DrawList, rng: &mut Rng) {
         let edge = rng.next_u32() % 4;
         let t = rng.range(-0.1, 1.1);
         let out = rng.range(1.8, 4.2);
+        let (l, b, r, top) = (ARENA[0], ARENA[1], ARENA[2] + 1.0, ARENA[3] + 1.0);
         let (x, y) = match edge {
-            0 => (t * BW, -out),
-            1 => (t * BW, BH + out),
-            2 => (-out, t * BH),
-            _ => (BW + out, t * BH),
+            0 => (l + t * (r - l), b - out),
+            1 => (l + t * (r - l), top + out),
+            2 => (l - out, b + t * (top - b)),
+            _ => (r + out, b + t * (top - b)),
         };
         let r = rng.range(0.5, 1.2);
         d.shape(
@@ -159,50 +162,7 @@ fn water(d: &mut DrawList, rng: &mut Rng, board: &Board) {
     }
 }
 
-/// Turned posts with rails between them, hugging both sides of the road.
-fn fences(d: &mut DrawList, board: &Board, rng: &mut Rng) {
-    let wood = [0.240, 0.170, 0.110];
-    let step = 1.6;
-    let mut dist = 1.0;
-    while dist < board.total - 1.0 {
-        let p = board.sample(dist);
-        let hd = board.heading(dist);
-        let side = [-hd[1], hd[0]];
-        for sgn in [-1.0f32, 1.0] {
-            let off = ROAD_HALF + 0.34;
-            let px = p[0] + side[0] * sgn * off;
-            let py = p[1] + side[1] * sgn * off;
-            if !is_free(board, [px, py], 0.0) {
-                continue;
-            }
-            let ph = rng.range(0.38, 0.48);
-            d.cylinder(
-                [px, py, ph * 0.5],
-                0.10,
-                ph,
-                0.0,
-                rgba(wood, 1.0),
-                Material::WOOD,
-            );
-            // Cap the post so it reads as turned timber.
-            d.sphere([px, py, ph], 0.13, rgba(wood, 1.0), Material::WOOD);
-            let nx = p[0] + hd[0] * step + side[0] * sgn * off;
-            let ny = p[1] + hd[1] * step + side[1] * sgn * off;
-            d.link(
-                Shape::Cylinder,
-                [px, py, ph * 0.72],
-                [nx, ny, ph * 0.72],
-                0.055,
-                rgba(wood, 1.0),
-                Material::WOOD,
-                0.0,
-            );
-        }
-        dist += step;
-    }
-}
-
-/// Trees, rocks, bushes and grass over the open ground.
+/// Layered woodland over the open ground.
 fn scatter(d: &mut DrawList, board: &Board, rng: &mut Rng) {
     // Only the arena the player can see. The rest of the field is corridors
     // belonging to seven other players, and dressing it costs thousands of
@@ -214,26 +174,115 @@ fn scatter(d: &mut DrawList, board: &Board, rng: &mut Rng) {
                 tx as f32 + 0.5 + rng.range(-0.30, 0.30),
                 ty as f32 + 0.5 + rng.range(-0.30, 0.30),
             ];
-            if crate::game::board::is_corridor(tx, ty) || !is_free(board, p, 0.55) {
+            let verge = board.dist_to_road(p) - ROAD_HALF;
+            // Keep the useful tower band clean and mass vegetation in the
+            // otherwise empty interior/exterior. This frames play instead of
+            // sprinkling identical props uniformly over build space.
+            if verge < 1.8 {
                 continue;
             }
             let roll = rng.unit();
-            if roll < 0.10 {
+            if verge > 5.0 && roll < 0.140 {
                 tree(d, rng, p);
-            } else if roll < 0.17 {
+            } else if verge > 3.3 && roll < 0.075 {
+                tree(d, rng, p);
+            } else if roll < 0.120 {
                 rocks(d, rng, p);
-            } else if roll < 0.26 {
-                bush(d, rng, p);
-            } else if roll < 0.50 {
-                tuft(d, rng, p);
+            } else if verge > 2.8 && roll < 0.150 {
+                nature_prop(
+                    d,
+                    "NatureStump",
+                    p,
+                    rng.range(0.42, 0.58),
+                    rng,
+                    Material::WOOD,
+                );
+            } else if roll < 0.235 {
+                nature_prop(
+                    d,
+                    "NatureBush",
+                    p,
+                    rng.range(0.38, 0.58),
+                    rng,
+                    Material::FOLIAGE,
+                );
+            } else if roll < 0.350 {
+                let flower = rng.chance(0.16);
+                nature_prop(
+                    d,
+                    if flower {
+                        "NatureFlower"
+                    } else {
+                        "NatureGrass"
+                    },
+                    p,
+                    if flower {
+                        rng.range(0.16, 0.23)
+                    } else {
+                        rng.range(0.22, 0.34)
+                    },
+                    rng,
+                    Material::FOLIAGE,
+                );
             }
         }
     }
 }
 
-/// Tapered trunk, stacked cone canopy. The classic low-poly conifer.
+fn nature_prop(
+    d: &mut DrawList,
+    name: &str,
+    p: [f32; 2],
+    scale: f32,
+    rng: &mut Rng,
+    material: Material,
+) -> bool {
+    let variation = rng.unit();
+    crate::view::models::draw_downloaded(
+        d,
+        name,
+        [p[0], p[1], 0.025],
+        scale,
+        rng.range(0.0, std::f32::consts::TAU),
+        rgba(
+            [
+                0.90 + variation * 0.08,
+                0.92 + variation * 0.07,
+                0.88 + variation * 0.07,
+            ],
+            1.0,
+        ),
+        material,
+        0.0,
+    )
+}
+
+/// Mixed downloaded canopy silhouettes, with a procedural emergency fallback.
 fn tree(d: &mut DrawList, rng: &mut Rng, p: [f32; 2]) {
-    let scale = rng.range(0.85, 1.4);
+    let scale = rng.range(0.90, 1.35);
+    let tint = rng.unit();
+    let pick = rng.next_u32() % 10;
+    let (name, model_scale) = match pick {
+        0..=2 => ("NatureBroadleaf", scale * 2.35),
+        3..=5 => ("NatureOak", scale * 2.20),
+        6..=7 => ("NaturePineA", scale * 2.75),
+        _ => ("NaturePineB", scale * 2.90),
+    };
+    if crate::view::models::draw_downloaded(
+        d,
+        name,
+        [p[0], p[1], 0.04],
+        model_scale,
+        rng.range(0.0, std::f32::consts::TAU),
+        rgba(
+            [0.92 + tint * 0.05, 0.95 + tint * 0.04, 0.90 + tint * 0.05],
+            1.0,
+        ),
+        Material::FOLIAGE,
+        0.0,
+    ) {
+        return;
+    }
     let trunk_h = 0.55 * scale;
     d.cylinder(
         [p[0], p[1], trunk_h * 0.5],
@@ -244,7 +293,6 @@ fn tree(d: &mut DrawList, rng: &mut Rng, p: [f32; 2]) {
         Material::WOOD,
     );
 
-    let tint = rng.unit();
     let leaf = [
         0.105 + tint * 0.055,
         0.255 + tint * 0.095,
@@ -296,6 +344,22 @@ fn tree(d: &mut DrawList, rng: &mut Rng, p: [f32; 2]) {
 }
 
 fn rocks(d: &mut DrawList, rng: &mut Rng, p: [f32; 2]) {
+    if crate::view::models::draw_downloaded(
+        d,
+        if rng.chance(0.5) {
+            "NatureRockA"
+        } else {
+            "NatureRockB"
+        },
+        [p[0], p[1], 0.035],
+        rng.range(0.58, 0.88),
+        rng.range(0.0, std::f32::consts::TAU),
+        rgba([0.66, 0.70, 0.72], 1.0),
+        Material::STONE,
+        0.0,
+    ) {
+        return;
+    }
     let n = 1 + rng.next_u32() % 3;
     for _ in 0..n {
         let r = rng.range(0.22, 0.46);
@@ -311,50 +375,6 @@ fn rocks(d: &mut DrawList, rng: &mut Rng, p: [f32; 2]) {
             rng.range(-0.25, 0.25),
             rgba([0.215, 0.225, 0.265], 1.0),
             Material::STONE,
-            0.0,
-        );
-    }
-}
-
-fn bush(d: &mut DrawList, rng: &mut Rng, p: [f32; 2]) {
-    let r = rng.range(0.30, 0.48);
-    for k in 0..3 {
-        let a = k as f32 * 2.1 + rng.range(0.0, 1.0);
-        let rr = r * rng.range(0.6, 1.0);
-        d.shape(
-            Shape::Sphere,
-            [
-                p[0] + a.cos() * r * 0.24,
-                p[1] + a.sin() * r * 0.24,
-                rr * 0.42,
-            ],
-            [rr, rr, rr * 0.8],
-            0.0,
-            0.0,
-            rgba([0.100, 0.225, 0.128], 1.0),
-            Material::FOLIAGE,
-            0.0,
-        );
-    }
-}
-
-fn tuft(d: &mut DrawList, rng: &mut Rng, p: [f32; 2]) {
-    for _ in 0..3 {
-        let h = rng.range(0.16, 0.32);
-        let a = rng.range(0.0, std::f32::consts::PI);
-        // Blades lean, so grass does not look like a bed of nails.
-        d.shape(
-            Shape::Cone,
-            [
-                p[0] + rng.range(-0.25, 0.25),
-                p[1] + rng.range(-0.25, 0.25),
-                h * 0.5 + 0.05,
-            ],
-            [0.075, 0.075, h],
-            a,
-            rng.range(-0.25, 0.25),
-            rgba([0.150, 0.270, 0.150], 1.0),
-            Material::FOLIAGE,
             0.0,
         );
     }

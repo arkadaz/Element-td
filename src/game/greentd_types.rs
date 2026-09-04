@@ -40,6 +40,41 @@ pub enum Family {
 }
 
 impl Family {
+    pub const ALL: [Family; 24] = [
+        Family::Single,
+        Family::Siege,
+        Family::Bouncing,
+        Family::Multi,
+        Family::Corruption,
+        Family::Air,
+        Family::Chaos,
+        Family::Destruction,
+        Family::Aura,
+        Family::Damage,
+        Family::Speed,
+        Family::Demon,
+        Family::King,
+        Family::SuperChaos,
+        Family::SuperDestruct,
+        Family::SuperMulti,
+        Family::SuperBounce,
+        Family::Slow,
+        Family::Frost,
+        Family::Poison,
+        Family::Critical,
+        Family::Troll,
+        Family::Fire,
+        Family::OneStrike,
+    ];
+
+    /// Stable column in the in-engine icon atlas.
+    pub fn icon_slot(self) -> usize {
+        Self::ALL
+            .iter()
+            .position(|&family| family == self)
+            .expect("every family has an icon column")
+    }
+
     pub fn name(self) -> &'static str {
         use Family::*;
         match self {
@@ -136,6 +171,67 @@ impl Family {
             OneStrike => "Hero damage: a hundred times the number on the card.",
         }
     }
+
+    /// One short verb/noun for the command card. Attack type alone made ten
+    /// very different towers all say "Normal"; this tells a new player what
+    /// buying the card actually does.
+    pub fn role_tag(self) -> &'static str {
+        use Family::*;
+        match self {
+            Single => "STARTER",
+            Siege => "SPLASH",
+            Bouncing | SuperBounce => "CHAIN",
+            Multi | SuperMulti => "MULTI",
+            Corruption => "ARMOUR-",
+            Air => "ANTI-AIR",
+            Chaos | SuperChaos => "IMMUNE",
+            Destruction | SuperDestruct => "CHAOS AOE",
+            Aura => "CHOOSE BUFF",
+            Damage => "DAMAGE+",
+            Speed => "SPEED+",
+            Demon => "EXECUTE",
+            King => "ENDGAME",
+            Slow => "SLOW AURA",
+            Frost => "FREEZE",
+            Poison => "POISON",
+            Critical => "CRITICAL",
+            Troll => "ROOT",
+            Fire => "BURN AURA",
+            OneStrike => "ONE SHOT",
+        }
+    }
+
+    /// Family colour used by projectiles, impacts and silhouette accents.
+    /// Effects carry role identity while the smaller attack-type badge keeps
+    /// the armour rule available in the HUD.
+    pub fn fx_color(self) -> [f32; 3] {
+        use Family::*;
+        match self {
+            Single => [0.20, 0.95, 0.42],
+            Siege => [1.00, 0.50, 0.14],
+            Bouncing => [0.52, 0.28, 1.00],
+            SuperBounce => [0.86, 0.30, 1.00],
+            Multi => [0.18, 0.70, 1.00],
+            Critical => [1.00, 0.70, 0.16],
+            SuperMulti => [0.18, 0.94, 1.00],
+            Corruption => [0.32, 0.88, 0.46],
+            Poison => [0.48, 1.00, 0.12],
+            Air => [0.18, 0.82, 1.00],
+            Frost | Slow => [0.58, 0.90, 1.00],
+            Chaos => [1.00, 0.18, 0.22],
+            SuperChaos => [1.00, 0.12, 0.62],
+            OneStrike => [1.00, 0.88, 0.24],
+            Destruction => [1.00, 0.36, 0.10],
+            SuperDestruct => [1.00, 0.12, 0.05],
+            Fire => [1.00, 0.62, 0.10],
+            Aura => [0.72, 0.28, 1.00],
+            Damage => [1.00, 0.36, 0.18],
+            Speed => [0.22, 0.88, 1.00],
+            Demon => [1.00, 0.16, 0.55],
+            Troll => [0.52, 1.00, 0.18],
+            King => [1.00, 0.76, 0.20],
+        }
+    }
 }
 
 // ---------------------------------------------------------------- damage
@@ -210,6 +306,23 @@ impl Attack {
 }
 
 impl ArmourType {
+    pub fn as_u8(self) -> u8 {
+        self as u8
+    }
+
+    pub fn from_u8(value: u8) -> Option<Self> {
+        Some(match value {
+            0 => ArmourType::Unarmoured,
+            1 => ArmourType::Light,
+            2 => ArmourType::Medium,
+            3 => ArmourType::Heavy,
+            4 => ArmourType::Fortified,
+            5 => ArmourType::Hero,
+            6 => ArmourType::Divine,
+            _ => return None,
+        })
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             ArmourType::Unarmoured => "Unarmoured",
@@ -382,28 +495,77 @@ pub enum Model {
 }
 
 impl Model {
+    pub fn as_u8(self) -> u8 {
+        self as u8
+    }
+
+    pub fn from_u8(value: u8) -> Option<Self> {
+        Self::ALL.get(value as usize).copied()
+    }
+
     /// Every archetype, in declaration order.
     ///
     /// `models_in_use` in `view` walks only the ones a tower or a wave asks
     /// for; this is the whole list, which is what the model sheet renders and
     /// what stops a builder being added and then never looked at.
     pub const ALL: &'static [Model] = &[
-    Model::Acolyte, Model::Archer, Model::Mage, Model::Warrior,
-    Model::Demon, Model::Brute, Model::Troll, Model::Gnoll,
-    Model::Skeleton, Model::Wraith, Model::Naga, Model::Rifleman,
-    Model::Villager, Model::Panda, Model::Bear, Model::Mammoth,
-    Model::Centaur, Model::Lizard, Model::Crab, Model::Spider,
-    Model::Serpent, Model::Turtle, Model::Ent, Model::Golem,
-    Model::Giant, Model::Infernal, Model::FlameLord, Model::Gyrocopter,
-    Model::Phoenix, Model::Harpy, Model::Dragon, Model::FrostWyrm,
-    Model::Turret, Model::Turbolazer, Model::RebelTurret, Model::Vulcan,
-    Model::SamSite, Model::Cannon, Model::MeatWagon, Model::Ship,
-    Model::Obelisk, Model::MagicTower, Model::Observatory, Model::DemonGate,
-    Model::Altar, Model::Burrow, Model::Tentacle, Model::Wisp,
-    Model::SkullPile, Model::IceTorch, Model::EggSack, Model::Snowman,
-    Model::ThornsAura, Model::CommandAura, Model::ControlMagic, Model::DarkPortal,
+        Model::Acolyte,
+        Model::Archer,
+        Model::Mage,
+        Model::Warrior,
+        Model::Demon,
+        Model::Brute,
+        Model::Troll,
+        Model::Gnoll,
+        Model::Skeleton,
+        Model::Wraith,
+        Model::Naga,
+        Model::Rifleman,
+        Model::Villager,
+        Model::Panda,
+        Model::Bear,
+        Model::Mammoth,
+        Model::Centaur,
+        Model::Lizard,
+        Model::Crab,
+        Model::Spider,
+        Model::Serpent,
+        Model::Turtle,
+        Model::Ent,
+        Model::Golem,
+        Model::Giant,
+        Model::Infernal,
+        Model::FlameLord,
+        Model::Gyrocopter,
+        Model::Phoenix,
+        Model::Harpy,
+        Model::Dragon,
+        Model::FrostWyrm,
+        Model::Turret,
+        Model::Turbolazer,
+        Model::RebelTurret,
+        Model::Vulcan,
+        Model::SamSite,
+        Model::Cannon,
+        Model::MeatWagon,
+        Model::Ship,
+        Model::Obelisk,
+        Model::MagicTower,
+        Model::Observatory,
+        Model::DemonGate,
+        Model::Altar,
+        Model::Burrow,
+        Model::Tentacle,
+        Model::Wisp,
+        Model::SkullPile,
+        Model::IceTorch,
+        Model::EggSack,
+        Model::Snowman,
+        Model::ThornsAura,
+        Model::CommandAura,
+        Model::ControlMagic,
+        Model::DarkPortal,
     ];
-
 
     /// Whether the model stands on the ground or hangs above it. Used to check
     /// that a wave the map flies is drawn as something with wings.

@@ -15,10 +15,10 @@ pub mod towers;
 
 use crate::decor::Decor;
 use crate::game::board::{self, ROAD_HALF};
-use crate::game::greentd_map::{ARENA, MAP_H, MAP_W};
 use crate::game::defs::*;
+use crate::game::greentd_map::ARENA;
 use crate::game::{Game, Phase};
-use crate::gfx::draw::{GroundTex, Color, DrawList, Material, Shape, boost, mix, rgba};
+use crate::gfx::draw::{Color, DrawList, GroundTex, Material, Shape, boost, mix, rgba};
 
 /// The map's own palette: Warcraft III's Lordaeron Summer tileset, in
 /// daylight.
@@ -31,28 +31,22 @@ use crate::gfx::draw::{GroundTex, Color, DrawList, Material, Shape, boost, mix, 
 pub mod theme {
     use super::Color;
     /// `Agrs`, the lit grass. Mossy, not lime.
-    pub const GRASS_A: [f32; 3] = [0.105, 0.190, 0.075];
+    pub const GRASS_A: [f32; 3] = [0.050, 0.084, 0.043];
     /// `Agrd`, the darker patches the tileset mixes through it.
-    pub const GRASS_B: [f32; 3] = [0.070, 0.135, 0.058];
-    pub const GRASS_EDGE: [f32; 3] = [0.048, 0.098, 0.045];
-    /// Buildable ground. In this map that is simply turf - every tile you own
-    /// takes a tower - so a plot is grass with a seam around it, not a socket
-    /// cut into the field.
-    pub const PAD_EARTH: [f32; 3] = [0.095, 0.170, 0.070];
-    pub const PAD_SOIL: [f32; 3] = [0.080, 0.145, 0.062];
-    /// The seam between one plot and the next.
-    pub const PAD_KERB: [f32; 3] = [0.055, 0.105, 0.048];
+    pub const GRASS_B: [f32; 3] = [0.034, 0.060, 0.036];
+    pub const GRASS_EDGE: [f32; 3] = [0.024, 0.045, 0.030];
     /// Corner markers, lit only while you are holding a tower you can afford.
     pub const PAD_ARM: [f32; 3] = [0.40, 0.78, 0.95];
     /// "Your wallet is the problem", not "this plot is the problem".
     pub const PAD_BROKE: [f32; 3] = [0.85, 0.62, 0.24];
-    /// `Adrt`, the corridors: dark trodden earth over stone, not sand.
-    pub const ROAD: [f32; 3] = [0.115, 0.118, 0.092];
-    pub const ROAD_EDGE: [f32; 3] = [0.072, 0.078, 0.062];
+    /// `Arck`, the corridors: cool worn rock like the reference lane, not the
+    /// tan plank-like surface the first standalone pass produced.
+    pub const ROAD: [f32; 3] = [0.118, 0.122, 0.112];
+    pub const ROAD_EDGE: [f32; 3] = [0.052, 0.058, 0.054];
     /// `Arck`.
-    pub const STONE: [f32; 3] = [0.230, 0.230, 0.215];
-    pub const STONE_DARK: [f32; 3] = [0.135, 0.138, 0.128];
-    pub const WALL: [f32; 3] = [0.105, 0.110, 0.098];
+    pub const STONE: [f32; 3] = [0.255, 0.230, 0.184];
+    pub const STONE_DARK: [f32; 3] = [0.125, 0.111, 0.091];
+    pub const WALL: [f32; 3] = [0.094, 0.088, 0.074];
     pub const HP_BACK: Color = [0.02, 0.02, 0.02, 0.95];
     pub const HP_FILL: Color = [0.30, 0.86, 0.26, 1.0];
     pub const HP_LOW: Color = [0.95, 0.28, 0.20, 1.0];
@@ -73,13 +67,6 @@ pub const GROUND_Z: f32 = 0.10;
 
 /// Kept under its old name: where a tower's plinth starts.
 pub const PLOT_TOP: f32 = GROUND_Z;
-
-/// Cheap deterministic hash, for per-tile variation.
-fn hash2(x: i32, y: i32) -> f32 {
-    let n = (x.wrapping_mul(374_761_393) ^ y.wrapping_mul(668_265_263)) as u32;
-    let n = (n ^ (n >> 13)).wrapping_mul(1_274_126_177);
-    ((n ^ (n >> 16)) & 0xffff) as f32 / 65535.0
-}
 
 // ================================================================ static
 
@@ -118,16 +105,6 @@ fn field() -> (i32, i32, i32, i32) {
 fn terrain(g: &Game, d: &mut DrawList, tall: &mut DrawList) {
     let (x0, y0, x1, y1) = field();
 
-    // Which tiles are plots. In this map that is every tile of the arena that
-    // is not corridor, so the grid is a seam in the turf rather than a field of
-    // sockets - the map has no sockets, it has grass.
-    let mut plot = vec![false; MAP_W * MAP_H];
-    for s in &g.board.slots {
-        let tx = s.pos[0].floor() as usize;
-        let ty = s.pos[1].floor() as usize;
-        plot[ty * MAP_W + tx] = true;
-    }
-
     // One flat plane under everything, so no gap between tiles can ever show
     // the sky through the floor.
     let (l, b0, r, t) = (x0 as f32, y0 as f32, x1 as f32 + 1.0, y1 as f32 + 1.0);
@@ -143,8 +120,9 @@ fn terrain(g: &Game, d: &mut DrawList, tall: &mut DrawList) {
     for ty in y0..=y1 {
         for tx in x0..=x1 {
             let p = [tx as f32 + 0.5, ty as f32 + 0.5];
-            let h = hash2(tx, ty);
-            let corridor = board::is_corridor(tx, ty);
+            // Follow the compact, rounded runtime path rather than the
+            // eight-player corridor pixels still present in the source map.
+            let corridor = g.board.dist_to_road(p) <= ROAD_HALF + 0.48;
 
             // Terrain is drawn as **flat quads**, not as boxes.
             //
@@ -154,10 +132,7 @@ fn terrain(g: &Game, d: &mut DrawList, tall: &mut DrawList) {
             // a bright bevel around every single tile, and that, more than any
             // colour, is what stopped the board reading as ground.
             let (z, base) = if corridor {
-                (
-                    GROUND_Z - 0.012,
-                    mix(theme::ROAD, theme::ROAD_EDGE, h * 0.55),
-                )
+                (GROUND_Z - 0.012, theme::ROAD)
             } else {
                 // Turf in patches rather than per-tile noise. White noise on a
                 // grid reads as graph paper; a low-frequency blend reads as a
@@ -169,8 +144,10 @@ fn terrain(g: &Game, d: &mut DrawList, tall: &mut DrawList) {
                 // there is a grass texture underneath: the blocks read as a
                 // chequerboard laid over the grain. The texture is the
                 // variation; this is only enough to stop it tiling visibly.
-                let patch = (hash2(tx / 3, ty / 3) * 0.72 + h * 0.28).clamp(0.0, 1.0);
-                let c = mix(theme::GRASS_A, theme::GRASS_B, patch * 0.35);
+                // Keep the base continuous across tiles. Large per-tile colour
+                // blocks were visible as rectangles from the tactical camera;
+                // the shader supplies broad, world-space variation instead.
+                let c = mix(theme::GRASS_A, theme::GRASS_B, 0.18);
                 (GROUND_Z, c)
             };
             // The tile's colour still comes from the palette measured against
@@ -180,7 +157,7 @@ fn terrain(g: &Game, d: &mut DrawList, tall: &mut DrawList) {
             // while giving it the grain a flat fill was missing.
             d.ground(
                 if corridor {
-                    GroundTex::Dirt
+                    GroundTex::Stone
                 } else {
                     GroundTex::Grass
                 },
@@ -194,7 +171,8 @@ fn terrain(g: &Game, d: &mut DrawList, tall: &mut DrawList) {
             // hundred strips rather than a bevel on every tile in the field.
             if corridor {
                 for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
-                    if board::is_corridor(tx + dx, ty + dy) {
+                    let neighbour = [(tx + dx) as f32 + 0.5, (ty + dy) as f32 + 0.5];
+                    if g.board.dist_to_road(neighbour) <= ROAD_HALF + 0.48 {
                         continue;
                     }
                     d.shape(
@@ -213,50 +191,6 @@ fn terrain(g: &Game, d: &mut DrawList, tall: &mut DrawList) {
                     );
                 }
                 continue;
-            }
-
-            if plot[ty as usize * MAP_W + tx as usize] {
-                // A seam on two sides only, so neighbouring plots share one
-                // line. Barely darker than the turf: a bright line turns the
-                // field into graph paper.
-                for (dx, dy, sx, sy) in [(0.0, 0.5, 1.0, 0.03), (0.5, 0.0, 0.03, 1.0)] {
-                    d.shape(
-                        Shape::Quad,
-                        [p[0] + dx, p[1] + dy, GROUND_Z + 0.003],
-                        [sx, sy, 1.0],
-                        0.0,
-                        0.0,
-                        // Eight hundred plots means this seam is a grid over the
-                        // entire field, and at full strength that is graph
-                        // paper. Faint enough to find a tile edge by when you
-                        // look for it, and to disappear when you are not.
-                        // Subtle by *colour*, not by alpha: the solid pass is
-                        // opaque, so the alpha on a ground quad does nothing at
-                        // all. Setting it to 0.18 and expecting a faint line
-                        // gave a full-strength grid over the whole field.
-                        rgba(mix(base, theme::PAD_KERB, 0.30), 1.0),
-                        Material::EARTH,
-                        0.0,
-                    );
-                }
-            }
-            // Tufts, so the turf is not a flat plane of one colour.
-            if h > 0.90 {
-                let j = hash2(tx * 7 + 3, ty * 11 + 5);
-                tall.shape(
-                    Shape::Cone,
-                    [
-                        p[0] + (j - 0.5) * 0.5,
-                        p[1] + (h - 0.5) * 0.5,
-                        GROUND_Z + 0.08,
-                    ],
-                    [0.32, 0.32, 0.24],
-                    j * 6.0,
-                    0.10,
-                    rgba(mix(theme::GRASS_A, theme::GRASS_EDGE, j), 1.0),
-                    Material::FOLIAGE,
-                    0.0,
-                );
             }
         }
     }
@@ -331,6 +265,10 @@ fn terrain(g: &Game, d: &mut DrawList, tall: &mut DrawList) {
 }
 
 fn road(g: &Game, d: &mut DrawList) {
+    // The textured corridor tiles are the road surface. Continuous low kerbs
+    // read cleanly from the tactical camera. The former
+    // chain of hundreds of spheres looked like beads and added noise precisely
+    // where units need a crisp silhouette.
     for w in g.board.path.windows(2) {
         let (a, b) = (w[0], w[1]);
         let dx = b[0] - a[0];
@@ -339,44 +277,15 @@ fn road(g: &Game, d: &mut DrawList) {
         if len < 1e-4 {
             continue;
         }
-        let yaw = dy.atan2(dx);
-        let mid = [(a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5];
-        d.cube_mat(
-            [mid[0], mid[1], 0.055],
-            [len + 0.26, ROAD_HALF * 2.0 + 0.30, 0.30],
-            yaw,
-            rgba(theme::ROAD_EDGE, 1.0),
-            Material::EARTH,
-        );
-        d.cube_mat(
-            [mid[0], mid[1], 0.145],
-            [len + 0.22, ROAD_HALF * 2.0, 0.12],
-            yaw,
-            rgba(theme::ROAD, 1.0),
-            Material::EARTH,
-        );
-    }
-    // Kerb stones: rounded cobbles down both verges, so the road has an edge
-    // instead of ending at a hard rectangle.
-    let n = (g.board.total / 0.9) as i32;
-    for i in 0..=n {
-        let dist = (i as f32 * 0.9).min(g.board.total);
-        let p = g.board.sample(dist);
-        let hd = g.board.heading(dist);
-        let side = [-hd[1], hd[0]];
-        let jitter = hash2(i, 17);
+        let side = [-dy / len, dx / len];
         for s in [-1.0f32, 1.0] {
-            let r = ROAD_HALF + 0.20 + jitter * 0.05;
-            d.shape(
-                Shape::Sphere,
-                [p[0] + side[0] * s * r, p[1] + side[1] * s * r, 0.19],
-                [0.34 + jitter * 0.1, 0.30, 0.20],
-                hd[1].atan2(hd[0]) + jitter,
-                0.0,
-                rgba(
-                    mix(theme::ROAD_EDGE, theme::STONE, 0.20 + jitter * 0.3),
-                    1.0,
-                ),
+            let off = ROAD_HALF + 0.18;
+            d.link(
+                Shape::Capsule,
+                [a[0] + side[0] * s * off, a[1] + side[1] * s * off, 0.20],
+                [b[0] + side[0] * s * off, b[1] + side[1] * s * off, 0.20],
+                0.13,
+                rgba(mix(theme::ROAD_EDGE, theme::STONE, 0.34), 1.0),
                 Material::STONE,
                 0.0,
             );
@@ -384,91 +293,27 @@ fn road(g: &Game, d: &mut DrawList) {
     }
 }
 
-/// Spawn and exit portals: paired obelisks under a stone lintel, with a lit
-/// runestone in each. They mark the two ends of the run from any camera angle.
+/// Spawn portal: a downloaded stone arch with a restrained magical halo.
+/// The old asset was a sci-fi landing pad, which did not match either its icon
+/// or this fantasy battlefield. The arch gives the source junction a vertical,
+/// readable silhouette without occupying a build pad.
 fn gates_static(g: &Game, d: &mut DrawList) {
-    for (dist, col) in [(board::SPAWN_DIST + 0.9, theme::SPAWN)] {
+    for (dist, col) in [(board::SPAWN_DIST + 0.45, theme::SPAWN)] {
         let p = g.board.sample(dist);
         let dir = g.board.heading(dist);
-        let side = [-dir[1], dir[0]];
         let yaw = dir[1].atan2(dir[0]);
-        for s in [-1.0f32, 1.0] {
-            let px = p[0] + side[0] * s * (ROAD_HALF + 0.34);
-            let py = p[1] + side[1] * s * (ROAD_HALF + 0.34);
-            // Stepped plinth, tapered shaft, capital, finial.
-            d.cylinder(
-                [px, py, 0.22],
-                0.92,
-                0.30,
-                yaw,
-                rgba(theme::STONE_DARK, 1.0),
-                Material::STONE,
-            );
-            d.shape(
-                Shape::Cone,
-                [px, py, 0.90],
-                [0.64, 0.64, 1.90],
-                yaw,
-                0.0,
-                rgba(theme::STONE, 1.0),
-                Material::STONE,
-                0.0,
-            );
-            d.cylinder(
-                [px, py, 1.42],
-                0.60,
-                0.16,
-                yaw,
-                rgba(theme::STONE_DARK, 1.0),
-                Material::STONE,
-            );
-            d.shape(
-                Shape::Prism,
-                [px, py, 1.62],
-                [0.34, 0.34, 0.30],
-                yaw,
-                0.0,
-                rgba(col, 1.0),
-                Material::GEM,
-                1.0,
-            );
-            d.cone(
-                [px, py, 1.86],
-                0.40,
-                0.26,
-                yaw,
-                rgba(theme::STONE, 1.0),
-                Material::STONE,
-            );
-        }
-        // Lintel spanning the road, with a runeband cut into its underside.
-        let a = [
-            p[0] + side[0] * (ROAD_HALF + 0.34),
-            p[1] + side[1] * (ROAD_HALF + 0.34),
-        ];
-        let b = [
-            p[0] - side[0] * (ROAD_HALF + 0.34),
-            p[1] - side[1] * (ROAD_HALF + 0.34),
-        ];
-        d.link(
-            Shape::Box,
-            [a[0], a[1], 1.52],
-            [b[0], b[1], 1.52],
-            0.34,
-            rgba(theme::STONE, 1.0),
+        models::draw_downloaded(
+            d,
+            "DemonGate",
+            [p[0], p[1], 0.035],
+            1.22,
+            yaw,
+            rgba([0.78, 0.73, 0.68], 1.0),
             Material::STONE,
-            0.0,
+            0.04,
         );
-        d.link(
-            Shape::Cylinder,
-            [a[0], a[1], 1.34],
-            [b[0], b[1], 1.34],
-            0.12,
-            rgba(col, 0.95),
-            Material::GEM,
-            1.0,
-        );
-        let _ = yaw;
+        d.ground_ring([p[0], p[1]], 0.78, 0.055, rgba(col, 0.42), 40);
+        d.sphere_lit([p[0], p[1], 0.64], 0.105, rgba(col, 0.92), 0.55);
     }
 }
 
@@ -522,44 +367,47 @@ fn gate_glow(g: &Game, d: &mut DrawList, t: f32) {
     for (dist, col) in [(board::SPAWN_DIST + 0.9, theme::SPAWN)] {
         let p = g.board.sample(dist);
         d.glow(
-            [p[0], p[1], 1.45],
-            1.5 * pulse.max(0.6),
+            [p[0], p[1], 0.34],
+            0.64 * pulse.max(0.6),
             2.0,
-            rgba(col, 0.45),
+            rgba(col, 0.24),
         );
-        d.glow([p[0], p[1], 0.45], 2.0, 2.4, rgba(col, 0.18 * pulse));
+        d.ground_ring([p[0], p[1]], 0.72, 0.055, rgba(col, 0.38 * pulse), 32);
     }
 }
 
-/// Chevrons drifting along the road show which way the monsters travel.
+/// Two separated chevron streams show the source map's split route.
 fn chevrons(g: &Game, d: &mut DrawList, t: f32) {
-    let n = (g.board.total / 2.6) as i32;
-    for i in 0..n {
-        let phase = (t * 0.85 + i as f32 * 0.5).rem_euclid(1.0);
-        let dist = (i as f32 * 2.6 + phase * 2.6).min(g.board.total);
-        let a = 0.30 * (1.0 - (phase - 0.5).abs() * 2.0).max(0.0);
-        if a <= 0.01 {
-            continue;
-        }
-        let p = g.board.sample(dist);
-        let hd = g.board.heading(dist);
-        let yaw = hd[1].atan2(hd[0]);
-        // Two strokes meeting at a point: an actual chevron, not a dash.
-        for s in [-1.0f32, 1.0] {
-            d.shape(
-                Shape::Box,
-                [
-                    p[0] - hd[0] * 0.16 - hd[1] * s * 0.16,
-                    p[1] - hd[1] * 0.16 + hd[0] * s * 0.16,
-                    0.215,
-                ],
-                [0.46, 0.11, 0.03],
-                yaw + s * 0.72,
-                0.0,
-                rgba([0.62, 0.76, 0.98], a * 1.8),
-                Material::GEM,
-                0.9,
-            );
+    let n = (g.board.total / 4.2) as i32;
+    for direction in [-1.0f32, 1.0] {
+        for i in 0..n {
+            let phase = (t * 0.85 + i as f32 * 0.5).rem_euclid(1.0);
+            let dist = (i as f32 * 4.2 + phase * 4.2).min(g.board.total);
+            let a = 0.13 * (1.0 - (phase - 0.5).abs() * 2.0).max(0.0);
+            if a <= 0.01 {
+                continue;
+            }
+            let centre = g.board.sample_travel(dist, direction);
+            let hd = g.board.heading_travel(dist, direction);
+            let p = [centre[0] - hd[1] * 0.22, centre[1] + hd[0] * 0.22];
+            let yaw = hd[1].atan2(hd[0]);
+            // Two strokes meeting at a point: an actual chevron, not a dash.
+            for s in [-1.0f32, 1.0] {
+                d.shape(
+                    Shape::Box,
+                    [
+                        p[0] - hd[0] * 0.13 - hd[1] * s * 0.11,
+                        p[1] - hd[1] * 0.13 + hd[0] * s * 0.11,
+                        0.215,
+                    ],
+                    [0.23, 0.045, 0.014],
+                    yaw + s * 0.72,
+                    0.0,
+                    rgba([0.54, 0.68, 0.78], a),
+                    Material::GEM,
+                    0.16,
+                );
+            }
         }
     }
 }
@@ -579,8 +427,8 @@ fn plots(g: &Game, d: &mut DrawList, t: f32) {
         return;
     };
 
-    // Only plots you can actually afford light up. As gold drains, fewer plots
-    // are lit - the board tells you what you can do without saying a word.
+    // Only spaced, useful plots light up. Their three-tile lattice is deliberate:
+    // tower silhouettes stay separate and a location is a commitment.
     let affordable = g.can_afford(TOWERS[def_i].gold);
     let pulse = 0.5 + 0.5 * (t * 2.2).sin();
 
@@ -690,49 +538,171 @@ fn build_ghost(g: &Game, d: &mut DrawList, t: f32) {
 
 fn shots(g: &Game, d: &mut DrawList) {
     for p in &g.projs {
-        let col = tower_color(&TOWERS[p.def]);
+        let col = TOWERS[p.def].family.fx_color();
         let yaw = p.vel[1].atan2(p.vel[0]);
-        let long = p.kind == crate::game::ProjKind::Lance;
-        if long {
-            // A bolt: shaft plus a conical head, flying nose-first.
-            let (c, s) = (yaw.cos(), yaw.sin());
-            d.link(
-                Shape::Cylinder,
-                [p.pos[0] - c * 0.40, p.pos[1] - s * 0.40, p.z],
-                [p.pos[0] + c * 0.24, p.pos[1] + s * 0.24, p.z],
-                0.09,
-                boost(rgba(col, 1.0), 1.2),
-                Material::METAL,
-                0.55,
-            );
-            d.shape(
-                Shape::Cone,
-                [p.pos[0] + c * 0.34, p.pos[1] + s * 0.34, p.z],
-                [0.16, 0.16, 0.24],
-                yaw,
-                std::f32::consts::FRAC_PI_2,
-                boost(rgba(col, 1.0), 1.4),
-                Material::METAL,
-                0.8,
-            );
-        } else {
-            // A shell: a round ball, stretched slightly along its flight.
-            d.shape(
-                Shape::Sphere,
-                [p.pos[0], p.pos[1], p.z],
-                [0.34, 0.22, 0.22],
-                yaw,
-                0.0,
-                boost(rgba(col, 1.0), 1.3),
-                Material::GEM,
-                0.9,
-            );
+        let (c, s) = (yaw.cos(), yaw.sin());
+        let at = [p.pos[0], p.pos[1], p.z];
+        use crate::game::ProjKind;
+        match p.kind {
+            ProjKind::Dart => {
+                d.sphere_lit(at, 0.12, boost(rgba(col, 1.0), 1.25), 0.62);
+                d.link(
+                    Shape::Cone,
+                    [p.pos[0] - c * 0.22, p.pos[1] - s * 0.22, p.z],
+                    at,
+                    0.075,
+                    boost(rgba(col, 0.9), 1.15),
+                    Material::GEM,
+                    0.42,
+                );
+            }
+            ProjKind::Shell => {
+                d.sphere_lit(at, 0.22, rgba([0.18, 0.16, 0.14], 1.0), 0.0);
+                d.sphere_lit(
+                    [p.pos[0] - c * 0.08, p.pos[1] - s * 0.08, p.z + 0.06],
+                    0.075,
+                    rgba(col, 1.0),
+                    0.36,
+                );
+            }
+            ProjKind::Glaive => {
+                d.shape(
+                    Shape::Cylinder,
+                    at,
+                    [0.28, 0.28, 0.065],
+                    p.life * 11.0,
+                    0.0,
+                    boost(rgba(col, 1.0), 1.16),
+                    Material::METAL,
+                    0.38,
+                );
+                d.sphere_lit(at, 0.075, rgba([0.88, 0.90, 0.96], 1.0), 0.12);
+            }
+            ProjKind::Bolt => {
+                d.link(
+                    Shape::Cylinder,
+                    [p.pos[0] - c * 0.40, p.pos[1] - s * 0.40, p.z],
+                    [p.pos[0] + c * 0.24, p.pos[1] + s * 0.24, p.z],
+                    0.09,
+                    boost(rgba(col, 1.0), 1.2),
+                    Material::METAL,
+                    0.55,
+                );
+                d.shape(
+                    Shape::Cone,
+                    [p.pos[0] + c * 0.34, p.pos[1] + s * 0.34, p.z],
+                    [0.16, 0.16, 0.24],
+                    yaw,
+                    -std::f32::consts::FRAC_PI_2,
+                    boost(rgba(col, 1.0), 1.4),
+                    Material::METAL,
+                    0.8,
+                );
+            }
+            ProjKind::Acid => {
+                d.shape(
+                    Shape::Sphere,
+                    at,
+                    [0.22, 0.16, 0.16],
+                    yaw,
+                    0.0,
+                    boost(rgba(col, 0.94), 1.12),
+                    Material::GEM,
+                    0.48,
+                );
+                d.sphere_lit(
+                    [p.pos[0] - c * 0.14, p.pos[1] - s * 0.14, p.z + 0.07],
+                    0.09,
+                    rgba([0.76, 1.0, 0.18], 0.90),
+                    0.35,
+                );
+            }
+            ProjKind::Missile => {
+                d.link(
+                    Shape::Capsule,
+                    [p.pos[0] - c * 0.30, p.pos[1] - s * 0.30, p.z],
+                    [p.pos[0] + c * 0.20, p.pos[1] + s * 0.20, p.z],
+                    0.11,
+                    rgba([0.58, 0.66, 0.74], 1.0),
+                    Material::METAL,
+                    0.05,
+                );
+                d.link(
+                    Shape::Cone,
+                    [p.pos[0] + c * 0.12, p.pos[1] + s * 0.12, p.z],
+                    [p.pos[0] + c * 0.34, p.pos[1] + s * 0.34, p.z],
+                    0.12,
+                    rgba(col, 1.0),
+                    Material::METAL,
+                    0.24,
+                );
+                d.sphere_lit(
+                    [p.pos[0] - c * 0.34, p.pos[1] - s * 0.34, p.z],
+                    0.085,
+                    rgba([1.0, 0.50, 0.12], 0.9),
+                    0.52,
+                );
+            }
+            ProjKind::Chaos => {
+                d.shape(
+                    Shape::Prism,
+                    at,
+                    [0.26, 0.18, 0.38],
+                    yaw + p.life * 5.0,
+                    std::f32::consts::FRAC_PI_2,
+                    boost(rgba(col, 1.0), 1.2),
+                    Material::GEM,
+                    0.72,
+                );
+            }
+            ProjKind::Flame => {
+                d.sphere_lit(at, 0.24, rgba([1.0, 0.25, 0.04], 1.0), 0.72);
+                d.link(
+                    Shape::Cone,
+                    [p.pos[0] - c * 0.42, p.pos[1] - s * 0.42, p.z],
+                    [p.pos[0] - c * 0.06, p.pos[1] - s * 0.06, p.z],
+                    0.15,
+                    rgba([1.0, 0.72, 0.10], 0.92),
+                    Material::GEM,
+                    0.58,
+                );
+            }
+            ProjKind::Orb => {
+                d.sphere_lit(at, 0.20, boost(rgba(col, 1.0), 1.20), 0.72);
+                let a = p.life * 12.0;
+                d.sphere_lit(
+                    [
+                        p.pos[0] + a.cos() * 0.16,
+                        p.pos[1] + a.sin() * 0.16,
+                        p.z + 0.06,
+                    ],
+                    0.065,
+                    rgba([0.92, 0.80, 1.0], 0.9),
+                    0.38,
+                );
+            }
+            ProjKind::Royal => {
+                d.link(
+                    Shape::Taper,
+                    [p.pos[0] - c * 0.52, p.pos[1] - s * 0.52, p.z],
+                    [p.pos[0] + c * 0.30, p.pos[1] + s * 0.30, p.z],
+                    0.10,
+                    boost(rgba(col, 1.0), 1.35),
+                    Material::METAL,
+                    0.82,
+                );
+                d.sphere_lit(at, 0.12, rgba([1.0, 0.96, 0.72], 1.0), 0.72);
+            }
         }
         d.glow(
-            [p.pos[0], p.pos[1], p.z],
-            0.36,
-            1.7,
-            boost(rgba(col, 0.9), 1.5),
+            at,
+            if matches!(p.kind, ProjKind::Shell | ProjKind::Flame | ProjKind::Royal) {
+                0.28
+            } else {
+                0.21
+            },
+            1.5,
+            boost(rgba(col, 0.52), 1.15),
         );
     }
 }
@@ -746,20 +716,20 @@ fn beams(g: &Game, d: &mut DrawList) {
             d.ground_ring(
                 [b.from[0], b.from[1]],
                 r.max(0.08),
-                0.16,
-                boost(rgba(b.color, a * 0.9), 1.6),
+                0.085,
+                boost(rgba(b.color, a * 0.38), 1.14),
                 40,
             );
             d.glow(
                 [b.from[0], b.from[1], 0.3],
                 r.max(0.1) * 1.2,
-                2.0,
-                rgba(b.color, a * 0.28),
+                1.2,
+                rgba(b.color, a * 0.06),
             );
         } else {
             let w = b.width * (0.5 + a * 0.5);
-            d.bar(b.from, b.to, w, boost(rgba(b.color, a), 2.0), 1.0);
-            d.glow(b.to, w * 3.5, 1.6, boost(rgba(b.color, a), 1.6));
+            d.bar(b.from, b.to, w, boost(rgba(b.color, a), 1.35), 0.65);
+            d.glow(b.to, w * 2.2, 1.8, boost(rgba(b.color, a * 0.55), 1.18));
         }
     }
 }
@@ -774,7 +744,7 @@ pub fn show_hint(g: &Game) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::game::{Creep, Timed};
+    use crate::game::{Creep, Proj, ProjKind, Timed};
     use crate::gfx::STATIC_CAP;
     use crate::gfx::draw::SHAPE_COUNT;
 
@@ -782,6 +752,46 @@ mod tests {
         let g = Game::new();
         let decor = Decor::build(&g.board);
         (g, decor)
+    }
+
+    #[test]
+    fn bolt_tip_points_along_projectile_velocity() {
+        let mut game = Game::new();
+        let def = family_start(Family::Multi).expect("multi tower root");
+        let velocity = [17.0, 11.0];
+        game.projs.push(Proj {
+            pos: [5.0, 7.0],
+            z: 1.0,
+            vel: velocity,
+            kind: ProjKind::Bolt,
+            tower: 0,
+            def,
+            dmg: 1.0,
+            splash: 0.0,
+            bounces: 0,
+            crit: false,
+            target_idx: 0,
+            target_uid: 1,
+            life: 1.0,
+            trail: 0.0,
+        });
+        let mut list = DrawList::default();
+        shots(&game, &mut list);
+        let cone = list.solid[Shape::Cone as usize]
+            .last()
+            .expect("bolt tip cone");
+        let yaw = cone.rot[0];
+        let pitch = cone.rot[1];
+        // Local +Z transformed by the same yaw/pitch convention as solid.wgsl.
+        let forward = [
+            -pitch.sin() * yaw.cos(),
+            -pitch.sin() * yaw.sin(),
+            pitch.cos(),
+        ];
+        let length = (velocity[0] * velocity[0] + velocity[1] * velocity[1]).sqrt();
+        let expected = [velocity[0] / length, velocity[1] / length, 0.0];
+        let dot = forward[0] * expected[0] + forward[1] * expected[1];
+        assert!(dot > 0.999, "bolt tip points backward: dot={dot}");
     }
 
     /// The whole board is uploaded once into a fixed buffer. If a scenery pass
@@ -829,6 +839,14 @@ mod tests {
                 "{} is {boxes}/{total} boxes",
                 TOWERS[i].name
             );
+            let baked: usize = (crate::gfx::mesh::PRIM_COUNT..SHAPE_COUNT)
+                .map(|bucket| d.solid[bucket].len())
+                .sum();
+            assert_eq!(
+                baked, 1,
+                "{} missed its staged downloaded tower assembly",
+                TOWERS[i].name
+            );
             g.sell(0);
         }
         g.build_choice = None;
@@ -842,6 +860,7 @@ mod tests {
             push_left: 0.0,
             uid: 1,
             dist: 6.0,
+            route_dir: 1.0,
             lane: 0.0,
             pos: [8.0, 6.0],
             facing: 0.4,
@@ -854,6 +873,8 @@ mod tests {
             flying,
             radius: model.radius(),
             bounty: 5,
+            boss: false,
+            elite: false,
             slow: Timed::default(),
             burn: Timed::default(),
             poison: Timed::default(),
@@ -887,6 +908,22 @@ mod tests {
             }
             let n: usize = (0..SHAPE_COUNT).map(|i| d.solid[i].len()).sum();
             assert!(n >= 5, "{m:?} is too simple to read as anything");
+        }
+    }
+
+    /// The shipped model pack is not optional in a release-quality build. The
+    /// primitive constructions remain a corruption fallback, but an archetype
+    /// present in the blob must actually select its one-mesh bucket.
+    #[test]
+    fn every_shipped_archetype_uses_its_baked_model() {
+        for &m in Model::ALL {
+            let c = dummy(m, m.airborne());
+            let mut d = DrawList::default();
+            monsters::draw(&mut d, &c, true);
+            let baked: usize = (crate::gfx::mesh::PRIM_COUNT..SHAPE_COUNT)
+                .map(|i| d.solid[i].len())
+                .sum();
+            assert_eq!(baked, 1, "{m:?} did not use its shipped baked mesh");
         }
     }
 

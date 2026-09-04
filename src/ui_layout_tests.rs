@@ -295,14 +295,40 @@ fn every_build_card_is_inside_its_panel() {
                 c.width()
             );
         }
-        // Cards must not overlap each other.
-        for w in l.cards.windows(2) {
-            assert!(
-                w[0].right() <= w[1].left() + 0.5,
-                "{size:?}: build cards overlap"
-            );
+        // Cards must not overlap each other. Desktop uses a 4x3 command grid,
+        // while compact screens keep the paged strip, so check geometry rather
+        // than assuming every later card is to the right of the previous one.
+        for i in 0..l.cards.len() {
+            for j in i + 1..l.cards.len() {
+                assert!(
+                    !l.cards[i].intersects(l.cards[j]),
+                    "{size:?}: build cards {i} and {j} overlap"
+                );
+            }
         }
     }
+}
+
+#[test]
+fn desktop_commands_form_a_four_by_three_grid() {
+    let l = lay_out([1280.0, 720.0]);
+    assert_eq!(
+        l.cards.len(),
+        11,
+        "every base tower should be visible at once"
+    );
+    let near = |a: f32, b: f32| (a - b).abs() < 0.5;
+    for row in 0..3 {
+        let first = row * 4;
+        let end = (first + 4).min(l.cards.len());
+        for card in &l.cards[first..end] {
+            assert!(near(card.top(), l.cards[first].top()));
+        }
+    }
+    assert!(near(l.cards[0].left(), l.cards[4].left()));
+    assert!(near(l.cards[4].left(), l.cards[8].left()));
+    assert!(l.cards[4].top() > l.cards[0].bottom());
+    assert!(l.cards[8].top() > l.cards[4].bottom());
 }
 
 /// Every character the HUD prints must exist in the font it is printed with.

@@ -86,6 +86,11 @@ impl GpuVertex {
         let f = |v: i16| v as f32 / 32767.0 * POS_RANGE;
         [f(self.pos[0]), f(self.pos[1]), f(self.pos[2])]
     }
+    /// The offset to the second baked contact pose.
+    pub fn position_delta(&self) -> [f32; 3] {
+        let f = |v: i16| v as f32 / 32767.0 * POS_RANGE;
+        [f(self.dpos[0]), f(self.dpos[1]), f(self.dpos[2])]
+    }
     /// The normal this was packed from.
     pub fn normal(&self) -> [f32; 3] {
         let f = |v: i8| v as f32 / 127.0;
@@ -135,7 +140,7 @@ pub const PRIM_COUNT: usize = 9;
 /// How many baked models the buffers make room for. Slots past what
 /// `assets/models.bin` actually holds stay empty and are skipped when drawing,
 /// so adding a model to the bake does not need any of this re-sized.
-pub const MODEL_SLOTS: usize = 64;
+pub const MODEL_SLOTS: usize = 128;
 
 /// Every bucket the renderer batches by: primitives first, then models.
 pub const SHAPE_COUNT: usize = PRIM_COUNT + MODEL_SLOTS;
@@ -203,9 +208,7 @@ fn load_models(v: &mut Vec<GpuVertex>, spans: &mut [Span; SHAPE_COUNT]) -> Vec<(
     if b.len() < 12 {
         return out;
     }
-    let u32_at = |o: usize| -> u32 {
-        u32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]])
-    };
+    let u32_at = |o: usize| -> u32 { u32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]]) };
     if u32_at(0) != 0x4D44_5447 || u32_at(4) != 3 {
         return out;
     }
@@ -237,11 +240,14 @@ fn load_models(v: &mut Vec<GpuVertex>, spans: &mut [Span; SHAPE_COUNT]) -> Vec<(
             continue;
         }
         let base = v.len() as u32;
-        // The bake writes exactly `GpuVertex`, so this is a reinterpretation
-        // rather than a decode - which is the point of packing at bake time.
-        match bytemuck::try_cast_slice::<u8, GpuVertex>(&b[start..end]) {
-            Ok(verts) => v.extend_from_slice(verts),
-            Err(_) => continue,
+        // The bake writes exactly `GpuVertex`, but the variable-length name
+        // index before the body does not guarantee native alignment. A slice
+        // cast therefore rejected the entire otherwise-valid pack on names
+        // whose combined length ended at an odd address, silently sending all
+        // 56 archetypes to their primitive fallback. Read each packed vertex
+        // unaligned; the on-disk layout is deliberately byte-exact.
+        for raw in b[start..end].chunks_exact(stride) {
+            v.push(bytemuck::pod_read_unaligned::<GpuVertex>(raw));
         }
         spans[model_bucket(slot)] = Span {
             first: base,
@@ -754,34 +760,78 @@ mod tests {
         }
     }
 
-    /// A baked model stands on the ground and is one unit tall.
+    /// A baked model stands on the ground and fits the tactical unit envelope.
     ///
-    /// Not the unit *cell* - a dragon's wings are wider than it is tall, and
-    /// that is fine. What matters is the two things the game assumes: feet at
-    /// zero, so a model does not float or sink, and a height of one, so
-    /// `Pose::r` scales every archetype the same way.
+    /// Upright figures are one unit tall. A low, wide aircraft or ship is
+    /// allowed to be shorter, because constraining its footprint is what keeps
+    /// it on the road and leaves neighbouring units readable.
     #[test]
-    fn every_baked_model_stands_on_the_ground_at_unit_height() {
+    fn every_baked_model_fits_the_tactical_envelope() {
         let lib = build();
         for (name, slot) in &lib.models {
             let s = lib.spans[model_bucket(*slot)];
             let v = &lib.vertices[s.first as usize..(s.first + s.count) as usize];
-            let lo = v.iter().fold(f32::MAX, |m, x| m.min(x.position()[2]));
-            let hi = v.iter().fold(f32::MIN, |m, x| m.max(x.position()[2]));
-            assert!(lo.abs() < 0.01, "{name} does not stand on the ground: {lo}");
-            assert!((hi - 1.0).abs() < 0.01, "{name} is {hi} tall, not one");
-            let wide = v.iter().fold(0.0f32, |m, x| {
+            let lo = v.iter().fold(f32::MAX, |m, x| {
                 let p = x.position();
-                m.max(p[0].abs().max(p[1].abs()))
+                let d = x.position_delta();
+                m.min(p[2]).min(p[2] + d[2])
             });
-            // Not POS_RANGE itself: a position at exactly the range would have
-            // been clipped by the packing, so anything near it is a model that
-            // did not fit rather than one that is merely wide.
+            let hi = v.iter().fold(f32::MIN, |m, x| {
+                let p = x.position();
+                let d = x.position_delta();
+                m.max(p[2]).max(p[2] + d[2])
+            });
+            // Animated models are grounded across the shared two-pose
+            // envelope; the displayed contact pose may have both feet lifted.
             assert!(
-                wide < POS_RANGE * 0.98,
-                "{name} is {wide} wide - that is past what the packed format holds"
+                lo.abs() < 0.001,
+                "{name} does not stand on the ground: {lo}"
+            );
+            assert!(
+                hi > 0.12 && hi <= 1.01,
+                "{name} has implausible height {hi}"
+            );
+            let x0 = v.iter().fold(f32::MAX, |m, x| m.min(x.position()[0]));
+            let x1 = v.iter().fold(f32::MIN, |m, x| m.max(x.position()[0]));
+            let y0 = v.iter().fold(f32::MAX, |m, x| m.min(x.position()[1]));
+            let y1 = v.iter().fold(f32::MIN, |m, x| m.max(x.position()[1]));
+            let footprint = (x1 - x0).max(y1 - y0);
+            assert!(
+                footprint <= 1.37,
+                "{name} has a {footprint}-unit footprint - too wide for its lane/pad"
             );
         }
+    }
+
+    /// The longest imported gun is intentionally asymmetric around its
+    /// rotating base. A generic bbox-centering pass makes that whole turret
+    /// orbit around the pad as it tracks, which reads as aiming in the wrong
+    /// direction even when its yaw is correct.
+    #[test]
+    fn imported_turrets_keep_the_authored_base_pivot() {
+        let lib = build();
+        let slot = lib
+            .models
+            .iter()
+            .find(|(name, _)| name == "TowerSeed2")
+            .map(|(_, slot)| *slot)
+            .expect("TowerSeed2 model");
+        let span = lib.spans[model_bucket(slot)];
+        let verts = &lib.vertices[span.first as usize..(span.first + span.count) as usize];
+        let x0 = verts.iter().fold(f32::MAX, |m, v| m.min(v.position()[0]));
+        let x1 = verts.iter().fold(f32::MIN, |m, v| m.max(v.position()[0]));
+        let y0 = verts.iter().fold(f32::MAX, |m, v| m.min(v.position()[1]));
+        let y1 = verts.iter().fold(f32::MIN, |m, v| m.max(v.position()[1]));
+
+        assert!(((x0 + x1) * 0.5).abs() < 0.02, "base moved sideways");
+        assert!(
+            (y0 + y1) * 0.5 < -0.20,
+            "TowerSeed2 was bbox-centred again: y [{y0:.3}, {y1:.3}]"
+        );
+        assert!(
+            y0 < -0.95 && y1 > 0.25,
+            "unexpected authored forward envelope: y [{y0:.3}, {y1:.3}]"
+        );
     }
 
     #[test]
@@ -798,23 +848,30 @@ mod tests {
         );
     }
 
-    /// No single model is heavy enough to sink a wave of it.
+    /// No single model is heavy enough to sink the number of instances it can
+    /// actually have on the board.
     ///
     /// The flood limit is seven hundred monsters, so a model's triangle count is
     /// multiplied by seven hundred in the worst frame the game allows. Eight
     /// thousand is about five and a half million triangles, which a desktop
-    /// manages and a phone does not enjoy; anything above it needs a lighter
-    /// model rather than a faster renderer.
+    /// manages and a phone does not enjoy. Authored weapon turrets get a
+    /// separate ceiling: there are only 56 protected pads and a normal clear
+    /// uses about thirty, so richer barrels, coils and mechanisms cost less than
+    /// one full creep wave.
     #[test]
     fn no_baked_model_is_too_heavy_for_a_full_wave() {
         let lib = build();
         for (name, slot) in &lib.models {
             let tris = lib.spans[model_bucket(*slot)].count / 3;
+            let limit = if name.starts_with("Tower") {
+                16_000
+            } else {
+                8_000
+            };
             assert!(
-                tris < 8_000,
-                "{name} is {tris} triangles; seven hundred of them is too many"
+                tris < limit,
+                "{name} is {tris} triangles; its instance budget permits fewer than {limit}"
             );
         }
     }
-
 }

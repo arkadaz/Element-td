@@ -7,6 +7,7 @@
 //! Rendering runs on wgpu (WebGPU in the browser, WebGL2 as a fallback, native
 //! Vulkan/DX12 on the desktop). egui draws the HUD on top of the same surface.
 
+mod audio;
 #[cfg(test)]
 mod bench_tests;
 mod decor;
@@ -45,27 +46,23 @@ use net::Net;
 /// builds shares it, so the ground meets the screen at one angle whether the
 /// player is scrolling the board, watching the title backdrop turn or looking
 /// at a screenshot.
-pub const CAM_PITCH_DEG: f32 = 52.0;
-/// A quarter turn, so the lane's long axis runs across a landscape window
-/// rather than up and down it.
-pub const CAM_YAW_DEG: f32 = 90.0;
+pub const CAM_PITCH_DEG: f32 = 55.0;
+/// Warcraft's tactical bearing: straight lanes stay horizontal or vertical on
+/// screen, so their turns and two traffic directions are readable instantly.
+pub const CAM_YAW_DEG: f32 = 0.0;
 /// How tightly a fitted framing pulls in on what it was asked to fit. Only the
 /// title screen's backdrop is framed that way now; play frames a window of the
 /// board and scrolls it.
 pub const CAM_ZOOM: f32 = 1.15;
-/// How much board is in frame at the zoom play opens on, measured along the
-/// longer side of the ground the camera takes in.
+/// How much of the compact solo board is in frame at the opening zoom.
 ///
-/// Warcraft III sits about thirteen tiles back and shows a couple of dozen of
-/// them, and the player scrolls for the rest; this lands the camera at much
-/// the same distance. Framing the whole forty-five tile arena at once instead
-/// - which is what this did until the camera learned to pan - put a monster on
-/// screen twelve pixels tall, and no amount of modelling or lighting survives
-/// being that small.
-pub const CAM_SPAN: f32 = 26.0;
+/// The compact arena only needs a short pan to reach its opposite side. Keeping
+/// this tighter than a full-board overview makes downloaded models and target
+/// states readable instead of turning monsters into twelve-pixel dots.
+pub const CAM_SPAN: f32 = 23.0;
 /// The tightest the wheel may zoom in. Closer than this and a tower fills the
 /// screen with the lane either side of it out of frame.
-pub const CAM_SPAN_MIN: f32 = 14.0;
+pub const CAM_SPAN_MIN: f32 = 13.0;
 /// How fast the keys and the screen edge scroll, in viewports per second.
 const CAM_PAN_SPEED: f32 = 0.6;
 /// How close to the edge of the board the cursor scrolls the view, in points.
@@ -81,6 +78,46 @@ const CAM_WHEEL: f32 = 0.004;
 const MAX_SCENE_DPR: f32 = 1.0;
 /// Key light direction, shared by the shader and the shadow camera.
 const LIGHT_DIR: [f32; 3] = [-0.40, -0.52, 0.76];
+
+/// Browsers own the presentation compositor, so they must also choose the
+/// adapter that can present to it. Forcing the discrete GPU can create a valid
+/// WebGPU device on one adapter while Edge presents the canvas on another,
+/// leaving a permanently black canvas after the first custom render callback.
+fn browser_power_preference() -> wgpu::PowerPreference {
+    wgpu::PowerPreference::None
+}
+
+/// -1 at the low edge, +1 at the high edge, and zero in the safe middle.
+/// Kept separate from camera state so the literal window-edge behavior is
+/// easy to regression-test without constructing an egui frame.
+fn edge_scroll_axis(lo: f32, hi: f32, at: f32) -> f32 {
+    f32::from(at >= hi - CAM_EDGE) - f32::from(at <= lo + CAM_EDGE)
+}
+
+#[cfg(test)]
+mod camera_input_tests {
+    use super::*;
+
+    #[test]
+    fn literal_top_and_bottom_edges_scroll_in_opposite_directions() {
+        assert_eq!(edge_scroll_axis(0.0, 900.0, 0.0), -1.0);
+        assert_eq!(edge_scroll_axis(0.0, 900.0, 899.0), 1.0);
+        assert_eq!(edge_scroll_axis(0.0, 900.0, 450.0), 0.0);
+    }
+}
+
+#[cfg(test)]
+mod browser_gpu_tests {
+    use super::*;
+
+    #[test]
+    fn browser_leaves_presentation_adapter_selection_to_the_compositor() {
+        assert!(matches!(
+            browser_power_preference(),
+            wgpu::PowerPreference::None
+        ));
+    }
+}
 
 // ---------------------------------------------------------------- gpu bridge
 
@@ -164,7 +201,7 @@ struct Keys {
     help: bool,
     bloom: bool,
     shift: bool,
-    digits: [bool; 9],
+    digits: [bool; 11],
     /// Which way the player is scrolling, in screen terms: x across, y down,
     /// each -1, 0 or 1. Held rather than tapped, so it is read every frame.
     pan: [f32; 2],
@@ -175,7 +212,7 @@ struct Keys {
 
 fn read_keys(ui: &egui::Ui) -> Keys {
     ui.input(|i| {
-        const NUMS: [Key; 9] = [
+        const NUMS: [Key; 11] = [
             Key::Num1,
             Key::Num2,
             Key::Num3,
@@ -185,8 +222,10 @@ fn read_keys(ui: &egui::Ui) -> Keys {
             Key::Num7,
             Key::Num8,
             Key::Num9,
+            Key::Num0,
+            Key::Minus,
         ];
-        let mut digits = [false; 9];
+        let mut digits = [false; 11];
         for (n, key) in NUMS.iter().enumerate() {
             digits[n] = i.key_pressed(*key);
         }
@@ -271,6 +310,7 @@ fn now_ms() -> f64 {
 // ---------------------------------------------------------------- app
 
 struct App {
+    audio: audio::Audio,
     game: Game,
     decor: Decor,
     ust: ui::UiState,
@@ -328,6 +368,7 @@ impl App {
 
         let pads = pad_bounds(&game.board);
         let mut app = Self {
+            audio: audio::Audio::new(),
             game,
             decor,
             ust: ui::UiState::default(),
@@ -413,22 +454,15 @@ impl App {
     /// camera is close in or right out.
     ///
     /// The clamp at the end is the whole reason this is not just an addition:
-    /// the player defends one arena out of eight on a shared map, and the
-    /// other seven are not theirs to look at.
+    /// the player should never be able to drift beyond the compact arena.
     fn camera_input(&mut self, resp: &egui::Response, rect: Rect, rig: &Rig, k: &Keys, dt: f32) {
         let mut scroll = [k.pan[0], k.pan[1]];
         let mut drag = [0.0f32, 0.0];
 
         if let Some(p) = resp.hover_pos() {
-            // Edge scroll, over the board only. `hover_pos` is None whenever a
-            // panel, a modal or the scoreboard is under the cursor, which is
-            // exactly the test that keeps the view still while the player is
-            // reaching for a button in the HUD.
-            let edge = |lo: f32, hi: f32, at: f32| {
-                f32::from(at >= hi - CAM_EDGE) - f32::from(at <= lo + CAM_EDGE)
-            };
-            scroll[0] += edge(rect.left(), rect.right(), p.x);
-            scroll[1] += edge(rect.top(), rect.bottom(), p.y);
+            // Horizontal edge scroll stays on the board, where it cannot fire
+            // while the player is reading the side panels.
+            scroll[0] += edge_scroll_axis(rect.left(), rect.right(), p.x);
 
             let wheel = resp.ctx.input(|i| i.smooth_scroll_delta.y);
             if wheel != 0.0 {
@@ -436,6 +470,23 @@ impl App {
                 // than crawling when close in and jumping when far out.
                 self.span *= (-wheel * CAM_WHEEL).exp();
             }
+        }
+
+        // The command bar covers the board's bottom edge and the status bar
+        // covers its top edge. Looking only at `resp.hover_pos()` therefore
+        // made vertical edge scrolling stop exactly where an RTS player moves
+        // the cursor. Use the literal viewport edge for Y; the narrow 14-point
+        // strip sits outside the actual controls, and holding a mouse button
+        // suppresses it so clicking the HUD never drags the battlefield.
+        let (pointer, button_down) = resp.ctx.input(|i| {
+            (
+                i.pointer.hover_pos(),
+                i.pointer.primary_down() || i.pointer.secondary_down() || i.pointer.middle_down(),
+            )
+        });
+        if !button_down && let Some(p) = pointer {
+            let viewport = resp.ctx.content_rect();
+            scroll[1] += edge_scroll_axis(viewport.top(), viewport.bottom(), p.y);
         }
 
         // A drag that started on the board keeps working past the edge of it,
@@ -514,11 +565,7 @@ impl App {
             g.paused = !g.paused;
         }
         if k.speed {
-            g.speed = match g.speed as i32 {
-                1 => 2.0,
-                2 => 3.0,
-                _ => 1.0,
-            };
+            g.cycle_speed();
         }
         if k.send {
             g.send_wave();
@@ -661,31 +708,33 @@ impl App {
             .frame(egui::Frame::NONE)
             .show(ui, |ui| {
                 let rect = ui.max_rect();
-                let ppp = ctx.pixels_per_point().min(MAX_SCENE_DPR);
-                let px = [
-                    (rect.width() * ppp).round().max(8.0) as u32,
-                    (rect.height() * ppp).round().max(8.0) as u32,
-                ];
-                let camera = Camera::frame_rect(
-                    crate::game::greentd_map::VIEW,
-                    rect.width() / rect.height().max(1.0),
-                    CAM_PITCH_DEG.to_radians(),
-                    // A slow orbit, so the title screen is not a still frame.
-                    CAM_YAW_DEG.to_radians() + (self.anim * 0.06).sin() * 0.22,
-                    CAM_ZOOM * 1.04,
-                );
-                self.draw.clear();
-                view::draw_scene(&self.game, &self.decor, &mut self.draw, self.anim);
-                self.spawns.clear();
-                self.publish_frame(camera, px, dt);
-                ui.painter()
-                    .add(egui_wgpu::Callback::new_paint_callback(rect, BoardCallback));
+                if !menu::paint_backdrop(&ctx, ui.painter(), rect) {
+                    let ppp = ctx.pixels_per_point().min(MAX_SCENE_DPR);
+                    let px = [
+                        (rect.width() * ppp).round().max(8.0) as u32,
+                        (rect.height() * ppp).round().max(8.0) as u32,
+                    ];
+                    let camera = Camera::frame_rect(
+                        crate::game::greentd_map::VIEW,
+                        rect.width() / rect.height().max(1.0),
+                        CAM_PITCH_DEG.to_radians(),
+                        // A slow orbit, so the fallback is not a still frame.
+                        CAM_YAW_DEG.to_radians() + (self.anim * 0.06).sin() * 0.22,
+                        CAM_ZOOM * 1.04,
+                    );
+                    self.draw.clear();
+                    view::draw_scene(&self.game, &self.decor, &mut self.draw, self.anim);
+                    self.spawns.clear();
+                    self.publish_frame(camera, px, dt);
+                    ui.painter()
+                        .add(egui_wgpu::Callback::new_paint_callback(rect, BoardCallback));
+                }
             });
 
         match menu::show(&ctx, &mut self.menu, &mut self.net, dt) {
-            menu::Action::SinglePlayer => {
+            menu::Action::SinglePlayer(difficulty) => {
                 self.net.leave();
-                self.game.start_run(seed_now());
+                self.game.start_run_with_difficulty(seed_now(), difficulty);
                 save::clear();
                 self.menu.screen = Screen::Playing;
             }
@@ -699,7 +748,7 @@ impl App {
                         // for.
                         save::clear();
                         self.menu.saved = None;
-                        self.game.toast("That saved run could not be read");
+                        self.game.error("That saved run could not be read");
                     }
                 }
             }
@@ -752,11 +801,30 @@ impl eframe::App for App {
         }
 
         // --- network: drain the socket before anything reads its state
-        if let Some(net::Event::Started { seed, .. }) = self.net.poll() {
-            self.game.start_run(seed);
+        if let Some(net::Event::Started { seed, difficulty }) = self.net.poll() {
+            self.game
+                .start_run_with_difficulty(seed, crate::game::Difficulty::from_u8(difficulty));
             self.menu.screen = Screen::Playing;
         }
         self.ust.online = self.net.is_online();
+
+        // Browser QA needs a semantic readiness signal. A changed screenshot
+        // is not enough: the boot splash disappearing into a black swapchain is
+        // also a changed screenshot. This marker lets the real Edge smoke test
+        // wait for the title frame and prove that its click entered gameplay.
+        #[cfg(target_arch = "wasm32")]
+        if let Some(root) = web_sys::window()
+            .and_then(|window| window.document())
+            .and_then(|document| document.document_element())
+        {
+            let screen = match self.menu.screen {
+                Screen::Title => "title",
+                Screen::Connect => "connect",
+                Screen::Lobby => "lobby",
+                Screen::Playing => "playing",
+            };
+            let _ = root.set_attribute("data-green-td-screen", screen);
+        }
 
         // --- menu: the board keeps rendering behind it as a live backdrop
         if self.menu.screen != Screen::Playing {
@@ -782,7 +850,6 @@ impl eframe::App for App {
         // --- simulate
         let t_frame = now_ms();
         self.game.update(dt);
-        self.game.sound_cues.clear();
         self.net.push(self.game.snapshot(), dt);
         if std::mem::take(&mut self.game.wants_save) {
             // Solo runs only: a room's run belongs to the room, and resuming
@@ -877,9 +944,15 @@ impl eframe::App for App {
                 ui::board_hover(&self.game, &resp, &camera, rect);
             });
 
-        ui::scoreboard(&self.game, &ctx);
         menu::room_scoreboard(&ctx, &self.net, self.ust.compact);
         ui::modals(&mut self.game, &ctx, &mut self.ust);
+        // Drain after board input and modal actions as well as simulation, so
+        // a build click and an automatic wave boundary both sound this frame.
+        if self.ust.sound_enabled {
+            self.audio.play_cues(&mut self.game.sound_cues);
+        } else {
+            self.game.sound_cues.clear();
+        }
         Profile::feed(
             &mut self.prof.hud,
             now_ms() - t_hud - self.prof.build as f64,
@@ -911,9 +984,23 @@ impl eframe::App for App {
 /// is the corner the map's own Red player feeds creeps into.
 pub fn lane_middle() -> [f32; 2] {
     let lap = game::greentd_map::LAP;
-    match lap.first() {
-        Some(p) => *p,
-        None => {
+    match (lap.first(), lap.get(1)) {
+        // Start a few tiles beyond the portal. The gate remains in frame as a
+        // landmark without sitting over the exact point the player needs to
+        // read, select and build around.
+        (Some(a), Some(b)) => {
+            let on_lane = [a[0] + (b[0] - a[0]) * 0.18, a[1] + (b[1] - a[1]) * 0.18];
+            let v = game::greentd_map::VIEW;
+            let centre = [(v[0] + v[2]) * 0.5, (v[1] + v[3]) * 0.5];
+            // Bias a few tiles into the arena. The gate stays in view, but the
+            // board—not empty space beyond its wall—owns the opening frame.
+            [
+                on_lane[0] + (centre[0] - on_lane[0]) * 0.12,
+                on_lane[1] + (centre[1] - on_lane[1]) * 0.12,
+            ]
+        }
+        (Some(p), None) => *p,
+        _ => {
             let v = game::greentd_map::VIEW;
             [(v[0] + v[2]) * 0.5, (v[1] + v[3]) * 0.5]
         }
@@ -1032,21 +1119,38 @@ fn main() {
             .expect("#gamecanvas missing")
             .dyn_into::<web_sys::HtmlCanvasElement>()
             .unwrap();
-        // Ask the browser for the discrete GPU. Chrome and Firefox honour this
-        // for both WebGPU and WebGL; on Windows the user may additionally need
-        // the browser set to "High performance" in Graphics settings.
+        // Let the browser choose its proven presentation adapter. Forcing the
+        // discrete adapter made some dual-GPU Edge installations initialise
+        // successfully and then present a permanently black canvas: Edge's
+        // compositor was running on a different adapter. Native builds can
+        // safely make an explicit choice; a browser owns its compositor.
         let mut web = eframe::WebOptions::default();
         if let egui_wgpu::WgpuSetup::CreateNew(setup) = &mut web.wgpu_options.wgpu_setup {
-            setup.power_preference = wgpu::PowerPreference::HighPerformance;
+            setup.power_preference = browser_power_preference();
         }
         let result = eframe::WebRunner::new()
             .start(canvas, web, Box::new(|cc| Ok(Box::new(App::new(cc)))))
             .await;
-        if let Some(el) = document.get_element_by_id("boot") {
-            el.remove();
-        }
-        if let Err(e) = result {
-            log::error!("failed to start: {e:?}");
+        match result {
+            Ok(()) => {
+                if let Some(el) = document.get_element_by_id("boot") {
+                    // Keep the node available for the page-level device-loss
+                    // handler. Removing it turned every later GPU error into
+                    // an unexplained black canvas.
+                    let _ = el.set_attribute("style", "display:none");
+                }
+            }
+            Err(e) => {
+                // Never replace a useful loading screen with an unexplained
+                // black canvas. Browsers can deny WebGPU/WebGL for driver or
+                // policy reasons; make that failure actionable on the page.
+                if let Some(el) = document.get_element_by_id("boot") {
+                    el.set_text_content(Some(&format!(
+                        "Green Circle TD could not start its graphics renderer.\n\n{e:?}\n\nEnable hardware acceleration or try an updated Chrome, Edge, or Firefox."
+                    )));
+                }
+                log::error!("failed to start: {e:?}");
+            }
         }
     });
 }

@@ -36,6 +36,21 @@
     #boot small { font-size: 11px; letter-spacing: .16em; text-transform: uppercase; }
     @keyframes slide { 0% { transform: translateX(-110%);} 100% { transform: translateX(260%);} }
   </style>
+  <script>
+    // A renderer or shader failure must never collapse into a silent black
+    // screen. The Rust boot path replaces this text with its own detailed
+    // adapter error when it can; this catches later panics and device loss.
+    function showBootFailure(reason) {
+      const boot = document.getElementById('boot');
+      if (!boot) return;
+      boot.style.display = 'grid';
+      boot.innerHTML = '<h1>Green Circle TD</h1><small style="max-width:680px;line-height:1.6;text-align:center;color:#ff9b84">' +
+        String(reason || 'The graphics device stopped responding.') +
+        '<br><br>Reload once. If this repeats, enable hardware acceleration in Edge settings and restart Edge.</small>';
+    }
+    window.addEventListener('error', event => showBootFailure(event.message));
+    window.addEventListener('unhandledrejection', event => showBootFailure(event.reason));
+  </script>
 </head>
 <body>
   <canvas id="gamecanvas"></canvas>

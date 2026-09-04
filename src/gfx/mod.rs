@@ -32,14 +32,18 @@ use draw::{DrawList, Instance};
 
 use crate::game::fx::ParticleSpawn;
 use crate::math::{Camera, Mat4, v3};
-use mesh::{SHAPE_COUNT, Span};
+use mesh::{PRIM_COUNT, SHAPE_COUNT, Span};
 
 /// Ground textures, baked by `tools/bake_textures.py` from CC0 sources.
 pub static GROUND_BLOB: &[u8] = include_bytes!("../../assets/textures.bin");
 
-/// The decoded ground pixels, kept between creating the texture and having a
-/// queue to fill it with.
-static GROUND_PIXELS: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+/// The decoded ground pixels and their CPU-built mip chain, kept between
+/// creating the texture and having a queue to fill it with.
+struct GroundPixels {
+    mips: Vec<Vec<u8>>,
+}
+
+static GROUND_PIXELS: std::sync::OnceLock<GroundPixels> = std::sync::OnceLock::new();
 
 pub const STATIC_CAP: usize = 24_576;
 pub const INSTANCE_CAP: usize = 32_768;
@@ -57,6 +61,95 @@ const CLEAR: wgpu::Color = wgpu::Color {
     a: 0.0,
 };
 
+#[inline]
+fn srgb_to_linear(v: u8) -> f32 {
+    let x = v as f32 / 255.0;
+    if x <= 0.04045 {
+        x / 12.92
+    } else {
+        ((x + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+#[inline]
+fn linear_to_srgb(v: f32) -> u8 {
+    let x = v.clamp(0.0, 1.0);
+    let y = if x <= 0.003_130_8 {
+        x * 12.92
+    } else {
+        1.055 * x.powf(1.0 / 2.4) - 0.055
+    };
+    (y * 255.0 + 0.5) as u8
+}
+
+/// Builds colour-correct mips for the shared colour/normal texture array.
+///
+/// Colour is averaged in linear light. Normal layers are also decoded to
+/// linear, but then treated as vectors and renormalised before being stored.
+/// A plain byte average would both darken the albedo and make distant normal
+/// maps lose length, which is exactly the sparkling/noisy ground mipmaps are
+/// meant to remove.
+fn build_ground_mips(base: &[u8], size: u32, layers: u32) -> Vec<Vec<u8>> {
+    let expected = size as usize * size as usize * layers as usize * 4;
+    if size == 0 || layers == 0 || base.len() != expected {
+        return vec![base.to_vec()];
+    }
+
+    let mut out = vec![base.to_vec()];
+    let mut prev_size = size;
+    while prev_size > 1 {
+        let next_size = (prev_size / 2).max(1);
+        let prev = out.last().expect("base mip exists");
+        let mut next = vec![0u8; next_size as usize * next_size as usize * layers as usize * 4];
+        let normal_start = if layers % 2 == 0 { layers / 2 } else { layers };
+
+        for layer in 0..layers {
+            let normal = layer >= normal_start;
+            for y in 0..next_size {
+                for x in 0..next_size {
+                    let mut rgba = [0.0f32; 4];
+                    for oy in 0..2 {
+                        for ox in 0..2 {
+                            let sx = (x * 2 + ox).min(prev_size - 1);
+                            let sy = (y * 2 + oy).min(prev_size - 1);
+                            let i = (((layer * prev_size + sy) * prev_size + sx) * 4) as usize;
+                            for c in 0..3 {
+                                rgba[c] += srgb_to_linear(prev[i + c]);
+                            }
+                            rgba[3] += prev[i + 3] as f32 / 255.0;
+                        }
+                    }
+                    for c in &mut rgba {
+                        *c *= 0.25;
+                    }
+                    if normal {
+                        let mut n = [
+                            rgba[0] * 2.0 - 1.0,
+                            rgba[1] * 2.0 - 1.0,
+                            rgba[2] * 2.0 - 1.0,
+                        ];
+                        let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt().max(1e-5);
+                        for c in &mut n {
+                            *c /= len;
+                        }
+                        rgba[0] = n[0] * 0.5 + 0.5;
+                        rgba[1] = n[1] * 0.5 + 0.5;
+                        rgba[2] = n[2] * 0.5 + 0.5;
+                    }
+                    let o = (((layer * next_size + y) * next_size + x) * 4) as usize;
+                    for c in 0..3 {
+                        next[o + c] = linear_to_srgb(rgba[c]);
+                    }
+                    next[o + 3] = (rgba[3].clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+                }
+            }
+        }
+        out.push(next);
+        prev_size = next_size;
+    }
+    out
+}
+
 /// Builds the scene shader for a quality preset.
 ///
 /// `SHADOW_TAPS` is patched into the source rather than passed as a uniform so
@@ -73,6 +166,23 @@ fn make_solid_shader(device: &wgpu::Device, quality: Quality) -> wgpu::ShaderMod
         label: Some("solid.wgsl"),
         source: wgpu::ShaderSource::Wgsl(src.into()),
     })
+}
+
+#[cfg(test)]
+mod shader_portability_tests {
+    /// WebGPU forbids implicit-derivative samples behind non-uniform fragment
+    /// branches. Edge enforces this strictly; keeping every shadow comparison
+    /// and ground-atlas sample at an explicit level prevents a shader accepted
+    /// by native backends from becoming a black browser canvas.
+    #[test]
+    fn solid_samples_are_valid_in_non_uniform_control_flow() {
+        let src = include_str!("shaders/solid.wgsl");
+        assert!(!src.contains("textureSampleCompare("));
+        assert!(src.matches("textureSampleCompareLevel(").count() >= 6);
+        assert!(!src.contains("textureSample("));
+        assert!(src.matches("textureSampleGrad(").count() >= 5);
+        assert!(src.contains("triplanar"));
+    }
 }
 
 // ---------------------------------------------------------------- quality
@@ -185,7 +295,7 @@ struct PostU {
     dir: [f32; 2],
     texel: [f32; 2],
     params: [f32; 4],
-    /// xy = where the key light's bearing lands in composite UV, zw unused.
+    /// xy = key-light bearing, z = wrapped time, w unused.
     sun: [f32; 4],
 }
 
@@ -197,6 +307,7 @@ pub struct GpuParticle {
     t0_life: [f32; 2],
     size: [f32; 2],
     color: [f32; 4],
+    style: [f32; 2],
 }
 
 // ---------------------------------------------------------------- targets
@@ -250,6 +361,7 @@ pub struct Renderer {
     ground_sampler: wgpu::Sampler,
     ground_size: u32,
     ground_layers: u32,
+    ground_mips: u32,
     shadow_sampler: wgpu::Sampler,
     shadow_size: u32,
 
@@ -322,9 +434,15 @@ const SOLID_ATTRS: [wgpu::VertexAttribute; 7] = wgpu::vertex_attr_array![
 ];
 
 /// Billboards have no mesh buffer, so their instance data starts at location 0.
-/// Glow instances and particles share this layout exactly.
+/// Glow instances use the common prefix of [`draw::Instance`].
 const BILLBOARD_ATTRS: [wgpu::VertexAttribute; 5] = wgpu::vertex_attr_array![
     0 => Float32x3, 1 => Float32x3, 2 => Float32x2, 3 => Float32x2, 4 => Float32x4
+];
+
+/// Particles append a style id and rotation seed to that common prefix.
+const PARTICLE_ATTRS: [wgpu::VertexAttribute; 6] = wgpu::vertex_attr_array![
+    0 => Float32x3, 1 => Float32x3, 2 => Float32x2, 3 => Float32x2, 4 => Float32x4,
+    5 => Float32x2
 ];
 
 const ADD_BLEND: wgpu::BlendState = wgpu::BlendState {
@@ -361,6 +479,14 @@ fn billboard_layout<'a>(stride: u64) -> wgpu::VertexBufferLayout<'a> {
         array_stride: stride,
         step_mode: wgpu::VertexStepMode::Instance,
         attributes: &BILLBOARD_ATTRS,
+    }
+}
+
+fn particle_layout<'a>() -> wgpu::VertexBufferLayout<'a> {
+    wgpu::VertexBufferLayout {
+        array_stride: std::mem::size_of::<GpuParticle>() as u64,
+        step_mode: wgpu::VertexStepMode::Instance,
+        attributes: &PARTICLE_ATTRS,
     }
 }
 
@@ -644,7 +770,7 @@ impl Renderer {
             ..Default::default()
         });
 
-        let (ground_tex, ground_view, ground_size, ground_layers) =
+        let (ground_tex, ground_view, ground_size, ground_layers, ground_mips) =
             Self::ground_texture(device);
         // Repeat, because the terrain is addressed by world position and a tile
         // twenty tiles out is at texture coordinate twenty.
@@ -742,6 +868,7 @@ impl Renderer {
             ground_sampler,
             ground_size,
             ground_layers,
+            ground_mips,
             shadow_sampler,
             shadow_size,
             uniform,
@@ -780,12 +907,12 @@ impl Renderer {
             // emissives, glow sprites and a specular glint off metal clear it.
             // A threshold low enough to catch lit ground is what turns a green
             // field into a grey-green haze.
-            bloom_strength: 0.85,
-            bloom_threshold: 0.90,
+            bloom_strength: 0.56,
+            bloom_threshold: 1.08,
             particle_drag: 2.4,
             particle_gravity: -3.2,
             light_dir: [-0.40, -0.52, 0.76],
-            fog: [0.055, 0.070, 0.115, 0.030],
+            fog: [0.075, 0.105, 0.115, 0.024],
             last_instances: 0,
         }
     }
@@ -837,37 +964,38 @@ impl Renderer {
         // match its sample count and share its depth buffer - tested, so a glow
         // inside a tower is hidden by it, but not written, so two overlapping
         // glows still add.
-        let make_billboard = |label: &str, vs: &str, fs: &str, stride: u64| {
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some(label),
-                layout: Some(layout),
-                vertex: wgpu::VertexState {
-                    module: bb_src,
-                    entry_point: Some(vs),
-                    buffers: &[Some(billboard_layout(stride))],
-                    compilation_options: Default::default(),
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: bb_src,
-                    entry_point: Some(fs),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: hdr_format,
-                        blend: Some(ADD_BLEND),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                    compilation_options: Default::default(),
-                }),
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::TriangleStrip,
-                    cull_mode: None,
-                    ..Default::default()
-                },
-                depth_stencil: Some(depth_state(false)),
-                multisample: ms,
-                multiview_mask: None,
-                cache: None,
-            })
-        };
+        let make_billboard =
+            |label: &str, vs: &str, fs: &str, vertex_layout: wgpu::VertexBufferLayout<'static>| {
+                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some(label),
+                    layout: Some(layout),
+                    vertex: wgpu::VertexState {
+                        module: bb_src,
+                        entry_point: Some(vs),
+                        buffers: &[Some(vertex_layout)],
+                        compilation_options: Default::default(),
+                    },
+                    fragment: Some(wgpu::FragmentState {
+                        module: bb_src,
+                        entry_point: Some(fs),
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format: hdr_format,
+                            blend: Some(ADD_BLEND),
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                        compilation_options: Default::default(),
+                    }),
+                    primitive: wgpu::PrimitiveState {
+                        topology: wgpu::PrimitiveTopology::TriangleStrip,
+                        cull_mode: None,
+                        ..Default::default()
+                    },
+                    depth_stencil: Some(depth_state(false)),
+                    multisample: ms,
+                    multiview_mask: None,
+                    cache: None,
+                })
+            };
 
         ScenePipes {
             solid,
@@ -875,14 +1003,9 @@ impl Renderer {
                 "glow",
                 "vs_glow",
                 "fs_glow",
-                std::mem::size_of::<Instance>() as u64,
+                billboard_layout(std::mem::size_of::<Instance>() as u64),
             ),
-            particle: make_billboard(
-                "particles",
-                "vs_part",
-                "fs_part",
-                std::mem::size_of::<GpuParticle>() as u64,
-            ),
+            particle: make_billboard("particles", "vs_part", "fs_part", particle_layout()),
             samples,
         }
     }
@@ -955,13 +1078,14 @@ impl Renderer {
     /// missing or malformed produces a single white pixel per layer, which
     /// multiplies to nothing and leaves the field exactly the flat colour it was
     /// before textures existed.
-    fn ground_texture(device: &wgpu::Device) -> (wgpu::Texture, wgpu::TextureView, u32, u32) {
+    fn ground_texture(device: &wgpu::Device) -> (wgpu::Texture, wgpu::TextureView, u32, u32, u32) {
         let blob = GROUND_BLOB;
         let mut size = 1u32;
         let mut layers = 1u32;
         let mut pixels: Vec<u8> = vec![255, 255, 255, 255];
         if blob.len() >= 16 {
-            let at = |o: usize| u32::from_le_bytes([blob[o], blob[o + 1], blob[o + 2], blob[o + 3]]);
+            let at =
+                |o: usize| u32::from_le_bytes([blob[o], blob[o + 1], blob[o + 2], blob[o + 3]]);
             let (magic, ver, sz, n) = (at(0), at(4), at(8), at(12));
             let need = 16 + (sz as usize * sz as usize * 4) * n as usize;
             if magic == 0x5845_5447 && ver == 2 && sz > 0 && n > 0 && blob.len() >= need {
@@ -970,6 +1094,7 @@ impl Renderer {
                 pixels = blob[16..need].to_vec();
             }
         }
+        let mips = u32::BITS - size.leading_zeros();
         let tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("ground textures"),
             size: wgpu::Extent3d {
@@ -977,7 +1102,7 @@ impl Renderer {
                 height: size,
                 depth_or_array_layers: layers,
             },
-            mip_level_count: 1,
+            mip_level_count: mips,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Rgba8UnormSrgb,
@@ -990,33 +1115,38 @@ impl Renderer {
         });
         // The pixels are written by `upload_static`, which is the first point a
         // queue exists; the bind group only ever needs the view.
-        GROUND_PIXELS.get_or_init(|| pixels);
-        (tex, view, size, layers)
+        GROUND_PIXELS.get_or_init(|| GroundPixels {
+            mips: build_ground_mips(&pixels, size, layers),
+        });
+        (tex, view, size, layers, mips)
     }
 
     pub fn upload_static(&self, queue: &wgpu::Queue) {
         let lib = mesh::build();
         queue.write_buffer(&self.mesh, 0, bytemuck::cast_slice(&lib.vertices));
         if let Some(px) = GROUND_PIXELS.get() {
-            queue.write_texture(
-                wgpu::TexelCopyTextureInfo {
-                    texture: &self.ground_tex,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d::ZERO,
-                    aspect: wgpu::TextureAspect::All,
-                },
-                px,
-                wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(self.ground_size * 4),
-                    rows_per_image: Some(self.ground_size),
-                },
-                wgpu::Extent3d {
-                    width: self.ground_size,
-                    height: self.ground_size,
-                    depth_or_array_layers: self.ground_layers,
-                },
-            );
+            for mip in 0..self.ground_mips {
+                let size = (self.ground_size >> mip).max(1);
+                queue.write_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &self.ground_tex,
+                        mip_level: mip,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    &px.mips[mip as usize],
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(size * 4),
+                        rows_per_image: Some(size),
+                    },
+                    wgpu::Extent3d {
+                        width: size,
+                        height: size,
+                        depth_or_array_layers: self.ground_layers,
+                    },
+                );
+            }
         }
     }
 
@@ -1031,7 +1161,13 @@ impl Renderer {
     ) -> ([(u32, u32); SHAPE_COUNT], u32) {
         scratch.clear();
         let mut batches = [(0u32, 0u32); SHAPE_COUNT];
-        for (i, bucket) in list.solid.iter().enumerate() {
+        // Baked models are the gameplay pieces: towers and monsters. Pack
+        // their buckets before generated cosmetic primitives so an overloaded
+        // frame may lose the tail of a shockwave or range ring, never the units
+        // the player is aiming at. The old primitive-first order made imported
+        // models disappear once lap rings pushed a late frame past the cap.
+        for i in (PRIM_COUNT..SHAPE_COUNT).chain(0..PRIM_COUNT) {
+            let bucket = &list.solid[i];
             let room = cap.saturating_sub(scratch.len());
             let n = bucket.len().min(room);
             batches[i] = (scratch.len() as u32, n as u32);
@@ -1273,14 +1409,22 @@ impl Renderer {
         } else {
             0.0
         };
-        let common = [self.bloom_threshold, strength, srgb, 0.0];
-        let texel = [1.0 / bw, 1.0 / bh];
+        let ultra = if self.quality == Quality::Ultra {
+            1.0
+        } else {
+            0.0
+        };
+        let common = [self.bloom_threshold, strength, srgb, ultra];
+        let bloom_texel = [1.0 / bw, 1.0 / bh];
+        // Bloom is quarter resolution, so its inverse dimensions are four
+        // times the scene texel. Composite uses the latter for micro-contrast.
+        let scene_texel = [bloom_texel[0] * 0.25, bloom_texel[1] * 0.25];
         let bearing = Self::sun_bearing_uv(camera, self.light_dir);
-        for (buf, dir) in [
-            (&self.post_bright, [0.0, 0.0]),
-            (&self.post_blur_h, [1.0 / bw, 0.0]),
-            (&self.post_blur_v, [0.0, 1.0 / bh]),
-            (&self.post_comp, [0.0, 0.0]),
+        for (buf, dir, texel) in [
+            (&self.post_bright, [0.0, 0.0], bloom_texel),
+            (&self.post_blur_h, [1.0 / bw, 0.0], bloom_texel),
+            (&self.post_blur_v, [0.0, 1.0 / bh], bloom_texel),
+            (&self.post_comp, [0.0, 0.0], scene_texel),
         ] {
             queue.write_buffer(
                 buf,
@@ -1289,7 +1433,7 @@ impl Renderer {
                     dir,
                     texel,
                     params: common,
-                    sun: [bearing[0], bearing[1], 0.0, 0.0],
+                    sun: [bearing[0], bearing[1], self.time, 0.0],
                 }),
             );
         }
@@ -1337,7 +1481,12 @@ impl Renderer {
                     self.particle_drag,
                     self.particle_gravity,
                     self.time,
-                    1.0 / self.shadow_size as f32,
+                    // Performance disables shadows with a logical size of
+                    // zero but still binds a 64px stub texture. Keep the
+                    // uniform finite: `1 / 0` used to send infinity through a
+                    // WebGPU uniform exactly when auto-quality dropped under
+                    // late-wave load.
+                    1.0 / self.shadow_size.max(64) as f32,
                 ],
                 fog: self.fog,
             }),
@@ -1537,6 +1686,7 @@ impl Renderer {
                     t0_life: [self.time, s.life],
                     size: s.size,
                     color: s.color,
+                    style: s.style,
                 }));
 
             let stride = std::mem::size_of::<GpuParticle>() as u64;
