@@ -1,10 +1,9 @@
 # Green Circle TD - the current Legacy design, and where it came from
 
 > **Implementation status:** this document describes the playable extracted
-> Legacy ruleset. The curated commercial Campaign is specified separately in
-> [`MASTERCLASS_PLAN.md`](MASTERCLASS_PLAN.md); its 28 encounters, six jobs,
-> Ring Pressure, bounded economy, and 32-pad layouts are not yet represented by
-> the tables below.
+> Legacy ruleset. The standalone 600-encounter Campaign is described in
+> [the current implementation status](realistic-campaign/IMPLEMENTATION_STATUS.md).
+> Its additional rules are not represented by the Legacy tables below.
 
 This game begins with `GREEN TD 9.3c PEIN.w3x`, a Warcraft III custom map. Its
 131-tower roster, upgrade graph, combat numbers and 36 waves are the mechanical

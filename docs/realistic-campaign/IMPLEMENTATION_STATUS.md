@@ -17,5 +17,4 @@ Verified release: `woodland-command-tempo-20260913.100` (2026-09-13).
   The current HUD offers 10x/25x/50x/100x speeds, so actual elapsed time differs.
 
 See [FINAL_VALIDATION.md](FINAL_VALIDATION.md) for checks and limitations.
-Historical design and correction documents record the evolving brief; use this
-status and production code when determining what is currently implemented.
+Use this status and production code when determining what is currently implemented.

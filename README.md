@@ -88,7 +88,6 @@ instructions are in [tools/README.md](tools/README.md); the Warcraft III map its
 is not redistributed and is not required to build or play.
 
 [Implementation status](docs/realistic-campaign/IMPLEMENTATION_STATUS.md) describes
-the current release. The other campaign design documents retain historical
-requirements and art references; they are not evidence that every target shipped.
+the current release. Superseded task briefs and rejected art captures have been removed.
 Local candidate builds, logs, caches and review captures are excluded from Git
 and deployment uploads.

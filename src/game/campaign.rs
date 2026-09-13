@@ -1,14 +1,9 @@
-//! Curated commercial Campaign rules.
+//! Standalone Campaign rules and encounter authoring.
 //!
-//! The playable game still runs the extracted Legacy tables in [`super::defs`].
-//! This module is deliberately separate: it is the typed contract for the
-//! smaller, readable Campaign described in `docs/MASTERCLASS_PLAN.md`. The
-//! first implementation slice contains the complete tower-job vocabulary and
-//! Act I encounter timeline so simulation can be proven before UI and content
-//! production are built on top of it.
+//! The extracted Legacy tables remain in [`super::defs`]. This module contains
+//! the Campaign vocabulary, encounter timelines and progression rules. See
+//! `docs/realistic-campaign/IMPLEMENTATION_STATUS.md` for the current release.
 
-// This is a staged rules/data layer. Most items become live when Campaign is
-// wired into the simulation in the next delivery gate.
 #![allow(dead_code)]
 
 pub const CAMPAIGN_ENCOUNTERS: u8 = 28;
