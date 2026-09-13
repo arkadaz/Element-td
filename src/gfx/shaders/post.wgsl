@@ -171,7 +171,11 @@ fn fs_composite(o: VsOut) -> @location(0) vec4<f32> {
     c = c + b * P.params.y;
 
     // Exposure, then a filmic curve.
-    c = aces(c * 0.94);
+    // Actual browser captures showed the physically shaded field one stop
+    // below readable once WebGPU's canvas compositor and the filmic toe both
+    // applied. This modest exposure lift keeps the woodland dark, while
+    // letting built stone, armor and road shoulders retain visible planes.
+    c = aces(c * 1.28);
     // Grade: cool the shadows a touch, warm the highlights, then lift the
     // saturation. The battlefield already carries strong faction colours; the
     // grade only restores what the filmic shoulder removes instead of pushing
@@ -183,7 +187,7 @@ fn fs_composite(o: VsOut) -> @location(0) vec4<f32> {
 
     let vignette_uv = (o.uv - vec2<f32>(0.5)) * vec2<f32>(0.92, 1.08);
     let d = length(vignette_uv);
-    c = c * (1.0 - smoothstep(0.48, 0.82, d) * 0.17);
+    c = c * (1.0 - smoothstep(0.48, 0.82, d) * 0.10);
 
     if (P.params.w > 0.5) {
         let grain = hash12(o.uv * vec2<f32>(1920.0, 1080.0)) - 0.5;

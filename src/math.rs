@@ -701,137 +701,36 @@ mod tests {
         }
     }
 
-    /// Every build pad must be reachable, and scrolling must never take the
-    /// player anywhere the wide shot does not already show them.
-    ///
-    /// This used to assert that every pad was on screen *at once*, which was
-    /// the right test while the camera framed the whole arena from one fixed
-    /// position. It cannot be right now that the camera shows about
-    /// twenty-six tiles and the player scrolls: being on screen is no longer a
-    /// property of a pad at all. What has to survive is the reason the old
-    /// assertion existed - a pad the player cannot get to is a plot they cannot
-    /// build on, and nothing on screen says it is there - so the same claim is
-    /// made about the camera they can move: for every pad there is a legal pan
-    /// that puts it in frame, at every zoom and every window shape.
-    ///
-    /// The second half is the constraint panning brought with it. Scrolling
-    /// must stay in this player's own arena, so nothing a legal pan can reach
-    /// may show ground that the fully zoomed-out framing - the fixed camera the
-    /// game used to have - was not already showing. The two tiles of slack are
-    /// for the corner pads: the picture is at its narrowest along the bottom
-    /// edge, and reaching the pads in the corners of the arena means letting
-    /// the view hang a little way over its border.
-    ///
-    /// The pad is checked on the ground rather than at tower height. A tower
-    /// standing at the very top of the screen has its head cropped, in this
-    /// game and in the one it copies; what must never happen is the *plot*
-    /// being unclickable.
+    /// The battlefield is intentionally a single fixed view. Every valid
+    /// tower tile must therefore be simultaneously visible and resolve back to
+    /// its own slot when clicked; a tile that merely exists elsewhere on a
+    /// scrollable map would violate the game's core interaction.
     #[test]
-    fn every_build_pad_is_reachable_and_the_view_stays_in_the_arena() {
+    fn every_build_tile_is_visible_and_pickable_in_the_fixed_overview() {
         use crate::game::board::Board;
+
         let board = Board::new();
         assert!(!board.slots.is_empty());
-        let view = crate::game::greentd_map::VIEW;
-        let pads = crate::pad_bounds(&board);
-        let middle = [(view[0] + view[2]) * 0.5, (view[1] + view[3]) * 0.5];
-        const SLACK: f32 = 2.0;
-        // The ground in shot, read off the camera the player is actually given
-        // rather than out of the rig's own workings.
-        let on_screen = |cam: &Camera| {
-            let mut b = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
-            for (u, v) in [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)] {
-                let g = cam
-                    .ground_pick(u, v)
-                    .expect("the viewport meets the ground");
-                b = [
-                    b[0].min(g[0]),
-                    b[1].min(g[1]),
-                    b[2].max(g[0]),
-                    b[3].max(g[1]),
-                ];
-            }
-            b
-        };
-
         for &aspect in &[0.6, 1.0, 1.4, 1.78, 2.6] {
-            let rig = Rig::new(
-                aspect,
-                crate::CAM_PITCH_DEG.to_radians(),
-                crate::CAM_YAW_DEG.to_radians(),
-            );
-            let widest = rig.widest_span(view);
-            // What the player is looking at with the wheel rolled all the way
-            // back: the whole arena, and the border it sits in.
-            let _ = (widest, middle, &on_screen);
-            for step in 0..=12 {
-                let span =
-                    crate::CAM_SPAN_MIN + (widest - crate::CAM_SPAN_MIN) * step as f32 / 12.0;
-                let span = rig.clamp_span(span, crate::CAM_SPAN_MIN, view);
-
-                for s in &board.slots {
-                    // Scrolling towards a pad and letting the clamp have its
-                    // say is exactly what a player does to reach one.
-                    let cam = rig.camera(rig.clamp_pan(s.pos, span, view, pads), span);
-                    let n = cam
-                        .view_proj
-                        .project(v3(s.pos[0], s.pos[1], 0.0))
-                        .expect("pad is behind the camera");
-                    assert!(
-                        n[0].abs() <= 1.0 && n[1].abs() <= 1.0,
-                        "pad at {:?} cannot be scrolled to at aspect {aspect}, span {span:.1}: \
-                         ndc {:.2},{:.2}",
-                        s.pos,
-                        n[0],
-                        n[1]
-                    );
-                }
-
-                // Scrolling may overhang the arena - `Rig::pan_range` says why,
-                // and the pad check above is why it has to. What it may not do
-                // is wander: everything the player can bring on screen must be
-                // arena, or within a short reach of the outermost pad.
-                //
-                // Stated that way rather than as "inside the fully zoomed-out
-                // view", which is not the same thing and stopped being true
-                // when the arena became the map's real ring. A tall narrow
-                // window cannot hold a square arena on both axes at once, so
-                // the widest view is *smaller* than the arena in one of them,
-                // and comparing against it fails on ground that was never out
-                // of bounds.
-                // The allowance is a share of what is on screen rather than a
-                // fixed number of tiles, because the overhang `pan_range` grants
-                // is proportional to the camera's distance and so grows with the
-                // zoom. A tenth of the span, plus a few tiles at the near end.
-                // Panning may overhang the arena - `Rig::pan_range` says why,
-                // and the pad check above is why it has to. What it may not do
-                // is wander.
-                //
-                // Stated as a bound on where the camera *looks*, not on how
-                // much ground it takes in. Two earlier versions bounded the
-                // footprint - first against the fully zoomed-out view, then
-                // against a fraction of the span - and neither converges: the
-                // ground a fifty-two degree camera covers grows faster than the
-                // distance does, so every bound that held at one zoom failed at
-                // the next one out. The look-at point does not have that
-                // problem, and it is the thing the clamp actually controls.
-                const STRAY: f32 = 12.0;
-                let bound = [
-                    view[0].min(pads[0]) - STRAY,
-                    view[1].min(pads[1]) - STRAY,
-                    view[2].max(pads[2]) + STRAY,
-                    view[3].max(pads[3]) + STRAY,
-                ];
-                let r = rig.pan_range(span, view, pads);
-                for c in [[r[0], r[1]], [r[2], r[1]], [r[0], r[3]], [r[2], r[3]]] {
-                    assert!(
-                        c[0] >= bound[0]
-                            && c[1] >= bound[1]
-                            && c[0] <= bound[2]
-                            && c[1] <= bound[3],
-                        "at aspect {aspect}, span {span:.1} the camera can be aimed at {c:?}, \
-                         which is outside the arena and its pads {bound:?}"
-                    );
-                }
+            let camera = crate::play_camera(aspect);
+            for (slot, plot) in board.slots.iter().enumerate() {
+                let screen = camera
+                    .to_screen(v3(plot.pos[0], plot.pos[1], 0.0))
+                    .expect("build tile is behind the fixed camera");
+                assert!(
+                    (-0.001..=1.001).contains(&screen[0]) && (-0.001..=1.001).contains(&screen[1]),
+                    "build tile {} at {:?} falls outside fixed view at aspect {aspect}: {screen:?}",
+                    slot,
+                    plot.pos,
+                );
+                let hit = camera
+                    .ground_pick(screen[0], screen[1])
+                    .expect("screen tile ray must meet the ground");
+                assert_eq!(
+                    board.slot_at(hit),
+                    Some(slot),
+                    "fixed-view click missed build tile {slot} at aspect {aspect}: {hit:?}",
+                );
             }
         }
     }
@@ -848,13 +747,7 @@ mod tests {
     fn the_board_actually_fills_the_frame() {
         let a = crate::game::greentd_map::VIEW;
         for &aspect in &[0.6, 1.0, 1.78, 2.6] {
-            let cam = Camera::frame_rect(
-                a,
-                aspect,
-                crate::CAM_PITCH_DEG.to_radians(),
-                crate::CAM_YAW_DEG.to_radians(),
-                1.06,
-            );
+            let cam = crate::play_camera(aspect);
             let mut extent = 0.0f32;
             for &(x, y) in &[(a[0], a[1]), (a[2], a[1]), (a[0], a[3]), (a[2], a[3])] {
                 let n = cam.view_proj.project(v3(x, y, 0.0)).expect("in front");

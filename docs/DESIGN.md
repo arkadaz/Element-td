@@ -151,20 +151,22 @@ different ladders, because the prices are not monotonic.
 
 ### 3.5 The texture grid is the level
 
-The pathing map says the whole field is walkable. Nothing in the map file
-describes a maze at all. What describes it is the **ground texture**: the
-corridors are painted in rock and everything else is grass or dirt, and that
-grid, one byte a tile, is the only thing that says where a creep can walk and
-where a tower can stand. `greentd_map::TEXTURE` is that grid, and
-`board::is_corridor` is the whole of the level geometry.
+The pathing map says the whole source field is walkable. Its terrain is still
+preserved as the **ground texture**: corridors are painted in rock and
+everything else is grass or dirt. For the standalone port, however, the source
+map's huge outer ring is not the playable layout. `emit_map.py` keeps the
+extracted grid but emits a compact winding `SOLO_LAP`; `board::is_corridor`
+derives the actual solo route from that lane so every road, socket and camera
+boundary agrees.
 
 ### 3.6 The lane splits in both directions
 
-The map orders Red through the spawn box and into the north-west junction. Its
-source trigger then rolls a fifty-fifty branch: one creep is sent clockwise and
-the next may go counter-clockwise around the same outer circuit. The compact
-solo board preserves that branch and offsets the streams onto opposite sides
-of its lane, so they pass instead of occupying the same line.
+The source map orders Red through the spawn box and into the north-west
+junction. Its trigger then rolls a fifty-fifty branch: one creep is sent
+clockwise and the next may go counter-clockwise around the same circuit. The
+compact solo board preserves that branch on a winding circuit and offsets the
+streams onto opposite sides of its lane, so they pass instead of occupying the
+same line.
 
 A creep's progress is still one scalar plus a direction sign. Completed laps
 wrap onto the same closed circuit, which keeps cumulative pressure intact while

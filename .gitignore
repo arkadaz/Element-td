@@ -28,3 +28,19 @@ __pycache__/
 # and should never pile up in a release worktree.
 /shots/
 /shots_*/
+
+# Local release candidates, duplicate Cargo caches and review captures.
+/browser_build_*/
+/build-browser*/
+/build_browser_*/
+/target-*/
+/shots-*/
+/.local/
+/*.log
+/*_manual.json
+/*.patch
+/recovered_mod.rs
+/cargo_check_errors.txt
+*.rs.astra_backup
+*.rs.orig
+*.rs.rej

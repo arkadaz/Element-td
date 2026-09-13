@@ -288,12 +288,52 @@ def sample_animation(js, bin_, anim_index, time_frac):
     return out
 
 
-def triangles(path, anim='auto', at=0.0):
-    """Every triangle in the file, at rest pose, as (pos, nrm, rgb) vertices.
+def material_id(material, pbr):
+    """Return the compact physical material id used by the runtime shader.
 
-    Skinned meshes are taken at their bind pose. That is not the same as the
-    animated pose and it is deliberate: the game has no skinning, and a bind
-    pose standing still reads correctly while a half-applied skin does not.
+    glTF's base colour is baked into vertex colour below, while this small
+    number carries the independent *response* to light. It is deliberately
+    based on source material names and PBR factors, not the monster archetype:
+    a steel pauldron and a leather strap in the same imported character must
+    not receive the same roughness or metallic value.
+    """
+    name = str(material.get('name', '')).lower()
+    if any(token in name for token in ('leaf', 'foliage', 'grass', 'needle', 'plant')):
+        return 9
+    if any(token in name for token in ('moss', 'lichen')):
+        return 10
+    if any(token in name for token in ('wood', 'timber', 'bark', 'plank')):
+        return 2
+    if any(token in name for token in ('stone', 'rock', 'brick', 'concrete')):
+        return 1
+    if any(token in name for token in ('bronze', 'copper', 'brass', 'gold')):
+        return 4
+    if any(token in name for token in ('iron', 'steel', 'metal', 'chain', 'blade')):
+        return 3
+    if any(token in name for token in ('plate', 'armour', 'armor')):
+        return 8
+    if any(token in name for token in ('chitin', 'shell', 'carapace', 'scale')):
+        return 7
+    if any(token in name for token in ('skin', 'flesh', 'face', 'body')):
+        return 6
+    if any(token in name for token in ('hide', 'leather', 'fur', 'cloth', 'fabric')):
+        return 5
+    # Packs frequently call all their materials simply "Material". Their PBR
+    # factors are still authored data, and a strongly metallic fallback is far
+    # more truthful than applying the creature's all-object chitin response.
+    if float(pbr.get('metallicFactor', 0.0)) >= 0.55:
+        return 3
+    return 0
+
+
+def triangles(path, anim='auto', at=0.0):
+    """Every triangle as ``(pos, normal, rgb, uv, has_uv, material_id)``.
+
+    The colour is source PBR/albedo sampled at bake time. UV presence and a
+    compact physical material id survive separately so the browser shader can
+    apply wood, stone, skin and metal detail/response per submesh. Skinned
+    meshes are taken at their bind pose; the game bakes two whole poses rather
+    than trying to run skeletons for a horde every frame.
     """
     js, bin_ = read_glb(path)
     nodes = js.get('nodes', [])
@@ -358,14 +398,20 @@ def triangles(path, anim='auto', at=0.0):
             else:
                 idx = list(range(len(pos)))
             col = (1.0, 1.0, 1.0)
+            part_id = 0
             tex_image = None
-            tex_uv = None
+            # A source mesh may have a useful unwrap even when its glTF
+            # material uses only a flat base colour. Keep that geometry data;
+            # the shared runtime material texture can still follow it.
+            tex_uv = texcoords.get(0)
             tex_offset = (0.0, 0.0)
             tex_scale = (1.0, 1.0)
             tex_rotation = 0.0
             mi = prim.get('material')
             if mi is not None and mi < len(mats):
-                pbr = mats[mi].get('pbrMetallicRoughness', {})
+                material = mats[mi]
+                pbr = material.get('pbrMetallicRoughness', {})
+                part_id = material_id(material, pbr)
                 bc = pbr.get('baseColorFactor', [1, 1, 1, 1])
                 col = tuple(srgb_to_linear(c) for c in bc[:3])
                 bt = pbr.get('baseColorTexture')
@@ -408,15 +454,23 @@ def triangles(path, anim='auto', at=0.0):
                 else:
                     n = (0.0, 0.0, 1.0)
                 vertex_col = col
-                if tex_image is not None and tex_uv is not None:
+                source_uv = (0.0, 0.0)
+                has_uv = tex_uv is not None
+                if has_uv:
                     u = tex_uv[k][0] * tex_scale[0]
                     v = tex_uv[k][1] * tex_scale[1]
                     cr, sr = math.cos(tex_rotation), math.sin(tex_rotation)
                     uv = (cr * u - sr * v + tex_offset[0],
                           sr * u + cr * v + tex_offset[1])
-                    sampled = sample_texture(tex_image, uv)
-                    vertex_col = tuple(col[c] * sampled[c] for c in range(3))
-                verts.append((p, n, vertex_col))
+                    source_uv = (uv[0] % 1.0, uv[1] % 1.0)
+                    if tex_image is not None:
+                        sampled = sample_texture(tex_image, uv)
+                        vertex_col = tuple(col[c] * sampled[c] for c in range(3))
+                # The runtime texture array repeats. Preserve the source
+                # unwrap's local direction while folding transformed UVs into
+                # that repeat range so a KHR_texture_transform with a tiled
+                # scale cannot be clipped by the packed unorm stream.
+                verts.append((p, n, vertex_col, source_uv, has_uv, part_id))
     return verts
 
 

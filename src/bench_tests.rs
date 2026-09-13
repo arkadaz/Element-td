@@ -83,19 +83,16 @@ fn the_ring_and_its_pads_are_the_size_the_design_says() {
         b.slots.len(),
         crate::game::FLOOD_LIMIT
     );
-    // The source map's circuit was almost 240 tiles around because eight
-    // players shared a 97-tile field. The solo adaptation is intentionally
-    // under half that length: pressure returns in useful time and the battle
-    // no longer needs minutes of camera travel.
+    // The compact solo circuit keeps adjacent firing lanes while fitting in one
+    // fixed tactical view.
     assert!(
-        (90.0..125.0).contains(&b.total),
+        (96.0..102.0).contains(&b.total),
         "lane is {:.1} tiles",
         b.total
     );
-    // Curated inner/outer road shoulders: enough positions for multiple viable
-    // plans, close enough to create useful kill zones, and sparse enough that
-    // neighbouring tower models never overlap.
-    assert!((48..=56).contains(&b.slots.len()), "{} pads", b.slots.len());
+    // A whole, tile-sized road shoulder: every visible socket is a legal build
+    // choice, so players never have to hunt through arbitrary empty gaps.
+    assert_eq!(b.slots.len(), 164, "{} pads", b.slots.len());
 }
 
 #[test]

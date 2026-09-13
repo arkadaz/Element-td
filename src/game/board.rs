@@ -27,26 +27,59 @@ pub const ROCK: u8 = 2;
 /// travel share it with a small lateral offset.
 pub const ROAD_HALF: f32 = 0.62;
 
-/// Corner rounding radius. The map's corners are square; a short arc is what
-/// stops a monster spinning on the spot as it turns.
-const CORNER_R: f32 = 0.8;
+/// Radius of the physical plinth reserved by a tower.  This is deliberately a
+/// world-space measurement rather than a tile membership test: the player can
+/// build anywhere on clear grass, but cannot make two model bases intersect.
+pub const TOWER_FOOTPRINT_RADIUS: f32 = 0.44;
+/// A little air between two plinths keeps their silhouettes readable and
+/// avoids a click that looks clear but produces interpenetrating meshes.
+pub const TOWER_CLEARANCE: f32 = 0.08;
+/// Free placement is continuous to the player, with this fine deterministic
+/// snap used only for storage and repeatable save/load positions.  At the
+/// normal overview it is far below a model base, not the retired socket grid.
+pub const BUILD_QUANTUM: f32 = 0.125;
+/// The tactical world is wider than the historical 24x24 socket field.  The
+/// outer grass is part of the real rendered meadow, so a clear point in this
+/// envelope must not silently fail merely because it used to be scenery.
+// The full-width camera deliberately shows meadow outside the original 24x24
+// route square.  That grass is real player land, not a decorative dead band:
+// allow a tower footprint throughout the rendered near meadow rather than
+// rejecting an apparently reachable click just because this used to be side
+// scenery in the fixed-board implementation.
+pub const BUILD_WORLD: [f32; 4] = [-8.0, -8.0, 32.0, 32.0];
 
-/// Every offered pad belongs to the lane's tactical shoulder. The old square
-/// lattice reached more than six tiles into empty grass: legal towers looked
-/// disconnected from combat and several starter ranges barely touched the
-/// road. These bounds are an explicit visual/gameplay contract.
-pub const PAD_ROAD_MIN: f32 = 1.40;
-pub const PAD_ROAD_MAX: f32 = 2.80;
+/// A terrain reason that is independent of tower choice and economy.  The
+/// game adds occupancy and affordability on top of this one authoritative
+/// footprint query.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SurfaceBlock {
+    OutsideWorld,
+    Road,
+    SolidScenery,
+}
 
-/// A baked turret can reach about 1.55 tiles across at its apex. This leaves a
-/// visible strip of ground between neighbours instead of merging them into a
-/// single mechanical wall.
-pub const PAD_SPACING: f32 = 2.20;
+impl SurfaceBlock {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::OutsideWorld => "Outside the meadow boundary",
+            Self::Road => "Keep towers clear of the road",
+            Self::SolidScenery => "Solid scenery blocks that spot",
+        }
+    }
+}
 
-/// The solo board has enough positions for build variety but not enough for a
-/// thoughtless tower carpet. Candidates are considered in route order and the
-/// cap keeps both the tactical and performance budget stable.
-pub const PAD_LIMIT: usize = 56;
+/// Corner rounding radius. The authored route is intentionally irregular;
+/// broad bends make bodies travel through a place rather than around a
+/// spreadsheet of right angles, while retaining a predictable shoulder.
+const CORNER_R: f32 = 0.95;
+
+/// Every offered tile belongs to the lane's first tactical shoulder. A diagonal
+/// route samples square tile centres differently from a horizontal lane, so a
+/// pencil-thin distance band would make legal pads disappear at every bend.
+/// This full shoulder preserves the dense, readable placement language while
+/// leaving the road itself unbuildable and the outer meadow open to scenery.
+pub const PAD_ROAD_MIN: f32 = 0.90;
+pub const PAD_ROAD_MAX: f32 = 2.179;
 
 /// Where the monsters enter the lane, as a distance along it. They keep walking
 /// from there and never leave.
@@ -106,64 +139,70 @@ impl Board {
         b
     }
 
-    /// Road-hugging build plots sampled from both sides of the lane.
-    ///
-    /// Free placement is retained from Green Circle TD, but the useless ground
-    /// belonging to the other seven players is gone. The exact rounded route is
-    /// checked as well as the tile mask so a tower can never clip a corner.
-    fn make_slots(&self) -> Vec<Slot> {
-        let mut out: Vec<Slot> = Vec::with_capacity(PAD_LIMIT);
-        // Thirty paired samples offer sixty candidates before corner snapping
-        // and separation. In practice this produces a stable fifty-something
-        // pads on the compact reference circuit.
-        const SAMPLES: usize = 30;
-        const OFFSETS: [f32; 3] = [1.85, 2.25, 2.65];
-        const INSET: f32 = 1.25;
-        let min_d2 = PAD_SPACING * PAD_SPACING;
+    /// Fine, stable free-placement coordinates.  Keeping this in the board
+    /// makes mouse, touch, save restore and test fixtures agree on the exact
+    /// point a tower owns without bringing back visible build pads.
+    pub fn quantize_build_pos(&self, p: [f32; 2]) -> [f32; 2] {
+        [
+            (p[0] / BUILD_QUANTUM).round() * BUILD_QUANTUM,
+            (p[1] / BUILD_QUANTUM).round() * BUILD_QUANTUM,
+        ]
+    }
 
-        for i in 0..SAMPLES {
-            let along = (i as f32 + 0.5) / SAMPLES as f32 * self.total;
-            let road = self.sample(along);
-            let heading = self.heading(along);
-            let normal = [-heading[1], heading[0]];
-            // Alternate which shoulder is considered first so a capped list
-            // never favours only the inside or outside of the ring.
-            let first = if i % 2 == 0 { 1.0 } else { -1.0 };
-            for side in [first, -first] {
-                let mut accepted = None;
-                for offset in OFFSETS {
-                    let raw = [
-                        road[0] + normal[0] * side * offset,
-                        road[1] + normal[1] * side * offset,
-                    ];
-                    // Half-tile centres retain the crisp Warcraft placement
-                    // language while the candidates themselves follow the
-                    // curved route instead of an unrelated global grid.
-                    let pos = [raw[0].floor() + 0.5, raw[1].floor() + 0.5];
-                    let tx = pos[0].floor() as i32;
-                    let ty = pos[1].floor() as i32;
-                    let inside = pos[0] >= ARENA[0] + INSET
-                        && pos[1] >= ARENA[1] + INSET
-                        && pos[0] <= ARENA[2] - INSET
-                        && pos[1] <= ARENA[3] - INSET;
-                    let road_dist = self.dist_to_road(pos);
-                    let separated = out.iter().all(|slot| {
-                        (slot.pos[0] - pos[0]).powi(2) + (slot.pos[1] - pos[1]).powi(2) >= min_d2
-                    });
-                    if inside
-                        && buildable_tile(tx, ty)
-                        && (PAD_ROAD_MIN..=PAD_ROAD_MAX).contains(&road_dist)
-                        && separated
-                    {
-                        accepted = Some(pos);
-                        break;
-                    }
-                }
-                if let Some(pos) = accepted {
+    /// The world limits available to a tower centre.  The footprint itself is
+    /// included in [`surface_block`], so callers should not invent a second
+    /// inset or use a UI rectangle as a hidden placement limit.
+    pub const fn build_world(&self) -> [f32; 4] {
+        BUILD_WORLD
+    }
+
+    /// The shared terrain half of a build decision.  It uses the real rounded
+    /// route geometry, not a sampled ground-colour tile, and it covers the
+    /// *whole* tower base rather than a cursor point.
+    pub fn surface_block(&self, p: [f32; 2], radius: f32) -> Option<SurfaceBlock> {
+        if !p[0].is_finite() || !p[1].is_finite() {
+            return Some(SurfaceBlock::OutsideWorld);
+        }
+        let b = BUILD_WORLD;
+        if p[0] - radius < b[0]
+            || p[1] - radius < b[1]
+            || p[0] + radius > b[2]
+            || p[1] + radius > b[3]
+        {
+            return Some(SurfaceBlock::OutsideWorld);
+        }
+        if self.dist_to_road(p) <= ROAD_HALF + radius + 0.10 {
+            return Some(SurfaceBlock::Road);
+        }
+        // All current scenery is visual cover. A player can build through
+        // grass, fern, roots and outer-meadow props, exactly as the ghost
+        // shows; only the road, world edge and existing tower footprints are
+        // authoritative.  Do not resurrect retired landmark coordinates here
+        // as invisible blockers.
+        None
+    }
+
+    /// Every clear, tile-sized socket in the useful shoulder of the road.
+    ///
+    /// The source map uses a dense, readable build grid. Sampling a sparse
+    /// subset of it made players click at apparent gaps and wonder why their
+    /// tower would not fit. Scan the actual tiles instead, so every visible
+    /// socket is legal and no legal shoulder tile is silently skipped.
+    fn make_slots(&self) -> Vec<Slot> {
+        let mut out = Vec::with_capacity(164);
+        const INSET: f32 = 1.25;
+        for ty in ARENA[1] as i32..=ARENA[3] as i32 {
+            for tx in ARENA[0] as i32..=ARENA[2] as i32 {
+                let pos = [tx as f32 + 0.5, ty as f32 + 0.5];
+                let inside = pos[0] >= ARENA[0] + INSET
+                    && pos[1] >= ARENA[1] + INSET
+                    && pos[0] <= ARENA[2] - INSET
+                    && pos[1] <= ARENA[3] - INSET;
+                if inside
+                    && buildable_tile(tx, ty)
+                    && (PAD_ROAD_MIN..=PAD_ROAD_MAX).contains(&self.dist_to_road(pos))
+                {
                     out.push(Slot { pos, tower: None });
-                    if out.len() == PAD_LIMIT {
-                        return out;
-                    }
                 }
             }
         }
@@ -264,22 +303,13 @@ impl Board {
         best
     }
 
-    /// The nearest build plot to a world position. Exact-tile lookup remains
-    /// the fast path; the small capture radius makes building feel magnetic
-    /// without ever selecting the next pad along the lane.
+    /// The build tile under a world position.
+    ///
+    /// Dense sockets deliberately have no magnetic fall-through: clicking the
+    /// road or grass outside the highlighted shoulder must not build into an
+    /// adjacent tile the player did not choose.
     pub fn slot_at(&self, p: [f32; 2]) -> Option<usize> {
-        if let Some(exact) = self.tile_slot(p) {
-            return Some(exact);
-        }
-        self.slots
-            .iter()
-            .enumerate()
-            .filter_map(|(i, slot)| {
-                let d2 = (slot.pos[0] - p[0]).powi(2) + (slot.pos[1] - p[1]).powi(2);
-                (d2 <= 1.10 * 1.10).then_some((i, d2))
-            })
-            .min_by(|a, b| a.1.total_cmp(&b.1))
-            .map(|(i, _)| i)
+        self.tile_slot(p)
     }
 }
 

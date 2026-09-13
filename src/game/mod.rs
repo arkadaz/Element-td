@@ -13,9 +13,13 @@ pub mod greentd_types;
 #[cfg(test)]
 pub mod tests;
 
-use board::{BH, BW, Board};
+use board::{BH, BW, Board, SurfaceBlock, TOWER_CLEARANCE, TOWER_FOOTPRINT_RADIUS};
 use defs::*;
 use fx::{Fx, ParticleStyle};
+
+pub const FREE_TOWER_SLOT: usize = usize::MAX;
+pub const TOWER_RENDER_FOOTPRINT_SCALE: f32 = 1.14;
+pub const TOWER_RENDER_HEIGHT_SCALE: f32 = 1.58;
 
 use crate::rng::Rng;
 
@@ -35,6 +39,19 @@ pub const MAX_FLOAT_TEXTS: usize = 512;
 /// leads the authored stream, with enough health and reward to deserve the bar.
 pub const BOSS_HP_MULT: f32 = 8.0;
 pub const BOSS_REWARD_MULT: u32 = 8;
+
+/// Hard-mode Campaign commanders are authored objectives, rather than a
+/// second application of the ordinary-body curve. This is deliberately
+/// independent of the player's roster and is applied after the existing
+/// one-time boss multiplier at spawn.
+pub fn campaign_commander_hp_floor(difficulty: Difficulty, encounter: u16) -> f32 {
+    let base = 3500.0 + 75.0 * (encounter.max(1) as f32).powf(1.7);
+    match difficulty {
+        Difficulty::Veteran => base,
+        Difficulty::Nightmare => base * 1.25,
+        Difficulty::Classic => 0.0,
+    }
+}
 pub const BOSS_SCALE_MULT: f32 = 1.28;
 pub const BOSS_MENDER_RANGE: f32 = 4.5;
 pub const BOSS_MENDER_PER_SEC: f32 = 0.008;
@@ -60,11 +77,13 @@ pub use defs::FLOOD_LIMIT;
 /// PolledWait(50.)` at the top of every wave's script - so this is only the
 /// bound the HUD's countdown bar is drawn against.
 pub const WAVE_PERIOD: f32 = 50.0;
-/// Campaign speed stops at 2x so the authored run cannot collapse into a
-/// five-minute blur. The 3x convenience remains available after victory,
-/// where the player has already mastered the campaign and chosen endless.
-pub const MAX_CAMPAIGN_SPEED: f32 = 2.0;
-pub const MAX_ENDLESS_SPEED: f32 = 3.0;
+pub const CAMPAIGN_STANDARD_SPEED: f32 = 2.0;
+pub const CAMPAIGN_DEFAULT_SPEED: f32 = 10.0;
+pub const MAX_CAMPAIGN_SPEED: f32 = 100.0;
+pub const MAX_ENDLESS_SPEED: f32 = 100.0;
+pub const CAMPAIGN_AUTOSTART_SECONDS: f32 = 0.75;
+pub const CAMPAIGN_SPEED_STEPS: [f32; 4] = [10.0, 25.0, 50.0, 100.0];
+pub const LEGACY_SPEED_STEPS: [f32; 4] = CAMPAIGN_SPEED_STEPS;
 
 /// Quiet time before the first wave. The map waits twenty seconds, prints a
 /// fifteen second warning, and then waits fifteen more.
@@ -148,6 +167,39 @@ pub enum Phase {
     Victory,
 }
 
+/// The shipped game has two intentionally separate rule sets.  `Legacy` is
+/// the original extracted 36-wave loop and is never silently reinterpreted;
+/// `Campaign` owns the authored 600-encounter expedition in `campaign.rs`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum RunMode {
+    #[default]
+    Legacy,
+    Campaign,
+}
+
+impl RunMode {
+    pub const fn as_u8(self) -> u8 {
+        match self {
+            Self::Legacy => 0,
+            Self::Campaign => 1,
+        }
+    }
+
+    pub const fn from_u8(value: u8) -> Self {
+        match value {
+            1 => Self::Campaign,
+            _ => Self::Legacy,
+        }
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Legacy => "Legacy",
+            Self::Campaign => "Campaign",
+        }
+    }
+}
+
 /// Visible rulesets layered over the faithfully extracted map data.
 ///
 /// Classic is the Warcraft III source. The harder modes deliberately change
@@ -179,13 +231,13 @@ impl Difficulty {
     pub fn blurb(self) -> &'static str {
         match self {
             Difficulty::Classic => {
-                "Learning mode: source health, 700 capacity, no Vanguards or command drafts."
+                "Learning campaign: 175 pressure, full authored income, no commander lap limit."
             }
             Difficulty::Veteran => {
-                "Recommended: capacity tightens 450 to 280 after wave 9; builds stay committed."
+                "Recommended: 140 pressure, scaled encounter budgets, commanders fall within 4 laps."
             }
             Difficulty::Nightmare => {
-                "Expert: capacity tightens 400 to 200 after wave 7, with brutal carry-over."
+                "Expert: 120 pressure, leaner encounter budgets, commanders fall within 3 laps."
             }
         }
     }
@@ -278,6 +330,35 @@ impl Difficulty {
         }
     }
 
+    /// Starting gold for the 600-encounter campaign. Harder modes demand more
+    /// careful opening purchases rather than buying multiple seeds at once.
+    pub fn campaign_starting_gold(self) -> i64 {
+        match self {
+            Difficulty::Classic => 600,
+            Difficulty::Veteran => 500,
+            Difficulty::Nightmare => 420,
+        }
+    }
+
+    /// Scaling factor for Campaign encounter rewards and kill bounties.
+    /// Classic pays 100% of the authored budget. Veteran and Nightmare scale
+    /// down income as chapters advance to avoid runaway late-game surplus.
+    pub fn campaign_reward_scale(self, _chapter: u16, local: u16) -> f32 {
+        let chapter_progress = ((local.saturating_sub(1)) as f32 / 59.0).clamp(0.0, 1.0);
+        match self {
+            Difficulty::Classic => 1.0,
+            Difficulty::Veteran => 0.82 - 0.28 * chapter_progress,
+            Difficulty::Nightmare => 0.68 - 0.32 * chapter_progress,
+        }
+    }
+
+    /// Allocates one integer scaled encounter reward budget for Campaign mode.
+    /// Deployment and kill budgets are integer splits of this value.
+    pub fn campaign_encounter_budget(self, raw_reward: u32, chapter: u16, local: u16) -> u32 {
+        let scale = self.campaign_reward_scale(chapter, local);
+        (raw_reward as f32 * scale).round().max(1.0) as u32
+    }
+
     fn reward_scale(self, wave: u32) -> f32 {
         // The opening needs enough income to teach counters and establish a
         // lane. After that grace window, rewards contract hard so late kills
@@ -288,7 +369,7 @@ impl Difficulty {
         };
         match self {
             Difficulty::Classic => 1.0,
-            Difficulty::Veteran => 0.90 - 0.62 * after_opening(8),
+            Difficulty::Veteran => 0.88 - 0.62 * after_opening(8),
             Difficulty::Nightmare => 0.72 - 0.54 * after_opening(6),
         }
     }
@@ -408,6 +489,37 @@ impl TargetMode {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PlacementIssue {
+    OutsideWorld,
+    Road,
+    SolidScenery,
+    TowerOverlap,
+    NotEnoughGold,
+}
+
+impl PlacementIssue {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::OutsideWorld => "Outside the meadow boundary",
+            Self::Road => "Keep towers clear of the road",
+            Self::SolidScenery => "Solid scenery blocks that spot",
+            Self::TowerOverlap => "Too close to another tower",
+            Self::NotEnoughGold => "Not enough gold",
+        }
+    }
+}
+
+impl From<SurfaceBlock> for PlacementIssue {
+    fn from(value: SurfaceBlock) -> Self {
+        match value {
+            SurfaceBlock::OutsideWorld => Self::OutsideWorld,
+            SurfaceBlock::Road => Self::Road,
+            SurfaceBlock::SolidScenery => Self::SolidScenery,
+        }
+    }
+}
+
 // ---------------------------------------------------------------- entities
 
 #[derive(Clone)]
@@ -465,6 +577,15 @@ pub struct Creep {
     pub laps: u32,
     pub flash: f32,
     pub bob: f32,
+    /// Campaign-only physical behavior. Legacy creeps keep the zero/false
+    /// defaults, which preserves their old simulation and saves.
+    pub shield: f32,
+    pub max_shield: f32,
+    pub regen_per_second: f32,
+    pub resistant: bool,
+    pub campaign_encounter: u16,
+    pub pressure: f32,
+    pub death_killer: Option<usize>,
 }
 
 impl Creep {
@@ -507,12 +628,152 @@ impl Creep {
     pub fn control_scale(&self) -> f32 {
         if self.is_boss() {
             0.25
-        } else if self.elite {
+        } else if self.elite || self.resistant {
             0.5
         } else {
             1.0
         }
     }
+}
+
+// ---------------------------------------------------------------- campaign bodies
+
+/// The campaign resolver owns *when* a body arrives; this compact adapter owns
+/// how its resolved trait becomes a real simulation entity.  Keeping this
+/// mapping beside `Creep` avoids a second, visual-only enemy roster.
+#[derive(Clone, Copy)]
+struct CampaignBodySpec {
+    model: Model,
+    hp: f32,
+    speed: f32,
+    armour: i32,
+    armour_type: ArmourType,
+    flying: bool,
+    scale: f32,
+    pressure: f32,
+    shield: f32,
+    regen_per_second: f32,
+    resistant: bool,
+}
+
+fn campaign_trait_share(formation: campaign::Formation) -> u32 {
+    use campaign::Formation::*;
+    match formation {
+        BroodTide => 85,
+        IronConvoy => 35,
+        RunningFlank | Crosswind => 35,
+        WingEscort => 30,
+        PatientShields | ProtectedRear => 25,
+        LastSurge | Reversal => 50,
+        HealingCaravan => 25,
+        NeedleFlight => 40,
+        TwoFronts => 45,
+        ThinScreen => 30,
+        RecoveringPack => 35,
+        RelentlessMarch => 30,
+        CombinedRehearsal => 34,
+        SplitScouts | BrokenColumn => 30,
+    }
+}
+
+/// Resolves a deterministic individual role inside a packet.  The schedule
+/// describes budget fractions, not a line of cloned pawns, so this preserves
+/// the formation's actual mixed composition without adding runtime RNG.
+fn campaign_body_trait(packet: campaign::SpawnPacket, ordinal: u16) -> Option<campaign::ResolvedTrait> {
+    let primary = packet.traits[0];
+    let secondary = packet.traits[1];
+    let roll = ((ordinal as u32 * 37
+        + packet.at_seconds as u32 * 11
+        + packet.formation as u32 * 17)
+        % 100) as u32;
+    let primary_share = campaign_trait_share(packet.formation);
+    match (primary, secondary) {
+        (Some(a), Some(_b)) if roll < primary_share => Some(a),
+        (Some(_), Some(b)) if roll < (primary_share + 22).min(100) => Some(b),
+        (Some(a), None) if roll < primary_share => Some(a),
+        (None, Some(b)) if roll < 28 => Some(b),
+        _ => None,
+    }
+}
+
+fn campaign_body_spec(
+    chapter: u16,
+    local: u16,
+    trait_: Option<campaign::ResolvedTrait>,
+    difficulty: Difficulty,
+) -> CampaignBodySpec {
+    use campaign::ResolvedTrait::*;
+    // Persistent tower tiers and a growing economy need a real late campaign
+    // counterweight. Use global encounter progress rather than a chapter
+    // step: C1E60 and C2E1 stay continuous instead of receiving a hidden
+    // boundary spike. The curved health term is calibrated against the legal
+    // E121 frozen roster (~0.28M direct DPS at E600) and the reinvesting
+    // roster (~2.35M): later bodies require sustained new investment, while
+    // the early counter introductions remain readable.
+    let global = (chapter.saturating_sub(1) as f32 * campaign::ENCOUNTERS_PER_CHAPTER as f32
+        + local.max(1) as f32)
+        .clamp(1.0, campaign::REALISTIC_ENCOUNTERS as f32);
+    let progress = (global - 1.0) / (campaign::REALISTIC_ENCOUNTERS - 1) as f32;
+    let baseline_scale = 1.0 + 1.2 * progress;
+    let sustained_health_scale = 1.0 + 250.0 * progress * progress;
+    let scale = baseline_scale * sustained_health_scale;
+    let (diff_mult, speed_mult) = match difficulty {
+        Difficulty::Classic => (1.0, 1.0),
+        Difficulty::Veteran => (1.06 + 0.06 * ((local.saturating_sub(1)) as f32 / 59.0), 1.03),
+        Difficulty::Nightmare => (1.12 + 0.12 * ((local.saturating_sub(1)) as f32 / 59.0), 1.06),
+    };
+    let mut spec = match trait_ {
+        Some(Swarm) => CampaignBodySpec {
+            model: Model::Gnoll, hp: 24.0, speed: 1.22, armour: 0,
+            armour_type: ArmourType::Unarmoured, flying: false, scale: 0.80,
+            pressure: 0.20, shield: 0.0, regen_per_second: 0.0, resistant: false,
+        },
+        Some(Armoured) => CampaignBodySpec {
+            model: Model::Brute, hp: 118.0, speed: 0.76, armour: 9,
+            armour_type: ArmourType::Medium, flying: false, scale: 1.05,
+            pressure: 2.0, shield: 0.0, regen_per_second: 0.0, resistant: false,
+        },
+        Some(Swift) => CampaignBodySpec {
+            model: Model::Warrior, hp: 48.0, speed: 1.48, armour: 1,
+            armour_type: ArmourType::Light, flying: false, scale: 0.90,
+            pressure: 0.75, shield: 0.0, regen_per_second: 0.0, resistant: false,
+        },
+        Some(Flying) => CampaignBodySpec {
+            model: Model::Harpy, hp: 54.0, speed: 1.18, armour: 1,
+            armour_type: ArmourType::Light, flying: true, scale: 0.92,
+            pressure: 0.75, shield: 0.0, regen_per_second: 0.0, resistant: false,
+        },
+        Some(Shielded) => CampaignBodySpec {
+            model: Model::Warrior, hp: 86.0, speed: 0.82, armour: 3,
+            armour_type: ArmourType::Medium, flying: false, scale: 1.0,
+            pressure: 1.2, shield: 64.0, regen_per_second: 0.0, resistant: false,
+        },
+        Some(Regenerator) => CampaignBodySpec {
+            model: Model::Troll, hp: 98.0, speed: 0.88, armour: 3,
+            armour_type: ArmourType::Medium, flying: false, scale: 1.02,
+            pressure: 1.25, shield: 0.0, regen_per_second: 4.0, resistant: false,
+        },
+        Some(Resistant) => CampaignBodySpec {
+            model: Model::Brute, hp: 124.0, speed: 0.91, armour: 7,
+            armour_type: ArmourType::Heavy, flying: false, scale: 1.06,
+            pressure: 2.0, shield: 0.0, regen_per_second: 0.0, resistant: true,
+        },
+        None => CampaignBodySpec {
+            model: Model::Warrior, hp: 62.0, speed: 0.97, armour: 1,
+            armour_type: ArmourType::Unarmoured, flying: false, scale: 0.94,
+            pressure: 0.75, shield: 0.0, regen_per_second: 0.0, resistant: false,
+        },
+    };
+    spec.hp *= scale * diff_mult;
+    spec.shield *= scale * diff_mult;
+    spec.armour += (36.0 * progress).round() as i32;
+    // Late formations are not just slower bags of health: each survivor uses
+    // substantially more of the ring's recovery budget. A settled early board
+    // therefore cannot ignore later chapters by hoarding income.
+    spec.pressure *= 1.0 + 6.12 * progress;
+    spec.speed *= speed_mult;
+    spec.regen_per_second *= (scale * diff_mult).sqrt();
+    spec
 }
 
 #[derive(Clone)]
@@ -894,6 +1155,15 @@ pub struct Game {
     pub seed: u64,
     /// Player-chosen, visible pressure rules layered over the map data.
     pub difficulty: Difficulty,
+    /// Explicit run identity. It is persisted independently of difficulty so
+    /// an existing Legacy save never wakes up as a 600-encounter run.
+    pub mode: RunMode,
+    /// Live encounter timing/deployment state for `RunMode::Campaign`.
+    pub campaign: Option<campaign::CampaignState>,
+    pub diagnostic_fixture: Option<u16>,
+    /// The campaign ring measures weighted pressure. This is its remaining
+    /// three-second breach grace, not a hidden capacity multiplier.
+    pub campaign_pressure_grace: f32,
     pub spatial: SpatialHash,
 
     /// True once the campaign has been cleared and the run has continued.
@@ -918,6 +1188,7 @@ pub struct Game {
     pub build_choice: Option<(usize, u32)>,
     /// Pad the cursor is over, if any.
     pub hover_slot: Option<usize>,
+    pub hover_pos: Option<[f32; 2]>,
     pub speed: f32,
     pub paused: bool,
     pub shake: f32,
@@ -955,6 +1226,10 @@ impl Game {
             rng: Rng::new(0x5eed_1234_abcd_9876),
             seed: 0x5eed_1234_abcd_9876,
             difficulty: Difficulty::Classic,
+            mode: RunMode::Legacy,
+            campaign: None,
+            diagnostic_fixture: None,
+            campaign_pressure_grace: campaign::BREACH_SECONDS,
             spatial: SpatialHash::new(),
             endless: false,
             wave: 0,
@@ -971,6 +1246,7 @@ impl Game {
             selected: None,
             build_choice: None,
             hover_slot: None,
+            hover_pos: None,
             speed: 1.0,
             paused: false,
             shake: 0.0,
@@ -993,14 +1269,51 @@ impl Game {
 
     /// Waves are generated on demand, so the run can continue past the campaign.
     pub fn wave_def(&self, wave: u32) -> WaveDef {
+        if self.is_campaign() {
+            return self.campaign_wave_def(wave.clamp(1, campaign::REALISTIC_ENCOUNTERS as u32) as u16);
+        }
         self.difficulty.apply(wave_at(wave), wave)
+    }
+
+    /// A representative definition for existing HUD/preview consumers.  Live
+    /// Campaign spawning does not use this as a hidden wave table: each body
+    /// instead comes from the active `SpawnPacket` and its resolved traits.
+    fn campaign_wave_def(&self, encounter: u16) -> WaveDef {
+        let e = campaign::resolved_encounter(encounter);
+        let packet = e.packets.first().copied().expect("every authored encounter has a packet");
+        let spec = campaign_body_spec(e.id.chapter, e.id.local, packet.traits[0], self.difficulty);
+        let tag = if e.commander.is_some() {
+            "Commander"
+        } else if packet.traits[0].is_some() {
+            "Trait"
+        } else {
+            "Formation"
+        };
+        WaveDef {
+            name: e.formation.name(),
+            tag,
+            model: spec.model,
+            scale: spec.scale,
+            count: e.packets.iter().map(|p| p.bodies as u32).sum(),
+            hp: spec.hp,
+            armour: spec.armour,
+            armour_type: spec.armour_type,
+            speed: spec.speed,
+            flying: spec.flying,
+            spawn_gap: 0.04,
+            lead_in: e.duration_seconds as f32,
+        }
     }
 
     /// Restarts the run on a fresh road.
     pub fn restart(&mut self) {
         let difficulty = self.difficulty;
         let seed = self.rng.next_u64() ^ 0x51ED_2A17_9C3B_44D1;
-        self.start_run_with_difficulty(seed, difficulty);
+        if self.mode == RunMode::Campaign {
+            self.start_campaign(seed, difficulty);
+        } else {
+            self.start_run_with_difficulty(seed, difficulty);
+        }
     }
 
     /// Restarts from an exact seed.
@@ -1020,11 +1333,101 @@ impl Game {
         self.difficulty = difficulty;
     }
 
+    /// Starts the new, separately labelled 600-encounter expedition.  This
+    /// deliberately does not call `start_run_with_difficulty`: that method is
+    /// Legacy-only and has a different economy, progression, and ending.
+    pub fn start_campaign(&mut self, seed: u64, difficulty: Difficulty) {
+        *self = Game::new();
+        self.rng = Rng::new(seed);
+        self.seed = seed;
+        self.difficulty = difficulty;
+        self.mode = RunMode::Campaign;
+        self.campaign = Some(campaign::CampaignState::default());
+        self.speed = CAMPAIGN_DEFAULT_SPEED;
+        self.gold = difficulty.campaign_starting_gold();
+        self.campaign_pressure_grace = campaign::BREACH_SECONDS;
+        self.prep = false;
+        self.wave_timer = CAMPAIGN_AUTOSTART_SECONDS;
+        self.wants_save = true;
+        self.notice("Campaign ready: Chapter 1 · Encounter 1 auto-deploys now · rapid 10x");
+    }
+
+    #[inline]
+    pub const fn is_campaign(&self) -> bool {
+        matches!(self.mode, RunMode::Campaign)
+    }
+
+    /// The encounter currently being previewed or fought.  During the small
+    /// build beat after a resolution the `CampaignState` has already advanced
+    /// to the next authored encounter, while `wave` remains the one just
+    /// cleared; this avoids a misleading off-by-one HUD.
+    pub fn campaign_encounter(&self) -> Option<u16> {
+        self.campaign.as_ref().map(|state| state.encounter)
+    }
+
+    pub fn upcoming_wave_number(&self) -> u32 {
+        self.campaign
+            .as_ref()
+            .map(|state| state.encounter as u32)
+            .unwrap_or_else(|| self.wave.saturating_add(1))
+    }
+
+    pub fn shop_entries(&self) -> Vec<usize> {
+        let entries = shop_order();
+        if !self.is_campaign() {
+            return entries;
+        }
+        entries
+            .into_iter()
+            .filter(|&index| {
+                matches!(
+                    TOWERS[index].family,
+                    Family::Single
+                        | Family::Siege
+                        | Family::Multi
+                        | Family::Slow
+                        | Family::Corruption
+                        | Family::Air
+                )
+            })
+            .collect()
+    }
+
+    pub fn campaign_chapter(&self) -> Option<u16> {
+        self.campaign
+            .as_ref()
+            .map(|state| campaign::encounter_id(state.encounter).chapter)
+    }
+
+    pub fn campaign_pressure_capacity(&self) -> f32 {
+        match self.difficulty {
+            Difficulty::Classic => 175.0,
+            Difficulty::Veteran => 140.0,
+            Difficulty::Nightmare => 120.0,
+        }
+    }
+
+    /// Weighted ring pressure.  It is intentionally not `creeps.len()`: a
+    /// swarm body and a commander do not consume the same recovery capacity.
+    pub fn campaign_pressure(&self) -> f32 {
+        self.creeps
+            .iter()
+            .map(|c| c.pressure * (1.0 + 0.15 * c.laps.min(4) as f32))
+            .sum()
+    }
+
     pub fn flood_limit(&self) -> usize {
-        self.difficulty.flood_limit(self.wave)
+        if self.is_campaign() {
+            self.campaign_pressure_capacity().round() as usize
+        } else {
+            self.difficulty.flood_limit(self.wave)
+        }
     }
 
     pub fn bounty_for_wave(&self, wave: u32) -> u32 {
+        if self.is_campaign() {
+            return 1;
+        }
         let base = bounty_of(&wave_at(wave));
         (base as f32 * self.difficulty.reward_scale(wave))
             .round()
@@ -1032,6 +1435,9 @@ impl Game {
     }
 
     pub fn stipend_for_wave(&self, wave: u32) -> u32 {
+        if self.is_campaign() {
+            return 0;
+        }
         let base = wave_clear_bonus(wave);
         (base as f32 * self.difficulty.reward_scale(wave))
             .round()
@@ -1065,23 +1471,30 @@ impl Game {
         }
     }
 
-    /// Cycles only through speeds appropriate to the current part of a run.
-    /// Campaign play is deliberately readable at 1x/2x; endless restores 3x.
     pub fn cycle_speed(&mut self) {
-        self.speed = if self.endless {
-            match self.speed.round() as i32 {
-                1 => 2.0,
-                2 => MAX_ENDLESS_SPEED,
-                _ => 1.0,
-            }
-        } else if self.speed < MAX_CAMPAIGN_SPEED {
-            MAX_CAMPAIGN_SPEED
-        } else {
-            1.0
-        };
+        if self.is_campaign() {
+            let current = self.speed.clamp(CAMPAIGN_DEFAULT_SPEED, MAX_CAMPAIGN_SPEED);
+            let at_or_after = CAMPAIGN_SPEED_STEPS
+                .iter()
+                .position(|&speed| current <= speed + 0.01)
+                .unwrap_or(CAMPAIGN_SPEED_STEPS.len() - 1);
+            self.speed = CAMPAIGN_SPEED_STEPS[(at_or_after + 1) % CAMPAIGN_SPEED_STEPS.len()];
+            self.wants_save = true;
+            return;
+        }
+        let current = self.speed.clamp(CAMPAIGN_DEFAULT_SPEED, MAX_ENDLESS_SPEED);
+        let at_or_after = LEGACY_SPEED_STEPS
+            .iter()
+            .position(|&speed| current <= speed + 0.01)
+            .unwrap_or(LEGACY_SPEED_STEPS.len() - 1);
+        self.speed = LEGACY_SPEED_STEPS[(at_or_after + 1) % LEGACY_SPEED_STEPS.len()];
+        self.wants_save = true;
     }
 
     pub fn next_wave_def(&self) -> WaveDef {
+        if let Some(state) = self.campaign.as_ref() {
+            return self.campaign_wave_def(state.encounter);
+        }
         self.wave_def(self.wave + 1)
     }
 
@@ -1199,41 +1612,139 @@ impl Game {
 
     // ------------------------------------------------ player actions
 
+    pub fn tower_at(&self, p: [f32; 2]) -> Option<usize> {
+        let select_r = TOWER_FOOTPRINT_RADIUS + 0.20;
+        let max_d2 = select_r * select_r;
+        self.towers
+            .iter()
+            .enumerate()
+            .filter_map(|(i, tower)| {
+                let dx = tower.pos[0] - p[0];
+                let dy = tower.pos[1] - p[1];
+                let d2 = dx * dx + dy * dy;
+                (d2 <= max_d2).then_some((i, d2))
+            })
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(i, _)| i)
+    }
+
+    pub fn buildability_at(
+        &self,
+        p: [f32; 2],
+        include_gold: bool,
+    ) -> Result<[f32; 2], PlacementIssue> {
+        let p = self.board.quantize_build_pos(p);
+        if let Some(block) = self.board.surface_block(p, TOWER_FOOTPRINT_RADIUS) {
+            return Err(block.into());
+        }
+        let separation = TOWER_FOOTPRINT_RADIUS * 2.0 + TOWER_CLEARANCE;
+        if self.towers.iter().any(|tower| {
+            let dx = tower.pos[0] - p[0];
+            let dy = tower.pos[1] - p[1];
+            dx * dx + dy * dy < separation * separation
+        }) {
+            return Err(PlacementIssue::TowerOverlap);
+        }
+        if include_gold
+            && self
+                .build_choice
+                .and_then(|(def, _)| TOWERS.get(def))
+                .is_some_and(|level| !self.can_afford(level.gold))
+        {
+            return Err(PlacementIssue::NotEnoughGold);
+        }
+        Ok(p)
+    }
+
+    pub fn first_clear_grass(&self) -> Option<[f32; 2]> {
+        let b = self.board.build_world();
+        let mut y = b[1] + TOWER_FOOTPRINT_RADIUS;
+        while y <= b[3] - TOWER_FOOTPRINT_RADIUS {
+            let mut x = b[0] + TOWER_FOOTPRINT_RADIUS;
+            while x <= b[2] - TOWER_FOOTPRINT_RADIUS {
+                if let Ok(pos) = self.buildability_at([x, y], false) {
+                    return Some(pos);
+                }
+                x += 0.50;
+            }
+            y += 0.50;
+        }
+        None
+    }
+
     pub fn try_build(&mut self, slot: usize) -> bool {
+        let Some(s) = self.board.slots.get(slot) else {
+            return false;
+        };
+        self.try_build_internal(s.pos, Some(slot), true)
+    }
+
+    pub fn try_build_at(&mut self, pos: [f32; 2]) -> bool {
+        self.try_build_internal(pos, None, true)
+    }
+
+    pub fn restore_build_at(&mut self, pos: [f32; 2], legacy_slot: Option<usize>) -> bool {
+        self.try_build_internal(pos, legacy_slot, false)
+    }
+
+    fn try_build_internal(
+        &mut self,
+        requested_pos: [f32; 2],
+        legacy_slot: Option<usize>,
+        charge: bool,
+    ) -> bool {
         let Some((def, _)) = self.build_choice else {
             return false;
         };
         let Some(level) = TOWERS.get(def) else {
             return false;
         };
-        let Some(s) = self.board.slots.get(slot) else {
-            return false;
+        let pos = if legacy_slot.is_some() {
+            let p = self.board.quantize_build_pos(requested_pos);
+            let separation = TOWER_FOOTPRINT_RADIUS * 2.0 + TOWER_CLEARANCE;
+            let overlaps = self.towers.iter().any(|tower| {
+                let dx = tower.pos[0] - p[0];
+                let dy = tower.pos[1] - p[1];
+                dx * dx + dy * dy < separation * separation
+            });
+            if !p[0].is_finite() || !p[1].is_finite() || overlaps {
+                self.error(if overlaps {
+                    PlacementIssue::TowerOverlap.label()
+                } else {
+                    PlacementIssue::OutsideWorld.label()
+                });
+                self.sound_cues.push(Cue::Error);
+                return false;
+            }
+            p
+        } else {
+            match self.buildability_at(requested_pos, charge) {
+                Ok(pos) => pos,
+                Err(issue) => {
+                    self.error(issue.label());
+                    self.sound_cues.push(Cue::Error);
+                    return false;
+                }
+            }
         };
-        if s.tower.is_some() {
-            self.error("That pad is taken");
-            self.sound_cues.push(Cue::Error);
-            return false;
-        }
-        let pos = s.pos;
         let cost = level.gold;
-        if !self.can_afford(cost) {
+        if charge && !self.can_afford(cost) {
             self.error("Not enough gold");
             self.sound_cues.push(Cue::Error);
             return false;
         }
 
-        self.gold -= cost as i64;
-        self.stats.gold_spent += cost as u64;
-        self.stats.towers_built += 1;
+        if charge {
+            self.gold -= cost as i64;
+            self.stats.gold_spent += cost as u64;
+            self.stats.towers_built += 1;
+        }
         let ti = self.towers.len();
         self.towers.push(Tower {
             def,
-            slot,
+            slot: legacy_slot.unwrap_or(FREE_TOWER_SLOT),
             pos,
             road_dist: self.board.dist_to_road(pos),
-            // The plinth rise reaches full visual height in a quarter second.
-            // Holding the first volley just past that point prevents a new
-            // tower from firing out of empty air during its build animation.
             cooldown: 0.28,
             angle: 0.0,
             target_uid: 0,
@@ -1251,9 +1762,14 @@ impl Game {
             buff_range: 0.0,
             gold_earned: 0,
         });
-        self.board.slots[slot].tower = Some(ti);
+        if let Some(slot) = legacy_slot {
+            if let Some(pad) = self.board.slots.get_mut(slot) {
+                pad.tower = Some(ti);
+            }
+        }
         self.rebuild_auras();
         self.selected = Some(ti);
+        self.wants_save = charge;
         self.sound_cues.push(Cue::Build);
         let c = level.color();
         self.fx.burst(
@@ -1275,12 +1791,19 @@ impl Game {
         let refund = self.tower_sell_value(ti);
         let t = self.towers[ti].clone();
         self.gold += refund as i64;
-        self.board.slots[t.slot].tower = None;
+        if t.slot != FREE_TOWER_SLOT {
+            if let Some(slot) = self.board.slots.get_mut(t.slot) {
+                slot.tower = None;
+            }
+        }
         self.towers.swap_remove(ti);
-        // swap_remove moved the last tower into `ti`; repoint its pad and shots.
         if ti < self.towers.len() {
             let moved = self.towers[ti].slot;
-            self.board.slots[moved].tower = Some(ti);
+            if moved != FREE_TOWER_SLOT {
+                if let Some(slot) = self.board.slots.get_mut(moved) {
+                    slot.tower = Some(ti);
+                }
+            }
         }
         self.repoint_projectiles(ti);
         self.rebuild_auras();
@@ -1446,6 +1969,10 @@ impl Game {
     /// not go anywhere, so the next stream still stacks on top of them, but the
     /// button cannot be mashed to compress all 36 authored waves into minutes.
     pub fn send_wave(&mut self) {
+        if self.is_campaign() {
+            self.send_campaign_encounter();
+            return;
+        }
         if matches!(self.phase, Phase::Defeat | Phase::Victory) || self.pending_doctrine {
             return;
         }
@@ -1460,7 +1987,11 @@ impl Game {
             ));
             return;
         }
-        let bonus = (self.wave_timer * EARLY_BONUS_PER_SEC).round().max(0.0) as i64;
+        let bonus = if self.wave == 0 || self.prep {
+            0
+        } else {
+            (self.wave_timer * EARLY_BONUS_PER_SEC).round().max(0.0) as i64
+        };
         if bonus > 0 {
             self.gold += bonus;
             self.stats.gold_earned += bonus as u64;
@@ -1483,9 +2014,105 @@ impl Game {
     pub fn last_wave(&self) -> u32 {
         if self.endless {
             u32::MAX
+        } else if self.is_campaign() {
+            campaign::REALISTIC_ENCOUNTERS as u32
         } else {
             CAMPAIGN_WAVES
         }
+    }
+
+    /// Campaign `Send` has two legal meanings: start the prepared authored
+    /// encounter, or use the one allowed normal-encounter Rush after every
+    /// packet is already in the world.  It never starts a second encounter on
+    /// top of one that is still resolving.
+    fn send_campaign_encounter(&mut self) {
+        if matches!(self.phase, Phase::Defeat | Phase::Victory) || self.pending_doctrine {
+            return;
+        }
+        let active = self.phase == Phase::Combat;
+        if active {
+            let rushed = self
+                .campaign
+                .as_mut()
+                .is_some_and(campaign::CampaignState::rush);
+            if rushed {
+                self.wave_timer = 0.0;
+                self.notice("RUSH: recovery tail waived; all packets remain on the ring");
+                self.wants_save = true;
+            } else if self.spawn_left > 0 {
+                self.toast(format!(
+                    "Encounter {} is deploying: {} bodies in the current packet",
+                    self.wave, self.spawn_left
+                ));
+            } else if self
+                .campaign
+                .as_ref()
+                .is_some_and(|state| state.current().commander.is_some())
+            {
+                self.toast("Commander encounters cannot Rush");
+            } else {
+                self.toast("Rush unlocks after the final packet enters");
+            }
+            return;
+        }
+        self.begin_campaign_encounter();
+    }
+
+    fn begin_campaign_encounter(&mut self) {
+        let Some(mut state) = self.campaign.take() else {
+            self.error("Campaign state is unavailable");
+            return;
+        };
+        if state.complete || state.encounter > campaign::REALISTIC_ENCOUNTERS {
+            self.campaign = Some(state);
+            self.error("The campaign has already concluded");
+            return;
+        }
+        let encounter = state.current();
+        self.wave = encounter.id.global as u32;
+        self.prep = false;
+        self.phase = Phase::Combat;
+        self.wave_timer = encounter.duration_seconds as f32;
+        self.spawn_left = state.queued_bodies_left as u32;
+        self.escort_left = 0;
+        self.spawn_timer = 0.0;
+        self.escort_timer = 0.0;
+        state.speed = self.speed;
+
+        let budget = self.difficulty.campaign_encounter_budget(encounter.reward, encounter.id.chapter, encounter.id.local);
+        if !state.deployment_paid {
+            let deployment = budget * 40 / 100;
+            state.deployment_paid = true;
+            state.reward_issued = deployment;
+            state.reward_paid = deployment;
+            state.in_flight_budget = Some(budget);
+            let gold_payout = deployment as i64;
+            self.gold += gold_payout;
+            self.stats.gold_earned += gold_payout as u64;
+            if self.texts.len() < MAX_FLOAT_TEXTS {
+                let s = self.board.start();
+                self.texts.push(FloatText {
+                    pos: [s[0] + 1.4, s[1], 1.1],
+                    value: gold_payout as f32,
+                    kind: TextKind::Gold,
+                    t: 1.5,
+                });
+            }
+        }
+        let name = encounter.title.clone();
+        self.notice(format!(
+            "C{} · Encounter {}: {}",
+            encounter.id.chapter, encounter.id.local, name
+        ));
+        self.sound_cues.push(if encounter.commander.is_some() {
+            Cue::Boss
+        } else {
+            Cue::WaveStart
+        });
+        // Exact mid-combat saves are supported, and the start is also a clear
+        // safe checkpoint before the first packet enters on the next tick.
+        self.wants_save = true;
+        self.campaign = Some(state);
     }
 
     /// Starts the next wave streaming, and pays the stipend for it.
@@ -1574,11 +2201,41 @@ impl Game {
     }
 
     /// Checks the two ways a run can end.
-    fn check_end(&mut self) {
+    pub fn check_end(&mut self) {
         if matches!(self.phase, Phase::Defeat | Phase::Victory) {
             return;
         }
         self.stats.peak_circling = self.stats.peak_circling.max(self.creeps.len() as u32);
+        if self.is_campaign() {
+            if self.campaign.as_ref().is_some_and(|s| s.complete) && self.creeps.is_empty() {
+                self.phase = Phase::Victory;
+                self.sound_cues.push(Cue::Victory);
+                self.notice("The Last Circle is clear · Campaign complete");
+                return;
+            }
+            let pressure = self.campaign_pressure();
+            if pressure > self.campaign_pressure_capacity()
+                && self.campaign_pressure_grace <= 0.0
+            {
+                self.phase = Phase::Defeat;
+                self.sound_cues.push(Cue::Defeat);
+                return;
+            }
+            // Hard-mode commanders are moving objectives with an enforced circuit limit.
+            if let Some(limit) = self.difficulty.commander_lap_limit() {
+                if self
+                    .creeps
+                    .iter()
+                    .any(|creep| creep.is_boss() && creep.laps >= limit)
+                {
+                    self.phase = Phase::Defeat;
+                    self.sound_cues.push(Cue::Defeat);
+                    return;
+                }
+            }
+            self.finish_campaign_if_ready();
+            return;
+        }
         if self.creeps.len() > self.flood_limit() {
             self.phase = Phase::Defeat;
             self.sound_cues.push(Cue::Defeat);
@@ -1626,16 +2283,27 @@ impl Game {
         {
             return;
         }
+        self.campaign_auto_start(real_dt);
         // Fixed steps keep behaviour identical at any game speed or frame rate.
         const STEP: f32 = 1.0 / 120.0;
-        let scaled = (real_dt * self.speed).min(0.25);
+        let scaled = (real_dt.max(0.0) * self.speed).min(3.50);
         let mut left = scaled;
         let mut guard = 0;
-        while left > 0.0 && guard < 48 {
+        while left > 0.0 && guard < 448 {
             let dt = left.min(STEP);
             self.step(dt);
             left -= dt;
             guard += 1;
+        }
+    }
+
+    fn campaign_auto_start(&mut self, real_dt: f32) {
+        if !self.is_campaign() || self.phase != Phase::Build || self.pending_doctrine {
+            return;
+        }
+        self.wave_timer = (self.wave_timer - real_dt.max(0.0)).max(0.0);
+        if self.wave_timer <= 0.0 {
+            self.begin_campaign_encounter();
         }
     }
 
@@ -1661,28 +2329,301 @@ impl Game {
     fn step(&mut self, dt: f32) {
         self.time += dt;
 
-        // The wave clock never stops. There is no build phase to hide in: the
-        // only quiet stretch in a run is before wave one, exactly as the map
-        // plays it.
-        if self.wave < self.last_wave() {
-            self.wave_timer -= dt;
-            // Never replace a stream that has not finished deploying. Normal
-            // wave data completes inside its clock, but this guard also makes
-            // old saves and future balance changes incapable of deleting a
-            // tail at an automatic boundary.
-            if self.wave_timer <= 0.0 && self.spawn_left == 0 {
-                self.begin_wave(false);
+        if self.is_campaign() {
+            if self.phase == Phase::Combat && !self.prep {
+                self.campaign_spawn_step(dt);
             }
-        }
-        if !self.prep {
-            self.spawn_step(dt);
+        } else {
+            if self.wave < self.last_wave() {
+                self.wave_timer -= dt;
+                if self.wave_timer <= 0.0 && self.spawn_left == 0 {
+                    self.begin_wave(false);
+                }
+            }
+            if !self.prep {
+                self.spawn_step(dt);
+            }
         }
 
         self.spatial.rebuild(&self.creeps);
         self.step_creeps(dt);
         combat::step_towers(self, dt);
         combat::step_projectiles(self, dt);
+        if self.is_campaign() {
+            if self.campaign_pressure() > self.campaign_pressure_capacity() {
+                self.campaign_pressure_grace = (self.campaign_pressure_grace - dt).max(0.0);
+            } else {
+                let grace_cap = self.campaign_pressure_grace.max(campaign::BREACH_SECONDS);
+                self.campaign_pressure_grace =
+                    (self.campaign_pressure_grace + dt * 1.5).min(grace_cap);
+            }
+        }
         self.check_end();
+    }
+
+    fn campaign_spawn_step(&mut self, dt: f32) {
+        let Some(mut state) = self.campaign.take() else {
+            self.error("Campaign state was lost; play has paused safely");
+            self.paused = true;
+            return;
+        };
+        state.advance(dt);
+        state.speed = self.speed;
+        state.packet_spawn_timer -= dt;
+        let encounter = state.current();
+
+        let packet_window = |packet: campaign::SpawnPacket| {
+            if packet.at_seconds == encounter.duration_seconds {
+                if encounter.commander.is_some() { 1.4 } else { 0.9 }
+            } else {
+                2.6
+            }
+        };
+
+        let mut safety = 0usize;
+        loop {
+            safety += 1;
+            if safety > 2_048 {
+                self.error("Campaign packet safety stop");
+                break;
+            }
+            if state.queued_packet.is_none() && state.arm_due_packet().is_none() {
+                break;
+            }
+            let Some(packet) = state.queued_packet() else { break };
+            if state.packet_spawn_timer > 0.0 || state.queued_bodies_left == 0 {
+                break;
+            }
+            if self.creeps.len() >= MAX_CREEPS {
+                state.packet_spawn_timer = 0.25;
+                self.error("Spawn queue held: simulation body safety ceiling");
+                break;
+            }
+
+            let ordinal = packet.bodies.saturating_sub(state.queued_bodies_left);
+            let global_body = state.spawned_bodies;
+            let total_bodies: u32 = encounter.packets.iter().map(|p| p.bodies as u32).sum();
+            let budget = state.in_flight_budget.unwrap_or_else(|| {
+                self.difficulty.campaign_encounter_budget(encounter.reward, encounter.id.chapter, encounter.id.local)
+            });
+            if state.in_flight_budget.is_none() {
+                state.in_flight_budget = Some(budget);
+            }
+            let deployment = budget * 40 / 100;
+            let kill_budget = budget.saturating_sub(deployment);
+            let per_body = kill_budget / total_bodies.max(1);
+            let remainder = kill_budget % total_bodies.max(1);
+            let bounty = per_body + u32::from(global_body < remainder);
+            let boss = encounter.commander.is_some()
+                && packet.at_seconds == encounter.duration_seconds
+                && ordinal == 0;
+            self.spawn_campaign_body(&encounter, packet, ordinal, bounty, boss);
+            if boss {
+                state.commander_spawned_at = Some(state.elapsed_seconds);
+            }
+            state.reward_issued = state.reward_issued.saturating_add(bounty);
+            state.reward_paid = state.reward_paid.saturating_add(bounty);
+            let gap = packet_window(packet) / packet.bodies.max(1) as f32;
+            if !state.consume_queued_body(gap) {
+                self.error("Campaign packet cursor was invalid");
+                break;
+            }
+        }
+        self.spawn_left = state.queued_bodies_left as u32;
+        self.escort_left = 0;
+        self.wave_timer = (encounter.duration_seconds as f32 - state.elapsed_seconds).max(0.0);
+        self.campaign = Some(state);
+    }
+
+    fn spawn_campaign_body(
+        &mut self,
+        encounter: &campaign::ResolvedEncounter,
+        packet: campaign::SpawnPacket,
+        ordinal: u16,
+        bounty: u32,
+        boss: bool,
+    ) {
+        let trait_ = campaign_body_trait(packet, ordinal);
+        let spec = campaign_body_spec(encounter.id.chapter, encounter.id.local, trait_, self.difficulty);
+        let wave = WaveDef {
+            name: packet.formation.name(),
+            tag: if boss { "Commander" } else { "Formation" },
+            model: spec.model,
+            scale: spec.scale,
+            count: 1,
+            hp: spec.hp,
+            armour: spec.armour,
+            armour_type: spec.armour_type,
+            speed: spec.speed,
+            flying: spec.flying,
+            spawn_gap: 0.0,
+            lead_in: 0.0,
+        };
+        self.spawn_creep_ranked(&wave, wave.hp, 1.0, 0.0, false, boss);
+        let Some(c) = self.creeps.last_mut() else { return };
+        c.route_dir = if packet.clockwise { 1.0 } else { -1.0 };
+        c.bounty = bounty;
+        c.shield = spec.shield;
+        c.max_shield = spec.shield;
+        c.regen_per_second = spec.regen_per_second;
+        c.resistant = spec.resistant;
+        c.campaign_encounter = encounter.id.global;
+        c.pressure = if boss { 12.0 } else { spec.pressure };
+        if boss {
+            let floor = campaign_commander_hp_floor(self.difficulty, encounter.id.global);
+            if floor > 0.0 {
+                // `spawn_creep_ranked` already applied BOSS_HP_MULT. The
+                // floor is compared to that final value, never multiplied.
+                c.max_hp = c.max_hp.max(floor);
+                c.hp = c.max_hp;
+            }
+            let segment_shield = 110.0 * encounter.id.chapter as f32;
+            c.shield += segment_shield;
+            c.max_shield += segment_shield;
+            c.armour += 3 + encounter.id.chapter as i32;
+            c.resistant = true;
+        }
+        place(&self.board, c);
+    }
+
+    fn finish_campaign_if_ready(&mut self) {
+        let Some(mut state) = self.campaign.take() else { return };
+        let encounter = state.current();
+        let required_living = if encounter.commander.is_some() {
+            self.creeps
+                .iter()
+                .filter(|creep| creep.campaign_encounter == encounter.id.global)
+                .count()
+        } else {
+            0
+        };
+        if !state.can_finish(required_living) {
+            self.campaign = Some(state);
+            return;
+        }
+        let expected_budget = state.in_flight_budget.unwrap_or_else(|| {
+            self.difficulty.campaign_encounter_budget(encounter.reward, encounter.id.chapter, encounter.id.local)
+        });
+        if state.reward_issued != expected_budget && !(state.in_flight_budget == Some(encounter.reward) && state.reward_issued >= encounter.reward) {
+            self.error("Campaign reward ledger is incomplete; encounter remains open");
+            self.campaign = Some(state);
+            return;
+        }
+        let Some(finished) = state.finish(required_living) else {
+            self.campaign = Some(state);
+            return;
+        };
+        self.wave = finished as u32;
+        self.spawn_left = 0;
+        self.escort_left = 0;
+        self.wave_timer = 0.0;
+        self.wants_save = true;
+        if state.complete {
+            if self.creeps.is_empty() {
+                self.phase = Phase::Victory;
+                self.sound_cues.push(Cue::Victory);
+                self.notice("The Last Circle is clear · Campaign complete");
+            }
+            self.campaign = Some(state);
+            return;
+        }
+
+        let next = state.current();
+        self.phase = Phase::Build;
+        self.prep = false;
+        if encounter.commander.is_some() {
+            self.pending_doctrine = true;
+            self.paused = true;
+            self.notice(format!(
+                "Commander resolved · choose a campaign perk before C{}E{}",
+                next.id.chapter, next.id.local
+            ));
+        } else {
+            self.wave_timer = CAMPAIGN_AUTOSTART_SECONDS;
+            self.notice(format!(
+                "Encounter {} resolved · prepare C{}E{}",
+                finished, next.id.chapter, next.id.local
+            ));
+        }
+        if next.id.local == 1 {
+            let scale = self.difficulty.campaign_reward_scale(next.id.chapter, 1);
+            let chapter_purse = ((180 + next.id.chapter as i64 * 20) as f32 * scale).round() as i64;
+            self.gold += chapter_purse;
+            self.stats.gold_earned += chapter_purse as u64;
+            self.notice(format!(
+                "Chapter {} supplies +{}g · choose your next deployment",
+                next.id.chapter, chapter_purse
+            ));
+        }
+        self.campaign = Some(state);
+    }
+
+    pub const fn diagnostic_fixture_target(start: u16) -> Option<u16> {
+        match start {
+            35 => Some(37),
+            60 => Some(61),
+            599 => Some(600),
+            _ => None,
+        }
+    }
+
+    pub fn start_campaign_diagnostic_fixture(
+        &mut self,
+        seed: u64,
+        difficulty: Difficulty,
+        start: u16,
+    ) -> bool {
+        let Some(target) = Self::diagnostic_fixture_target(start) else {
+            return false;
+        };
+        self.start_campaign(seed, difficulty);
+        let state = self
+            .campaign
+            .as_mut()
+            .expect("start_campaign must create CampaignState");
+        state.encounter = start;
+        self.wave = start.saturating_sub(1) as u32;
+        self.prep = false;
+        self.phase = Phase::Build;
+        self.wave_timer = 0.0;
+        self.speed = 100.0;
+        self.campaign_pressure_grace = 1_000_000.0;
+        self.diagnostic_fixture = Some(start);
+        self.wants_save = false;
+        self.notice(format!(
+            "DIAGNOSTIC fixture E{start} -> E{target}: production transition trace at 100x"
+        ));
+        true
+    }
+
+    pub fn diagnostic_pilot_tick(&mut self) {
+        if self.diagnostic_fixture.is_none() {
+            return;
+        }
+        if self.pending_doctrine {
+            let pick = Doctrine::ALL
+                .into_iter()
+                .find(|&doctrine| self.doctrine_rank(doctrine) < 3)
+                .expect("campaign diagnostic exhausted all legal doctrines");
+            self.choose_doctrine(pick);
+            return;
+        }
+        if self.phase == Phase::Build {
+            self.send_wave();
+        }
+        let alive = self.creeps.len();
+        for ci in 0..alive {
+            if self.creeps[ci].hp > 0.0 {
+                combat::damage_creep(self, ci, 1_000_000.0, usize::MAX, false);
+            }
+        }
+        if self
+            .campaign
+            .as_ref()
+            .is_some_and(campaign::CampaignState::can_rush)
+        {
+            self.send_wave();
+        }
     }
 
     fn spawn_step(&mut self, dt: f32) {
@@ -1786,6 +2727,13 @@ impl Game {
             laps: 0,
             flash: 0.0,
             bob: self.rng.range(0.0, std::f32::consts::TAU),
+            shield: 0.0,
+            max_shield: 0.0,
+            regen_per_second: 0.0,
+            resistant: false,
+            campaign_encounter: 0,
+            pressure: 1.0,
+            death_killer: None,
         };
         place(&self.board, &mut c);
         self.creeps.push(c);
@@ -1793,6 +2741,7 @@ impl Game {
 
     fn step_creeps(&mut self, dt: f32) {
         let mut died: Vec<usize> = Vec::new();
+        let mut boss_notices: Vec<String> = Vec::new();
         let lap_haste = self.difficulty.lap_haste();
 
         for i in 0..self.creeps.len() {
@@ -1852,6 +2801,17 @@ impl Game {
                         c.base_speed *= 1.0 + lap_haste;
                     }
                 }
+                if c.is_boss() && completed > 0 {
+                    c.pressure += 6.0 * completed as f32;
+                    if let Some(limit) = self.difficulty.commander_lap_limit() {
+                        let left = limit.saturating_sub(c.laps);
+                        if left == 1 {
+                            boss_notices.push(format!("Commander lap {}: breach imminent in 1 lap!", c.laps));
+                        } else if left > 1 {
+                            boss_notices.push(format!("Commander completed lap {}: {} lap(s) before breach!", c.laps, left));
+                        }
+                    }
+                }
                 // A pushback budget that never refreshed meant a monster on its
                 // fifth lap could not be slowed by a Thornwall at all. One lap
                 // survived is worth a fresh shove.
@@ -1859,6 +2819,11 @@ impl Game {
             }
             place(&self.board, &mut self.creeps[i]);
         }
+        for msg in boss_notices {
+            self.notice(msg);
+        }
+
+        self.step_campaign_commander_mechanics(dt);
 
         // A boss is a moving objective, not merely a large health pool. Its
         // nearby escort slowly repairs while the commander lives, which asks
@@ -1868,7 +2833,12 @@ impl Game {
         let menders: Vec<[f32; 2]> = self
             .creeps
             .iter()
-            .filter(|c| c.is_boss() && c.hp > 0.0)
+            .filter(|c| {
+                c.is_boss()
+                    && c.hp > 0.0
+                    && campaign::commander_for_encounter(c.campaign_encounter)
+                        != Some(campaign::CommanderClass::SiphonMarshal)
+            })
             .map(|c| c.pos)
             .collect();
         if !menders.is_empty() {
@@ -1887,6 +2857,40 @@ impl Game {
             }
         }
 
+        // The Siphon Marshal does the inverse: it consumes nearby *living*
+        // escorts to heal itself. Killing escorts (or suppressing the Marshal)
+        // cleanly denies the heal; the drain never awards gold or creates a
+        // replacement body.
+        let siphons: Vec<usize> = self.creeps.iter().enumerate().filter_map(|(i, c)| {
+            (c.is_boss()
+                && c.hp > 0.0
+                && c.suppress <= 0.0
+                && campaign::commander_for_encounter(c.campaign_encounter)
+                    == Some(campaign::CommanderClass::SiphonMarshal))
+                .then_some(i)
+        }).collect();
+        for boss_index in siphons {
+            let boss = self.creeps[boss_index].clone();
+            let range2 = BOSS_MENDER_RANGE * BOSS_MENDER_RANGE;
+            let escorts: Vec<usize> = self.creeps.iter().enumerate().filter_map(|(i, c)| {
+                if i == boss_index || c.is_boss() || c.hp <= 0.0
+                    || c.campaign_encounter != boss.campaign_encounter { return None; }
+                let dx = c.pos[0] - boss.pos[0];
+                let dy = c.pos[1] - boss.pos[1];
+                (dx * dx + dy * dy <= range2).then_some(i)
+            }).take(8).collect();
+            let mut drained = 0.0;
+            for i in escorts {
+                let amount = (self.creeps[i].hp * 0.025 * dt).min(4.0 * dt);
+                self.creeps[i].hp -= amount;
+                drained += amount;
+            }
+            if drained > 0.0 {
+                let c = &mut self.creeps[boss_index];
+                c.hp = (c.hp + drained * 1.35).min(c.max_hp);
+            }
+        }
+
         // Remove back-to-front so swap_remove never invalidates a pending index.
         died.sort_unstable();
         died.dedup();
@@ -1894,6 +2898,143 @@ impl Game {
             let c = self.creeps[i].clone();
             self.on_creep_died(&c, None);
             self.creeps.swap_remove(i);
+        }
+    }
+
+    /// Resolve the authored commander behaviors from persistent encounter
+    /// state. The only random-looking result is ordinary creep lane jitter,
+    /// which already uses the saved run RNG; trigger decisions themselves are
+    /// deterministic and every spawned brood body has zero bounty.
+    fn step_campaign_commander_mechanics(&mut self, dt: f32) {
+        let Some(state) = self.campaign.as_ref() else { return };
+        let encounter = state.current();
+        let Some(class) = encounter.commander else { return };
+        let elapsed = state.elapsed_seconds;
+        // Old saves did not record the birth moment. Treat their commander as
+        // newborn rather than retroactively firing pulses before the player
+        // sees it; new saves retain the exact delayed-queue timestamp.
+        let age = (elapsed - state.commander_spawned_at.unwrap_or(elapsed)).max(0.0);
+        let mut triggers = state.commander_triggers;
+        let mut window_at = state.commander_window_at;
+        let Some(boss_index) = self.creeps.iter().position(|c| {
+            c.is_boss() && c.campaign_encounter == encounter.id.global && c.hp > 0.0
+        }) else { return };
+        let boss = self.creeps[boss_index].clone();
+        let mut notices = Vec::new();
+        let mut brood_batches = 0u8;
+
+        match class {
+            campaign::CommanderClass::Bulwark => {
+                if boss.shield <= 0.0 && triggers & 1 == 0 {
+                    triggers |= 1;
+                    window_at = elapsed;
+                    self.creeps[boss_index].armour = 0;
+                    notices.push("Bulwark plates broken: focus the exposed core!".to_owned());
+                } else if triggers & 1 != 0 && elapsed - window_at >= 6.0 {
+                    triggers &= !1;
+                    let c = &mut self.creeps[boss_index];
+                    c.shield = c.max_shield * 0.55;
+                    c.armour = 3 + encounter.id.chapter as i32;
+                    notices.push("Bulwark plates reforming.".to_owned());
+                }
+            }
+            campaign::CommanderClass::HuntCaptain => {
+                let due = ((age / 22.0).floor() as u8).min(3);
+                let fired = triggers & 0x0f;
+                if due > fired {
+                    triggers = (triggers & !0x0f) | due;
+                    window_at = elapsed;
+                    let r2 = 7.0 * 7.0;
+                    for escort in &mut self.creeps {
+                        if escort.is_boss() || escort.campaign_encounter != encounter.id.global { continue; }
+                        let dx = escort.pos[0] - boss.pos[0];
+                        let dy = escort.pos[1] - boss.pos[1];
+                        if dx * dx + dy * dy <= r2 { escort.base_speed *= 1.10; }
+                    }
+                    notices.push("Hunt Captain pulse: escorts accelerate—control the flank.".to_owned());
+                }
+            }
+            campaign::CommanderClass::BroodKeeper | campaign::CommanderClass::Signature => {
+                // Two bounded, one-shot health thresholds. The mask makes an
+                // exact reload before/after either threshold converge.
+                for (bit, threshold) in [(1u8, 0.66f32), (2u8, 0.33f32)] {
+                    if boss.hp_frac() <= threshold && triggers & (1 << bit) == 0 {
+                        triggers |= 1 << bit;
+                        brood_batches += 1;
+                    }
+                }
+                if brood_batches > 0 {
+                    notices.push("Brood Keeper splits: clear the zero-bounty brood.".to_owned());
+                }
+                // A chapter Signature combines a proven brood threshold with
+                // the Ward's readable shield window below.
+                if class == campaign::CommanderClass::Signature {
+                    let cycle = (age / 16.0).floor();
+                    if cycle > (window_at / 16.0).floor() {
+                        window_at = age;
+                        let c = &mut self.creeps[boss_index];
+                        c.shield = c.max_shield;
+                        c.armour = 3 + encounter.id.chapter as i32;
+                    }
+                    if age.rem_euclid(16.0) >= 7.0 { self.creeps[boss_index].shield = 0.0; }
+                }
+            }
+            campaign::CommanderClass::WardKeeper => {
+                let cycle = (age / 16.0).floor();
+                if cycle > (window_at / 16.0).floor() {
+                    window_at = age;
+                    let c = &mut self.creeps[boss_index];
+                    c.shield = c.max_shield;
+                    c.armour = 3 + encounter.id.chapter as i32;
+                    notices.push("Ward raised: prepare burst for its open window.".to_owned());
+                }
+                if age.rem_euclid(16.0) >= 7.0 {
+                    self.creeps[boss_index].shield = 0.0;
+                }
+            }
+            campaign::CommanderClass::SiphonMarshal => {}
+        }
+        if let Some(state) = self.campaign.as_mut() {
+            state.commander_triggers = triggers;
+            state.commander_window_at = window_at;
+        }
+        for _ in 0..brood_batches {
+            self.spawn_commander_brood(&encounter, &boss, 6);
+        }
+        for notice in notices { self.notice(notice); }
+        let _ = dt; // keeps the phase contract explicit for future timed cues.
+    }
+
+    fn spawn_commander_brood(
+        &mut self,
+        encounter: &campaign::ResolvedEncounter,
+        boss: &Creep,
+        count: u8,
+    ) {
+        let spec = campaign_body_spec(
+            encounter.id.chapter,
+            encounter.id.local,
+            Some(campaign::ResolvedTrait::Swarm),
+            self.difficulty,
+        );
+        let wave = WaveDef {
+            name: "Brood", tag: "Brood", model: spec.model, scale: spec.scale,
+            count: 1, hp: spec.hp, armour: spec.armour, armour_type: spec.armour_type,
+            speed: spec.speed, flying: false, spawn_gap: 0.0, lead_in: 0.0,
+        };
+        let available = MAX_CREEPS.saturating_sub(self.creeps.len());
+        for ordinal in 0..usize::from(count).min(available) {
+            let before = self.creeps.len();
+            self.spawn_creep_ranked(
+                &wave, wave.hp, 0.85, (boss.dist - ordinal as f32 * 0.18).max(0.0), false, false,
+            );
+            if self.creeps.len() == before { break; }
+            let Some(c) = self.creeps.last_mut() else { break };
+            c.route_dir = boss.route_dir;
+            c.campaign_encounter = encounter.id.global;
+            c.pressure = spec.pressure;
+            c.bounty = 0;
+            place(&self.board, c);
         }
     }
 

@@ -34,7 +34,7 @@ const POS_RANGE: f32 = 4.0;
 /// How many colour layers `assets/textures.bin` holds. Each one's normal map is
 /// that many layers further on, so this must match `LAYERS` in
 /// `tools/bake_textures.py`; `the_texture_blob_matches_the_shader` checks it.
-const GROUND_LAYERS: i32 = 4;
+const GROUND_LAYERS: i32 = 5;
 
 @group(0) @binding(3) var ground_tex: texture_2d_array<f32>;
 @group(0) @binding(4) var ground_smp: sampler;
@@ -64,6 +64,8 @@ struct VsIn {
     @location(9) v_dpos: vec4<f32>,
     @location(10) v_dnrm: vec4<f32>,
     @location(11) i_anim: vec2<f32>,
+    // x/y are authored source UV, z says the source actually carried UVs.
+    @location(12) v_uv: vec4<f32>,
 };
 
 struct VsOut {
@@ -80,7 +82,14 @@ struct VsOut {
     // can see at gameplay distance.
     @location(6) tint: f32,
     // Ground texture layer, one-based. Zero for everything that is not terrain.
-    @location(7) tex: f32,
+    // This is a discrete texture-array selector, never a spatial value. A
+    // perspective-interpolated 5.0 can arrive as 4.999 and truncate Mosswatch
+    // to the preceding layer in horizontal screen bands.
+    @interpolate(flat) @location(7) tex: f32,
+    // Per-triangle source material id. Zero means use the instance material.
+    @location(8) part_material: f32,
+    // Authored UV.xy and source-UV flag in z, retained through the bake.
+    @location(9) model_uv: vec3<f32>,
 };
 
 // Yaw about Z, then pitch tilting the local +Z axis.
@@ -129,6 +138,8 @@ fn vs(in: VsIn) -> VsOut {
     o.color = vec4<f32>(o.color.rgb * in.v_col.rgb, o.color.a);
     o.tex = in.i_params.y;
     o.material = in.i_material;
+    o.part_material = in.v_col.a;
+    o.model_uv = vec3<f32>(in.v_uv.xy, in.v_uv.z);
     // Variation helps repeated props, but on one-instance-per-tile terrain it
     // exposes the mesh grid as a checkerboard. Ground gets continuous
     // world-space variation in the fragment shader instead.
@@ -271,6 +282,98 @@ fn env_brdf(f0: vec3<f32>, rough: f32, ndv: f32) -> vec3<f32> {
     return f0 * (a004 * -1.04 + r.z) + vec3<f32>(a004 * 1.04 + r.w);
 }
 
+// Material ids are authored into each baked vertex by `bake_models.py`.
+// They deliberately describe real substance rather than a tower family tint:
+// a ballista can therefore have limestone footings, oak beams, black iron
+// pivots and bronze fittings in a single indexed draw.
+fn part_layer(id: i32) -> i32 {
+    switch id {
+        case 1: { return 3; }  // limestone
+        case 2: { return 2; }  // oiled oak
+        case 3, 4, 8, 13, 14: { return 3; } // iron, bronze, plate
+        case 9, 10: { return 4; } // leaf, moss: dark local woodland texture
+        case 11: { return 1; } // heavy banner cloth
+        case 12: { return 3; } // inset amber rune / eye
+        case 15: { return 1; } // coarse packrunner fur / mane
+        default: { return 1; } // hide, skin, chitin
+    }
+}
+
+fn part_roughness(id: i32, fallback: f32) -> f32 {
+    switch id {
+        case 1: { return 0.91; } // limestone
+        case 2: { return 0.72; } // oak
+        case 3: { return 0.37; } // forged iron
+        case 4: { return 0.43; } // worn bronze
+        case 5: { return 0.83; } // hide
+        case 6: { return 0.67; } // skin
+        case 7: { return 0.36; } // chitin shell
+        case 8: { return 0.62; } // weathered plate edge
+        case 9: { return 0.88; } // leaf
+        case 10: { return 0.95; } // moss
+        case 11: { return 0.86; } // woven tabard cloth
+        case 12: { return 0.34; } // polished amber inset
+        case 13: { return 0.74; } // cold worn warplate
+        case 14: { return 0.82; } // dull oxidised raider plate
+        case 15: { return 0.96; } // coarse, matte brindled fur
+        default: { return fallback; }
+    }
+}
+
+fn part_metallic(id: i32, fallback: f32) -> f32 {
+    switch id {
+        // At full-board scale a mirror-like metal response turns every helmet
+        // into the same sky-blue dot.  These remain physically distinct forged
+        // metals, but retain enough diffuse albedo for black iron, bronze and
+        // pale plate to read as separate constructed pieces in a moving horde.
+        case 3: { return 0.56; } // forged black iron
+        case 4: { return 0.58; } // worn bronze
+        case 7: { return 0.22; } // glossy chitin, not mirror metal
+        case 8: { return 0.28; } // weathered plated bone/iron edge
+        case 12: { return 0.10; } // runic amber is a stone/glass inset
+        case 13: { return 0.18; } // weathered forged warplate
+        case 14: { return 0.12; } // scavenged oxidised plate
+        case 15: { return 0.0; } // fur absorbs its light; it is not leathered metal
+        case 1, 2, 5, 6, 9, 10, 11: { return 0.0; }
+        default: { return fallback; }
+    }
+}
+
+/// Tiny authored runes, eyes and sights are the only permanently luminous
+/// material on a normal battlefield.  Their light is deliberately local: it
+/// gives a horned brute a readable face and a constructed weapon a focal point
+/// without painting cyan rings, every grass blade, or whole units with glow.
+fn part_emission(id: i32) -> f32 {
+    switch id {
+        case 12: { return 0.72; } // RunicAmber
+        default: { return 0.0; }
+    }
+}
+
+fn part_detail_strength(id: i32) -> f32 {
+    switch id {
+        case 1: { return 0.28; }
+        case 2: { return 0.42; }
+        // Do not borrow a pale rock/dirt photograph for broad character
+        // armour, chitin or cloth.  It was the direct cause of the white and
+        // orange bands in a live horde: real source materials were present,
+        // but a generic terrain texture overwhelmed them at tactical scale.
+        // These retain a tiny grain response while construction, source UVs
+        // and lighting decide what each physical part is.
+        case 3, 4, 8, 13, 14: { return 0.045; }
+        case 7: { return 0.050; }
+        case 15: { return 0.030; }
+        // Foliage carries real mesh silhouette and shadow.  A strong bright
+        // grass texture over every tiny authored leaf was what made the live
+        // tree crowns neon despite their dark source materials; keep only a
+        // quiet physical variation on the actual leaf geometry.
+        case 9, 10: { return 0.12; }
+        case 11: { return 0.035; }
+        case 12: { return 0.10; }
+        default: { return 0.16; }
+    }
+}
+
 // ---------------------------------------------------------------- fragment
 
 @fragment
@@ -285,13 +388,36 @@ fn fs(o: VsOut) -> @location(0) vec4<f32> {
     // Derivatives must be evaluated before the material branch. Passing them
     // explicitly keeps mip filtering while satisfying WebGPU's uniform-control
     // rule on Chromium/Edge.
-    let ground_uv = o.world.xy * 0.73;
+    // A terrain material repeats across a landscape, not once per logical
+    // build tile. The former scale made the grass look like striped wallpaper.
+    // The former 0.18 scale tiled the photo surface almost five times across
+    // the compact board, producing a faint square repeat that looked like a
+    // hidden grid.  At this world scale the same authored aggregate spans a
+    // real clearing before it repeats, while normal relief still resolves at
+    // tactical camera distance.
+    // Mosswatch is an aggregate seen from a high tactical camera, not a
+    // close-up tiling sample. A lower frequency keeps broad dark grass value
+    // while letting real fern, root and rock meshes carry local relief.
+    // Packed earth receives a smaller, denser repeat than the broad grass
+    // substrate. It is a physical material at the edge of every footstep, not
+    // a single flat brown ribbon; the grass remains deliberately lower
+    // frequency so it does not turn into a tiled lawn.
+    let terrain_layer_hint = i32(round(o.tex)) - 1;
+    let terrain_scale = select(0.060, 0.115, terrain_layer_hint == 1);
+    let ground_uv = o.world.xy * terrain_scale;
     let ground_uv_dx = dpdx(ground_uv);
     let ground_uv_dy = dpdy(ground_uv);
     let world_dx = dpdx(o.world);
     let world_dy = dpdy(o.world);
+    // Like world-space derivatives, source-UV derivatives must be evaluated
+    // before the non-uniform terrain/material branch below. Chromium's WebGPU
+    // validator correctly rejects derivatives nested under a varying branch,
+    // even when the eventual texture sample uses explicit gradients.
+    let model_uv_dx = dpdx(o.model_uv.xy);
+    let model_uv_dy = dpdy(o.model_uv.xy);
+    let part_id = i32(round(o.part_material * 255.0));
     if (o.tex >= 0.5) {
-        let layer = i32(o.tex - 1.0);
+        let layer = i32(round(o.tex)) - 1;
         // The terrain/material selector is a per-fragment value, so this branch
         // is non-uniform. WebGPU therefore forbids an implicit-derivative
         // textureSample here even though native backends accept it.
@@ -319,16 +445,44 @@ fn fs(o: VsOut) -> @location(0) vec4<f32> {
             ground_uv_dx,
             ground_uv_dy,
         ).xyz * 2.0 - 1.0;
+        // Mosswatch's source aggregate is intentionally rich; at a complete
+        // tactical-board camera it must not turn into a shimmering green
+        // carpet.  Physical ferns, roots and rocks provide the close relief,
+        // while this remaining micro-normal only catches the daylight.
+        // Mosswatch's derived micro-normal is intentionally gentler than dirt
+        // at tactical height. Its discrete layer selector is flat-interpolated
+        // above, so this response cannot leak into the preceding stone layer.
+        let relief = select(GROUND_RELIEF, GROUND_RELIEF * 0.42, layer == 4);
         n = normalize(vec3<f32>(
-            n.x + tn.x * GROUND_RELIEF,
-            n.y + tn.y * GROUND_RELIEF,
+            n.x + tn.x * relief,
+            n.y + tn.y * relief,
             n.z,
         ));
         // The bake normalises each layer to a linear mean of one half, so twice
         // the sample averages to exactly one: the texture multiplies the tile's
         // measured colour without changing how bright it is on average. The mix
         // is how much grain to let through.
-        albedo_tex = mix(vec3<f32>(1.0), albedo_tex * 2.0, 0.24);
+        // Let authored terrain carry enough material identity to read at
+        // tactical scale, but keep the high-frequency photo reference from
+        // becoming a tiled carpet. Packed dirt stays more pronounced than the
+        // wide moss field; physical verge meshes supply the latter's close
+        // silhouette instead of an ever-stronger albedo blend.
+        let terrain_detail = select(
+            // Grass is a broad substrate at this camera, not a full-screen
+            // photo. Its real moss/grass aggregate needs enough material
+            // response to avoid reading as flat green paint; rooted ferns,
+            // rocks and trees still provide the close silhouette and depth.
+            select(0.18, 0.48, layer == 1),
+            // The authored Mosswatch field covers the tactical meadow at a
+            // low world repeat, so it has room for this much real turf/pebble
+            // response without becoming wallpaper.  At 0.15 the browser
+            // capture flattened it into one green table and made the route
+            // look pasted on; this restores material depth beneath the actual
+            // grass, roots and contact shadows rather than adding a UI grid.
+            0.30,
+            layer == 4,
+        );
+        albedo_tex = mix(vec3<f32>(1.0), albedo_tex * 2.0, terrain_detail);
         if (layer == 0) {
             // Broad world-space variation, continuous over tile boundaries.
             // It keeps the field alive without photographic speckle or square
@@ -411,6 +565,31 @@ fn fs(o: VsOut) -> @location(0) vec4<f32> {
         let macro_tone = sin(o.world.x * 3.17 + o.world.z * 2.31)
             * sin(o.world.y * 2.73 - o.world.z * 1.91);
         albedo_tex = albedo_tex * (0.965 + macro_tone * 0.035);
+
+        // Original Blender assets preserve their unwrap instead of relying on
+        // the object-wide material heuristic above. A source UV gives timber
+        // grain a continuous direction around a stock and keeps stone blocks
+        // from acquiring arbitrary world-axis seams as the tower turns.
+        if (part_id > 0 && o.model_uv.z > 0.5) {
+            let layer = part_layer(part_id);
+            let uv_scale = select(1.75, 2.40, part_id == 2);
+            let uv = o.model_uv.xy * uv_scale;
+            let uv_dx = model_uv_dx * uv_scale;
+            let uv_dy = model_uv_dy * uv_scale;
+            let authored = textureSampleGrad(
+                ground_tex, ground_smp, uv, layer, uv_dx, uv_dy
+            ).rgb;
+            // Leaf volume already has real overlapping geometry, shadow and
+            // material-separated source colour. Sampling the broad ground
+            // aggregate across every tiny lobe made isolated bright stones
+            // read as silver leaf faces in the live forest. Keep foliage
+            // physical, but let its own construction carry the close detail
+            // instead of borrowing an unrelated ground photograph.
+            let authored_strength = select(
+                part_detail_strength(part_id), 0.0, part_id == 9 || part_id == 10
+            );
+            albedo_tex = mix(vec3<f32>(1.0), authored * 2.0, authored_strength);
+        }
     }
 
     let l = normalize(U.light_dir.xyz);
@@ -431,9 +610,9 @@ fn fs(o: VsOut) -> @location(0) vec4<f32> {
     let dnx = dpdx(o.nrm);
     let dny = dpdy(o.nrm);
     let smear = min(0.5 * (dot(dnx, dnx) + dot(dny, dny)), 0.20);
-    let mat_rough = clamp(o.material.x, 0.045, 1.0);
+    var mat_rough = clamp(part_roughness(part_id, o.material.x), 0.045, 1.0);
     let rough = min(sqrt(mat_rough * mat_rough + smear), 1.0);
-    let metal = clamp(o.material.y, 0.0, 1.0);
+    let metal = clamp(part_metallic(part_id, o.material.y), 0.0, 1.0);
 
     var albedo = o.color.rgb * o.tint * albedo_tex;
     if (o.tex < 0.5) {
@@ -441,13 +620,32 @@ fn fs(o: VsOut) -> @location(0) vec4<f32> {
         // does. Lift their midtones and colour contrast before lighting so an
         // orc stays green and leather stays brown instead of both becoming
         // grey silhouettes at tactical zoom.
-        albedo = pow(max(albedo, vec3<f32>(0.0)), vec3<f32>(0.86));
+        // Small real models otherwise spend too much of their available
+        // dynamic range below the filmic toe. This is a material-space
+        // midtone lift, so it preserves highlights/shadows and separate
+        // stone, wood, metal and hide responses rather than painting a UI
+        // brightness layer over the battlefield.
+        let organic_foliage = part_id == 9 || part_id == 10;
+        // The general small-object lift makes armour and construction visible
+        // through the filmic toe.  Applying it to already-lit leaf planes
+        // lifts green much more than red and turns a physical forest into
+        // fluorescent toy crowns, so foliage stays closer to its authored
+        // albedo while retaining directional light and cast shadow.
+        let lift_exp = select(0.70, 0.96, organic_foliage);
+        albedo = pow(max(albedo, vec3<f32>(0.0)), vec3<f32>(lift_exp));
         let object_lum = dot(albedo, vec3<f32>(0.2126, 0.7152, 0.0722));
-        albedo = mix(vec3<f32>(object_lum), albedo, 1.14);
+        if (!organic_foliage) {
+            albedo = mix(vec3<f32>(object_lum), albedo, 1.14);
+        }
     }
 
-    // Dielectrics reflect ~4%; metals reflect their own colour.
-    let f0 = mix(vec3<f32>(0.04), albedo, metal);
+    // Dielectrics reflect ~4%; metals reflect their own colour.  Broad leaves
+    // are rough, absorbent plant tissue rather than clear-coated plastic: at
+    // this oblique whole-map camera their physically tiny Fresnel reflection
+    // otherwise becomes a bright blue-white outline on every crown lobe.
+    let foliage_surface = part_id == 9 || part_id == 10;
+    let f0_base = mix(vec3<f32>(0.04), albedo, metal);
+    let f0 = select(f0_base, vec3<f32>(0.015), foliage_surface);
 
     // --- key light
     var shade = 1.0;
@@ -458,7 +656,7 @@ fn fs(o: VsOut) -> @location(0) vec4<f32> {
     // near-white key and lets the terrain's own colour carry the scene; the key
     // light is the only term here that carries a surface's albedo, so it has to
     // beat the ambient rather than lose to it.
-    let sun = vec3<f32>(1.00, 0.96, 0.88) * 1.78;
+    let sun = vec3<f32>(1.00, 0.96, 0.88) * 1.90;
     let d = distribution_ggx(ndh, rough);
     let g = geometry_smith(ndv, ndl, rough);
     let f = fresnel_schlick(vdh, f0);
@@ -471,8 +669,12 @@ fn fs(o: VsOut) -> @location(0) vec4<f32> {
     // Daylight: a blue sky overhead and green bounce off the field, which is
     // what a grass level actually looks like and what makes a tower's shaded
     // side read as *in shadow on grass* rather than as grey.
-    let sky = vec3<f32>(0.42, 0.54, 0.74) * 0.32;
-    let ground = vec3<f32>(0.24, 0.28, 0.18) * 0.32;
+    // Give shaded bark, armour and road shoulders enough sky/bounce to retain
+    // their material separation in a browser's filmic output. Direct sun and
+    // shadow remain unchanged, so this is a lifted daylight fill rather than
+    // flat unshadowed colour.
+    let sky = vec3<f32>(0.42, 0.54, 0.74) * 0.52;
+    let ground = vec3<f32>(0.24, 0.28, 0.18) * 0.50;
     let irradiance = mix(ground, sky, n.z * 0.5 + 0.5);
     let fa = fresnel_roughness(ndv, f0, rough);
     let kda = (vec3<f32>(1.0) - fa) * (1.0 - metal);
@@ -484,7 +686,8 @@ fn fs(o: VsOut) -> @location(0) vec4<f32> {
     // is what the mix by roughness does.
     let refl = reflect(-v, n);
     let mirror = mix(ground, sky, clamp(refl.z * 0.5 + 0.5, 0.0, 1.0));
-    let amb_spec = mix(mirror, irradiance, rough * rough) * env_brdf(f0, rough, ndv);
+    let amb_spec_base = mix(mirror, irradiance, rough * rough) * env_brdf(f0, rough, ndv);
+    let amb_spec = select(amb_spec_base, vec3<f32>(0.0), foliage_surface);
 
     // A wide Fresnel in the sky's own colour along the silhouette. Looking
     // almost straight down at a green field, a unit standing on it is within a
@@ -500,15 +703,25 @@ fn fs(o: VsOut) -> @location(0) vec4<f32> {
     // Occlusion belongs on the ambient only: the key light already has a shadow
     // and darkening it twice turns every shaded face to mud.
     let ao = mix(1.0, sky_occlusion(o.light_pos), 0.60);
-    let ambient = (kda * albedo * irradiance + amb_spec + sky * rim * 0.45) * ao;
+    let rim_strength = select(0.45, 0.08, foliage_surface);
+    let ambient = (kda * albedo * irradiance + amb_spec + sky * rim * rim_strength) * ao;
 
     var col = direct + ambient;
-    // Emissive parts ignore lighting entirely - cores, runes, flames.
-    col = mix(col, o.color.rgb * 1.72, clamp(o.emissive, 0.0, 1.0));
+    // Emissive parts ignore lighting entirely - cores, runes and the handful
+    // of authored amber eyes/sights.  The per-instance term is still used for
+    // transient shots and spell effects; material emission makes real source
+    // construction survive the bake instead of requiring a whole-object tint.
+    let source_emission = part_emission(part_id);
+    col = mix(col, o.color.rgb * 1.72, clamp(max(o.emissive, source_emission), 0.0, 1.0));
 
-    // Distance fog, so the far edge of the board recedes.
-    let dist = length(U.cam_pos.xyz - o.world);
-    let fog_amount = 1.0 - exp(-max(dist - 44.0, 0.0) * U.fog.a);
+    // Keep atmosphere outside the tactical focus, not between a phone's
+    // farther fit camera and its own board. Camera-distance fog made the
+    // complete 390px overview wash into blue-grey while the same tiles stayed
+    // readable on desktop. A board-centred falloff preserves a light haze in
+    // the outer woodland, yet leaves the playable 24x24 field clear at every
+    // aspect ratio and zoom.
+    let focus_distance = length(o.world.xy - vec2<f32>(12.0, 12.0));
+    let fog_amount = 1.0 - exp(-max(focus_distance - 16.0, 0.0) * U.fog.a);
     col = mix(col, U.fog.rgb, clamp(fog_amount, 0.0, 0.85));
 
     return vec4<f32>(col, o.color.a);

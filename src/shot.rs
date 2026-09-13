@@ -25,19 +25,6 @@ use crate::gfx::{Quality, Renderer};
 use crate::math::{Rig, shadow_view_proj};
 use crate::view;
 
-/// Matches the live app, so a capture frames the board the way play does.
-const CAM_PITCH_DEG: f32 = crate::CAM_PITCH_DEG;
-/// How many tiles of board a capture takes in.
-///
-/// Overridable so the framing can be swept and measured rather than eyeballed;
-/// there is nobody at the keyboard to scroll, so a capture takes the zoom play
-/// opens on and looks at the middle of the arena.
-fn cam_span() -> f32 {
-    std::env::var("TD_SPAN")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(crate::CAM_SPAN)
-}
 const LIGHT_DIR: [f32; 3] = [-0.42, -0.62, 0.66];
 
 /// The format the capture renders and encodes. Rgba8UnormSrgb everywhere, so
@@ -92,6 +79,32 @@ where
             .await
             .expect("no device for offscreen capture");
 
+        render_to_image_on(&device, &queue, &adapter, width, height, format, record)
+    })
+}
+
+/// Render one offscreen image through an already-created capture device.
+/// Atlas baking uses this to avoid creating and tearing down one GPU device per
+/// 128px cell, which made the native driver fault partway through a 96-cell
+/// production bake.
+fn render_to_image_on<F>(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    adapter: &wgpu::Adapter,
+    width: u32,
+    height: u32,
+    format: wgpu::TextureFormat,
+    record: F,
+) -> Shot
+where
+    F: FnOnce(
+        &wgpu::Device,
+        &wgpu::Queue,
+        &wgpu::Adapter,
+        &mut wgpu::CommandEncoder,
+        &wgpu::TextureView,
+    ) -> Vec<wgpu::CommandBuffer>,
+{
         let target = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("capture target"),
             size: wgpu::Extent3d {
@@ -168,7 +181,6 @@ where
             height,
             rgba,
         }
-    })
 }
 
 /// Renders one frame of the board - no HUD - and returns the pixels.
@@ -189,12 +201,10 @@ pub fn capture(game: &Game, decor: &Decor, width: u32, height: u32, quality: Qua
             let mut list = DrawList::default();
             view::draw_scene(game, decor, &mut list, game.time);
 
-            let rig = Rig::new(
-                width as f32 / height.max(1) as f32,
-                CAM_PITCH_DEG.to_radians(),
-                crate::CAM_YAW_DEG.to_radians(),
-            );
-            let camera = rig.camera(crate::lane_middle(), cam_span());
+            // Board-only captures use the same locked overview as play, not a
+            // retired scroll span. That makes visual QA catch framing bugs a
+            // player would actually see.
+            let camera = crate::play_camera(width as f32 / height.max(1) as f32);
             let light = shadow_view_proj(BW, BH, LIGHT_DIR);
 
             // Two frames: the particle ring and the effects buffer both carry state
@@ -255,7 +265,66 @@ pub fn capture_list(
     width: u32,
     height: u32,
 ) -> Shot {
-    render_to_image(
+    let mut shots = capture_lists(&[(list, centre, span, pitch_deg, lift, width, height)]);
+    shots.pop().expect("one list capture")
+}
+
+/// Captures several independently framed model cards through one native GPU
+/// device. This deliberately keeps the per-card target/readback boundary (so
+/// atlas cells cannot bleed into each other) while avoiding repeated adapter
+/// creation during the production 24x4 icon bake.
+pub fn capture_lists(
+    lists: &[(&DrawList, [f32; 2], f32, f32, f32, u32, u32)],
+) -> Vec<Shot> {
+    pollster_block(async move {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                force_fallback_adapter: false,
+                compatible_surface: None,
+                ..Default::default()
+            })
+            .await
+            .expect("no adapter for batched offscreen capture");
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("batched capture"),
+                required_features: wgpu::Features::empty(),
+                required_limits: adapter.limits(),
+                memory_hints: Default::default(),
+                trace: Default::default(),
+                ..Default::default()
+            })
+            .await
+            .expect("no device for batched offscreen capture");
+        lists
+            .iter()
+            .map(|(list, centre, span, pitch, lift, width, height)| {
+                capture_list_on(
+                    &device, &queue, &adapter, list, *centre, *span, *pitch, *lift, *width, *height,
+                )
+            })
+            .collect()
+    })
+}
+
+fn capture_list_on(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    adapter: &wgpu::Adapter,
+    list: &DrawList,
+    centre: [f32; 2],
+    span: f32,
+    pitch_deg: f32,
+    lift: f32,
+    width: u32,
+    height: u32,
+) -> Shot {
+    render_to_image_on(
+        device,
+        queue,
+        adapter,
         width,
         height,
         FORMAT,
@@ -264,8 +333,11 @@ pub fn capture_list(
             renderer.quality = Quality::Ultra;
             renderer.set_quality(device, Quality::Ultra);
 
-            // A plain ground plate, so the figures cast onto something and the
-            // sheet is lit the way the board is.
+            // A dark slate capture plate, so figures cast onto something and
+            // command-card art has the same restrained stone/wood value range
+            // as the live rail. The former bright lawn turned every honest
+            // renderer capture into a toy-card thumbnail even when the source
+            // tower itself had separate stone, timber and iron construction.
             let mut ground = DrawList::default();
             ground.shape(
                 crate::gfx::mesh::Shape::Quad,
@@ -273,8 +345,8 @@ pub fn capture_list(
                 [span * 2.0, span * 2.0, 1.0],
                 0.0,
                 0.0,
-                [0.105, 0.190, 0.075, 1.0],
-                crate::gfx::draw::Material::EARTH,
+                [0.030, 0.040, 0.048, 1.0],
+                crate::gfx::draw::Material::STONE,
                 0.0,
             );
             renderer.set_static_scene(queue, &DrawList::default(), &ground);

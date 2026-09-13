@@ -39,6 +39,7 @@ pub enum GroundTex {
     Grass = 0,
     Dirt = 1,
     Stone = 3,
+    Mosswatch = 4,
 }
 
 /// Common surface finishes, so call sites read as materials rather than numbers.
@@ -393,10 +394,27 @@ impl DrawList {
         color: Color,
         mat: Material,
     ) {
+        self.ground_oriented(layer, pos, size, 0.0, color, mat);
+    }
+
+    /// A textured ground patch whose local x-axis may follow a path.  The
+    /// texture itself is addressed in world space in the shader, so rotation
+    /// changes only the real geometry silhouette; it cannot create the old
+    /// rotated-UV seams along a road bend.
+    #[allow(clippy::too_many_arguments)]
+    pub fn ground_oriented(
+        &mut self,
+        layer: GroundTex,
+        pos: [f32; 3],
+        size: [f32; 2],
+        yaw: f32,
+        color: Color,
+        mat: Material,
+    ) {
         self.solid[Shape::Quad as usize].push(Instance {
             pos,
             scale: [size[0], size[1], 1.0],
-            rot: [0.0, 0.0],
+            rot: [yaw, 0.0],
             // params.y is the texture layer, one-based: zero means untextured,
             // which is every other thing the game draws.
             params: [0.0, layer as u32 as f32 + 1.0],

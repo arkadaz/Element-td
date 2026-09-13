@@ -158,6 +158,139 @@ TURRET_MODELS = {
     for stage, stem in enumerate(stems)
 }
 
+# Original Blender 4.5 meshes authored by this repository.  They replace the
+# visual consumers that are most prominent in the opening fight rather than
+# recolouring the old low-poly imports.  The exporter emits OBJ deterministically
+# and this existing baker remains the sole versioned runtime-blob writer.
+ORIGINAL_MESHES = {
+    **{'TowerSeed%d' % i: os.path.join(HERE, 'original_meshes', 'TowerSeed%d.obj' % i)
+       for i in range(4)},
+    **{'TowerSiege%d' % i: os.path.join(HERE, 'original_meshes', 'TowerSiege%d.obj' % i)
+       for i in range(4)},
+    **{'TowerBounce%d' % i: os.path.join(HERE, 'original_meshes', 'TowerBounce%d.obj' % i)
+       for i in range(4)},
+    **{'TowerMulti%d' % i: os.path.join(HERE, 'original_meshes', 'TowerMulti%d.obj' % i)
+       for i in range(4)},
+    **{'TowerCorrupt%d' % i: os.path.join(HERE, 'original_meshes', 'TowerCorrupt%d.obj' % i)
+       for i in range(4)},
+    **{'TowerAir%d' % i: os.path.join(HERE, 'original_meshes', 'TowerAir%d.obj' % i)
+       for i in range(4)},
+    **{'TowerChaos%d' % i: os.path.join(HERE, 'original_meshes', 'TowerChaos%d.obj' % i)
+       for i in range(4)},
+    **{'TowerDestroy%d' % i: os.path.join(HERE, 'original_meshes', 'TowerDestroy%d.obj' % i)
+       for i in range(4)},
+    **{'TowerAura%d' % i: os.path.join(HERE, 'original_meshes', 'TowerAura%d.obj' % i)
+       for i in range(4)},
+    **{'TowerDemon%d' % i: os.path.join(HERE, 'original_meshes', 'TowerDemon%d_pose.obj' % i)
+       for i in range(4)},
+    **{'TowerKing%d' % i: os.path.join(HERE, 'original_meshes', 'TowerKing%d.obj' % i)
+       for i in range(4)},
+    'Warrior': os.path.join(HERE, 'original_meshes', 'Warrior.obj'),
+    'Brute': os.path.join(HERE, 'original_meshes', 'Brute.obj'),
+    'Gnoll': os.path.join(HERE, 'original_meshes', 'Gnoll.obj'),
+    **{name: os.path.join(HERE, 'original_meshes', name + '.obj') for name in (
+        'NatureOak', 'NatureBroadleaf', 'NaturePineA', 'NaturePineB',
+        'NatureRockA', 'NatureRockB', 'NatureBush', 'NatureGrass', 'NatureFern', 'NatureStump',
+    )},
+}
+
+# These source meshes have an explicitly-authored second pose rather than the
+# former ``tris, tris`` placeholder.  They are intentionally kept separate
+# from ORIGINAL_MESHES: trees and rocks are rigid, while a tower recoil and a
+# creature stride must have exactly matching topology or the packed delta
+# stream would pair unrelated vertices.
+ORIGINAL_POSES = {
+    **{'TowerSeed%d' % i: os.path.join(HERE, 'original_meshes', 'TowerSeed%d_pose.obj' % i)
+       for i in range(4)},
+    **{'TowerSiege%d' % i: os.path.join(HERE, 'original_meshes', 'TowerSiege%d_pose.obj' % i)
+       for i in range(4)},
+    **{'TowerBounce%d' % i: os.path.join(HERE, 'original_meshes', 'TowerBounce%d_pose.obj' % i)
+       for i in range(4)},
+    **{'TowerMulti%d' % i: os.path.join(HERE, 'original_meshes', 'TowerMulti%d_pose.obj' % i)
+       for i in range(4)},
+    **{'TowerCorrupt%d' % i: os.path.join(HERE, 'original_meshes', 'TowerCorrupt%d_pose.obj' % i)
+       for i in range(4)},
+    **{'TowerAir%d' % i: os.path.join(HERE, 'original_meshes', 'TowerAir%d_pose.obj' % i)
+       for i in range(4)},
+    **{'TowerChaos%d' % i: os.path.join(HERE, 'original_meshes', 'TowerChaos%d_pose.obj' % i)
+       for i in range(4)},
+    **{'TowerDestroy%d' % i: os.path.join(HERE, 'original_meshes', 'TowerDestroy%d_pose.obj' % i)
+       for i in range(4)},
+    **{'TowerAura%d' % i: os.path.join(HERE, 'original_meshes', 'TowerAura%d_pose.obj' % i)
+       for i in range(4)},
+    **{'TowerDemon%d' % i: os.path.join(HERE, 'original_meshes', 'TowerDemon%d_pose.obj' % i)
+       for i in range(4)},
+    **{'TowerKing%d' % i: os.path.join(HERE, 'original_meshes', 'TowerKing%d_pose.obj' % i)
+       for i in range(4)},
+    'Warrior': os.path.join(HERE, 'original_meshes', 'Warrior_pose.obj'),
+    'Brute': os.path.join(HERE, 'original_meshes', 'Brute_pose.obj'),
+    'Gnoll': os.path.join(HERE, 'original_meshes', 'Gnoll_pose.obj'),
+}
+
+ORIGINAL_MATERIALS = {
+    # Keep this explicit runtime palette in lockstep with
+    # `author_realistic_meshes.py`. The OBJ itself identifies parts by
+    # material name; the bake assigns the actual browser vertex colour here.
+    # A stale duplicate silently discarded the source-material improvements,
+    # leaving the served build darker and more toy-like than the authored OBJ.
+    'Limestone': (0.065, 0.075, 0.060), 'Fieldstone': (0.075, 0.085, 0.073),
+    'OiledOak': (0.105, 0.052, 0.016), 'WeatheredBark': (0.060, 0.032, 0.010),
+    'BlackIron': (0.045, 0.052, 0.060), 'WornBronze': (0.125, 0.075, 0.022),
+    # Character armour is not tower trim.  Retain both the knight's cold worn
+    # steel and the shell runner's oxidised raid plate through the bake so the
+    # runtime can give them separate physical response instead of a single
+    # pale "PlateEdge" layer.
+    'Warplate': (0.040, 0.060, 0.072), 'RaiderPlate': (0.058, 0.024, 0.007),
+    'Hide': (0.075, 0.035, 0.012), 'KnightSkin': (0.145, 0.065, 0.018),
+    'GnollFur': (0.082, 0.050, 0.020), 'GnollMane': (0.026, 0.020, 0.010),
+    'MarauderSkin': (0.060, 0.026, 0.008),
+    'BeetleChitin': (0.052, 0.022, 0.008), 'PlateEdge': (0.045, 0.048, 0.037),
+    # Authored for the live infantry and shellbeast rather than using an
+    # instance-wide identity tint.  These values become local albedo while the
+    # part ids below select distinct physical response in the browser shader.
+    'WarBannerCloth': (0.020, 0.042, 0.055), 'RunicAmber': (0.86, 0.24, 0.015),
+    'LeafDeep': (0.016, 0.040, 0.005), 'Leaf': (0.028, 0.064, 0.009),
+    'LeafSun': (0.045, 0.085, 0.012),
+    'PineNeedleDeep': (0.012, 0.030, 0.004), 'PineNeedle': (0.018, 0.046, 0.006),
+    'PineNeedleSun': (0.030, 0.072, 0.010),
+    'Moss': (0.020, 0.050, 0.008), 'BushLeaf': (0.020, 0.055, 0.008),
+    'VergeGrass': (0.055, 0.125, 0.018), 'FernLeaf': (0.040, 0.095, 0.014),
+}
+
+# Compact physical-part ids consumed by solid.wgsl.  Colours are still
+# valuable local albedo, but one all-object Material cannot distinguish stone
+# sockets from oak stocks and iron hardware in one draw.  Zero remains the
+# safe instance-material fallback for legacy/downloaded assets.
+MATERIAL_IDS = {
+    'Limestone': 1,
+    'Fieldstone': 1,
+    'OiledOak': 2,
+    'WeatheredBark': 2,
+    'BlackIron': 3,
+    'WornBronze': 4,
+    'Warplate': 13,
+    'RaiderPlate': 14,
+    'GnollFur': 15,
+    'GnollMane': 15,
+    'Hide': 5,
+    'KnightSkin': 6,
+    'MarauderSkin': 6,
+    'BeetleChitin': 7,
+    'PlateEdge': 8,
+    'WarBannerCloth': 11,
+    'RunicAmber': 12,
+    'LeafDeep': 9,
+    'Leaf': 9,
+    'LeafSun': 9,
+    'PineNeedleDeep': 9,
+    'PineNeedle': 9,
+    'PineNeedleSun': 9,
+    'BushLeaf': 9,
+    'VergeGrass': 9,
+    'FernLeaf': 9,
+    'Moss': 10,
+}
+
 # Pinned file ids from the pack's official public Google Drive folder. Only
 # OBJ geometry is required: the pack uses two flat source materials, which are
 # remapped below to a dark gunmetal and the owning tower family's accent.
@@ -214,6 +347,7 @@ NATURE_MODELS = {
     'NatureBush': 'plant_bushDetailed',
     'NatureStump': 'stump_old',
     'NatureGrass': 'grass_large',
+    'NatureFern': 'plant_fern',
     'NatureFlower': 'flower_yellowA',
 }
 
@@ -284,10 +418,23 @@ def turret_colour(name, material):
     return tuple(base[i] * (1.0 - amount) + accent[i] * amount for i in range(3))
 
 
+def turret_material_id(material):
+    """Map the pack's authored dark/light submeshes to physical substances.
+
+    The turret pack has intentionally small material names (``Dark`` and
+    ``Light``), but that is still useful source data: the dark body is forged
+    iron while the lighter band is worn bronze.  Leaving both at zero made all
+    forty-four live tower meshes inherit one whole-object material, so a barrel
+    and its fittings reflected light identically.
+    """
+    return 3 if material.lower() == 'dark' else 4
+
+
 def obj_triangles(path, name):
     """Read the small, dependency-free OBJ subset used by the turret pack."""
     positions = [None]
     normals = [None]
+    texcoords = [None]
     material = 'Light'
     out = []
 
@@ -304,6 +451,8 @@ def obj_triangles(path, name):
                 positions.append(tuple(float(x) for x in fields[1:4]))
             elif fields[0] == 'vn':
                 normals.append(tuple(float(x) for x in fields[1:4]))
+            elif fields[0] == 'vt':
+                texcoords.append(tuple(float(x) for x in fields[1:3]))
             elif fields[0] == 'usemtl' and len(fields) > 1:
                 material = fields[1]
             elif fields[0] == 'f':
@@ -311,14 +460,19 @@ def obj_triangles(path, name):
                 for token in fields[1:]:
                     parts = token.split('/')
                     vi = index(parts[0], len(positions))
+                    ti = index(parts[1], len(texcoords)) if len(parts) > 1 and parts[1] else 0
                     ni = index(parts[2], len(normals)) if len(parts) > 2 and parts[2] else 0
-                    polygon.append((positions[vi], normals[ni] if ni else None))
+                    polygon.append((
+                        positions[vi],
+                        normals[ni] if ni else None,
+                        texcoords[ti] if ti else None,
+                    ))
                 # Blender writes quads as well as triangles. Fan triangulation
                 # preserves their original winding and flat normals.
                 for i in range(1, len(polygon) - 1):
                     tri = (polygon[0], polygon[i], polygon[i + 1])
                     face_normal = None
-                    if any(n is None for _p, n in tri):
+                    if any(n is None for _p, n, _uv in tri):
                         a, b, c = (v[0] for v in tri)
                         u = tuple(b[j] - a[j] for j in range(3))
                         v = tuple(c[j] - a[j] for j in range(3))
@@ -327,8 +481,18 @@ def obj_triangles(path, name):
                                        u[0] * v[1] - u[1] * v[0])
                         length = max(sum(x * x for x in face_normal) ** 0.5, 1e-8)
                         face_normal = tuple(x / length for x in face_normal)
-                    colour = turret_colour(name, material)
-                    out.extend((p, n or face_normal, colour) for p, n in tri)
+                    colour = (ORIGINAL_MATERIALS.get(material, (0.22, 0.22, 0.22))
+                              if name in ORIGINAL_MESHES else turret_colour(name, material))
+                    part_id = (MATERIAL_IDS.get(material, 0)
+                               if name in ORIGINAL_MESHES else turret_material_id(material))
+                    out.extend((
+                        p,
+                        n or face_normal,
+                        colour,
+                        uv or (0.0, 0.0),
+                        uv is not None,
+                        part_id,
+                    ) for p, n, uv in tri)
     return out
 
 
@@ -341,6 +505,34 @@ def bake_turret(name, stem):
     # that pivot stops asymmetric barrels orbiting by almost half a tile when
     # they track. After conversion those two ground axes are still (0,0).
     return bake_triangles(tris, tris, pivot_xy=(0.0, 0.0))
+
+
+def bake_original(name):
+    """Bake a Blender-authored OBJ with real material-separated construction.
+
+    The Blender 4.5 OBJ exporter used by ``author_realistic_meshes.py`` writes
+    its exported height on Y (matching the downloaded asset convention), even
+    though the authoring scene itself is Z-up.  Keep the one normalising
+    conversion below for every OBJ source.  This is asserted by real source
+    bounds: Warrior spans roughly 1.94 units on exported Y and only 0.38 on
+    Z; treating that file as runtime Z-up turns the warrior sideways.
+    """
+    path = ORIGINAL_MESHES[name]
+    if not os.path.exists(path):
+        raise SystemExit('missing original mesh: ' + path)
+    tris = obj_triangles(path, name)
+    if not tris:
+        raise SystemExit(name + ' baked to nothing')
+    other = tris
+    pose_path = ORIGINAL_POSES.get(name)
+    if pose_path:
+        if not os.path.exists(pose_path):
+            raise SystemExit('missing authored second pose: ' + pose_path)
+        other = obj_triangles(pose_path, name)
+        if len(other) != len(tris):
+            raise SystemExit('%s pose topology differs (%d vs %d vertices)'
+                             % (name, len(tris), len(other)))
+    return bake_triangles(tris, other, pivot_xy=(0.0, 0.0))
 
 
 def nature_colour(name, c):
@@ -370,8 +562,8 @@ def bake_nature(name, stem):
     """Bake one free Nature Kit prop, preserving its authored value bands."""
     path = os.path.join(ensure_nature(), stem + '.glb')
     tris = []
-    for p, n, c in gltf.triangles(path, anim=None):
-        tris.append((p, n, nature_colour(name, c)))
+    for p, n, c, uv, has_uv, material in gltf.triangles(path, anim=None):
+        tris.append((p, n, nature_colour(name, c), uv, has_uv, material))
     return bake_triangles(tris, tris)
 
 
@@ -394,11 +586,11 @@ def bake_one(path, anim, at):
     The two are sampled from one clip, so vertex order and count match by
     construction and the correspondence needs no work.
     """
-    tris = gltf.triangles(path, anim=anim, at=at)
+    tris = list(gltf.triangles(path, anim=anim, at=at))
     if not tris:
         raise SystemExit('%s baked to nothing' % path)
     # Half a cycle further on, wrapped.
-    other = gltf.triangles(path, anim=anim, at=(at + 0.5) % 1.0)
+    other = list(gltf.triangles(path, anim=anim, at=(at + 0.5) % 1.0))
     if len(other) != len(tris):
         # Cannot happen from one clip on one mesh, but a model with no
         # animation at all returns its rest pose twice, and that is fine.
@@ -410,18 +602,21 @@ def bake_one(path, anim, at):
 def bake_triangles(tris, other, pivot_xy=None):
     """Normalise two corresponding triangle soups into the runtime axes."""
 
-    # glTF is Y-up and right-handed; the game is Z-up. Sending -z to y keeps the
-    # handedness, so faces still wind the way the renderer expects and nothing
-    # comes out inside-out.
+    # Imported glTF, Quaternius OBJ and Blender's current OBJ exporter are
+    # Y-up and right-handed; the game is Z-up. Sending -z to y keeps their
+    # handedness, so faces still wind the way the renderer expects.
     def conv(v):
         return (v[0], -v[2], v[1])
 
-    pos = [conv(p) for p, _n, _c in tris]
-    nrm = [conv(n) for _p, n, _c in tris]
-    col = [c for _p, _n, c in tris]
+    pos = [conv(p) for p, _n, _c, _uv, _has_uv, _mat in tris]
+    nrm = [conv(n) for _p, n, _c, _uv, _has_uv, _mat in tris]
+    col = [c for _p, _n, c, _uv, _has_uv, _mat in tris]
+    uv = [uv for _p, _n, _c, uv, _has_uv, _mat in tris]
+    has_uv = [has_uv for _p, _n, _c, _uv, has_uv, _mat in tris]
+    material = [mat for _p, _n, _c, _uv, _has_uv, mat in tris]
 
-    pos_b = [conv(p) for p, _n, _c in other]
-    nrm_b = [conv(n) for _p, n, _c in other]
+    pos_b = [conv(p) for p, _n, _c, _uv, _has_uv, _mat in other]
+    nrm_b = [conv(n) for _p, n, _c, _uv, _has_uv, _mat in other]
 
     # Fit both contact poses through one transform. Besides preventing the
     # animation from breathing, this keeps a rotor, wingtip or weapon swing
@@ -441,7 +636,7 @@ def bake_triangles(tris, other, pivot_xy=None):
     out, delta = [], []
     for i, (p, n, c) in enumerate(zip(pos, nrm, col)):
         a = ((p[0] - cx) * k, (p[1] - cy) * k, (p[2] - lo[2]) * k)
-        out.append((a, n, c))
+        out.append((a, n, c, uv[i], has_uv[i], material[i]))
         # The second pose is normalised by the *first* pose's transform, not by
         # its own. Fitting each to its own bounds would scale the model slightly
         # differently in each half of the stride, and the figure would pulse.
@@ -466,6 +661,7 @@ MAGIC = 0x4D445447  # "GTDM"
 #   position delta   3 x i16   snorm, times POS_RANGE
 #   (padding)        1 x i16
 #   normal delta     3 x i8    snorm, and one spare byte
+#   source UV         2 x u16  unorm, UV-present flag and spare
 #
 # Floats were 60 bytes and 28 MB of blob, which is more than the whole rest of
 # the game. None of it needs float precision: a model is one unit tall, so a
@@ -474,7 +670,7 @@ MAGIC = 0x4D445447  # "GTDM"
 #
 # The padding is not waste - the GPU vertex formats are Snorm16x4 and Snorm8x4,
 # so the fourth component has to be there whether it is used or not.
-STRIDE = 28
+STRIDE = 36
 
 # The largest coordinate a model may have, in units of its own height. Positions
 # are stored as a fraction of this. Four is comfortable: models are normalised to
@@ -500,20 +696,29 @@ def u8(v):
     return max(0, min(255, int(round(max(0.0, min(1.0, v)) * 255.0))))
 
 
+def u16c(v):
+    """A wrapping source UV in the packed unorm representation."""
+    return int(round((v % 1.0) * 65535.0))
+
+
 def main(only):
     os.makedirs(OUT, exist_ok=True)
     names, blobs, credits = [], [], []
     for arch, (mid, anim, at) in MODELS.items():
         if only and arch.lower() not in only:
             continue
-        path = fetch(mid)
-        verts, delta = bake_one(path, anim, at)
+        if arch in ORIGINAL_MESHES:
+            verts, delta = bake_original(arch)
+            meta = {'title': 'Original Blender mesh', 'creator': 'Green Circle TD'}
+        else:
+            path = fetch(mid)
+            verts, delta = bake_one(path, anim, at)
+            meta_path = path + '.json'
+            meta = json.load(open(meta_path)) if os.path.exists(meta_path) else {}
         names.append(arch)
         blobs.append((verts, delta))
-        meta_path = path + '.json'
-        meta = json.load(open(meta_path)) if os.path.exists(meta_path) else {}
         credits.append((arch, meta.get('title', ''), meta.get('creator', ''),
-                        meta.get('url', '')))
+                        meta.get('url', 'Original project mesh')))
         swing = max(
             abs(d[0][0]) + abs(d[0][1]) + abs(d[0][2]) for d in delta
         ) if delta else 0.0
@@ -524,39 +729,54 @@ def main(only):
     for name, stem in TURRET_MODELS.items():
         if only and name.lower() not in only:
             continue
-        verts, delta = bake_turret(name, stem)
+        verts, delta = bake_original(name) if name in ORIGINAL_MESHES else bake_turret(name, stem)
         names.append(name)
         blobs.append((verts, delta))
-        print('  %-12s %6d tris  Quaternius Steampunk Turret Pack'
-              % (name, len(verts) // 3))
+        if name in ORIGINAL_MESHES:
+            credits.append((name, 'Original Blender mesh', 'Green Circle TD', 'Original project mesh'))
+            print('  %-12s %6d tris  Original Blender mesh by Green Circle TD'
+                  % (name, len(verts) // 3))
+        else:
+            credits.append((name, 'Steampunk Turret Pack', 'Quaternius', TURRET_SOURCE))
+            print('  %-12s %6d tris  Quaternius Steampunk Turret Pack'
+                  % (name, len(verts) // 3))
 
     for name, stem in NATURE_MODELS.items():
         if only and name.lower() not in only:
             continue
-        verts, delta = bake_nature(name, stem)
+        verts, delta = bake_original(name) if name in ORIGINAL_MESHES else bake_nature(name, stem)
         names.append(name)
         blobs.append((verts, delta))
-        print('  %-16s %6d tris  Kenney Nature Kit'
-              % (name, len(verts) // 3))
+        print(
+            '  %-16s %6d tris  %s'
+            % (
+                name,
+                len(verts) // 3,
+                'Original Blender mesh by Green Circle TD'
+                if name in ORIGINAL_MESHES
+                else 'Kenney Nature Kit',
+            )
+        )
 
     body = bytearray()
     index = bytearray()
     for name, (verts, delta) in zip(names, blobs):
         first = len(body) // STRIDE
-        for (p, n, c), (dp, dn) in zip(verts, delta):
+        for (p, n, c, uv, has_uv, material), (dp, dn) in zip(verts, delta):
             body += struct.pack(
-                '<4h4b4B4h4b',
+                '<4h4b4B4h4b4H',
                 q16(p[0]), q16(p[1]), q16(p[2]), 0,
                 q8(n[0]), q8(n[1]), q8(n[2]), 0,
-                u8(c[0]), u8(c[1]), u8(c[2]), 255,
+                u8(c[0]), u8(c[1]), u8(c[2]), material,
                 q16(dp[0]), q16(dp[1]), q16(dp[2]), 0,
                 q8(dn[0]), q8(dn[1]), q8(dn[2]), 0,
+                u16c(uv[0]), u16c(uv[1]), 65535 if has_uv else 0, 0,
             )
         nb = name.encode('ascii')
         index += struct.pack('<B', len(nb)) + nb
         index += struct.pack('<II', first, len(verts))
 
-    blob = struct.pack('<III', MAGIC, 3, len(names)) + bytes(index) + bytes(body)
+    blob = struct.pack('<III', MAGIC, 4, len(names)) + bytes(index) + bytes(body)
     dst = os.path.join(OUT, 'models.bin')
     open(dst, 'wb').write(blob)
     print('\nwrote %s  %d models  %d vertices  %.1f KB'
@@ -571,16 +791,17 @@ def main(only):
         for arch, title, who, url in credits:
             f.write('| %s | %s | %s | %s |\n' % (arch, title, who, url))
         f.write('\n## Tower and environment models\n\n')
-        f.write('Forty-four staged weapon towers are selected from\n')
-        f.write("Quaternius' [Steampunk Turret Pack](%s), " % TURRET_SOURCE)
-        f.write('released under CC0 1.0. Trees, rocks, brush and ground details are selected\n')
-        f.write("from Kenney's 330-model [Nature Kit](https://kenney.nl/assets/nature-kit), ")
-        f.write('also released under CC0 1.0. Both source sets are downloaded and cached by\n')
-        f.write('`tools/bake_models.py`; only the baked runtime mesh is shipped.\n')
+        f.write('The staged weapon towers in the live command roster are original Blender\n')
+        f.write('assemblies authored for Green Circle TD. Remaining legacy auxiliary models\n')
+        f.write("are selected from Quaternius' [Steampunk Turret Pack](%s), " % TURRET_SOURCE)
+        f.write('released under CC0 1.0. The live trees, rocks, brush and ground details are\n')
+        f.write('original Blender constructions in `tools/original_meshes/`; their material\n')
+        f.write('separation and geometry are baked by `tools/bake_models.py` into the browser\n')
+        f.write('runtime mesh. Kenney Nature Kit remains the CC0 fallback/source reference.\n')
         f.write('\n## Interface artwork\n\n')
         f.write('`title_backdrop.png` was created for this project with OpenAI\'s built-in image\n')
         f.write('generation on 2026-09-04. It contains no third-party logo or game UI.\n\n')
-        f.write('`tower_icons.png` is an in-engine 24x4 contact sheet of the exact staged Quaternius\n')
+        f.write('`tower_icons.png` is an in-engine 24x4 contact sheet of the exact staged\n')
         f.write('weapon towers used on the battlefield. It contains no separate concept art;\n')
         f.write('the source and runtime assets are produced by the ignored roster render test\n')
         f.write('and `tools/bake_icons.py`.\n')

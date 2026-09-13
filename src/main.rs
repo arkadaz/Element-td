@@ -29,53 +29,57 @@ mod ui_layout_tests;
 mod view;
 
 use eframe::egui_wgpu;
-use egui::{Key, Rect, Sense};
+use egui::{Key, PointerButton, Rect, Sense};
 
 use decor::Decor;
 use game::Game;
 use game::board::{BH, BW};
+#[cfg(target_arch = "wasm32")]
+use game::board::TOWER_FOOTPRINT_RADIUS;
 use game::fx::ParticleSpawn;
 use gfx::Quality;
 use gfx::Renderer;
 use gfx::draw::DrawList;
 use math::{Camera, Mat4, Rig, shadow_view_proj};
+#[cfg(target_arch = "wasm32")]
+use math::v3;
 use menu::{MenuState, Screen};
 use net::Net;
 
-/// How far the camera tilts down towards the board. Every framing the game
-/// builds shares it, so the ground meets the screen at one angle whether the
-/// player is scrolling the board, watching the title backdrop turn or looking
-/// at a screenshot.
+/// How far the title-screen camera tilts down towards the board.
 pub const CAM_PITCH_DEG: f32 = 55.0;
-/// Warcraft's tactical bearing: straight lanes stay horizontal or vertical on
-/// screen, so their turns and two traffic directions are readable instantly.
+/// Keep route turns aligned to the tactical frame. The fixed pitch already
+/// exposes real tower sides and creature bodies; an oblique yaw had to zoom
+/// too far out to retain every corner of the square route on ultrawide screens,
+/// making the actual battle smaller. Depth belongs in the camera pitch,
+/// materials and geometry, not in sacrificing useful battle scale.
 pub const CAM_YAW_DEG: f32 = 0.0;
-/// How tightly a fitted framing pulls in on what it was asked to fit. Only the
-/// title screen's backdrop is framed that way now; play frames a window of the
-/// board and scrolls it.
+/// How tightly the title screen's backdrop frames the map.
 pub const CAM_ZOOM: f32 = 1.15;
-/// How much of the compact solo board is in frame at the opening zoom.
-///
-/// The compact arena only needs a short pan to reach its opposite side. Keeping
-/// this tighter than a full-board overview makes downloaded models and target
-/// states readable instead of turning monsters into twelve-pixel dots.
-pub const CAM_SPAN: f32 = 23.0;
-/// The tightest the wheel may zoom in. Closer than this and a tower fills the
-/// screen with the lane either side of it out of frame.
-pub const CAM_SPAN_MIN: f32 = 13.0;
-/// How fast the keys and the screen edge scroll, in viewports per second.
-const CAM_PAN_SPEED: f32 = 0.6;
-/// How close to the edge of the board the cursor scrolls the view, in points.
-const CAM_EDGE: f32 = 14.0;
-/// How much of the span one point of wheel travel takes off. A notch is around
-/// fifty points, so a notch is about a fifth.
-const CAM_WHEEL: f32 = 0.004;
+/// A deliberately oblique playable camera. Forty-seven degrees exposes the
+/// sides of tower bodies, creature shoulders, trunks and grounded shadows
+/// while still keeping the full route legible from the reset overview.
+pub const PLAY_CAM_PITCH_DEG: f32 = 47.0;
+/// Tightest useful free-camera span in terrain tiles.  It exposes real tower
+/// construction without becoming a disorienting first-person camera.
+pub const PLAY_CAM_TIGHTEST_SPAN: f32 = 7.2;
+/// Space reserved for safe edges and touch/browser chrome; the game otherwise
+/// uses the viewport rather than pretending a large display is unavailable.
+pub const STAGE_PAD: f32 = 12.0;
+/// Human-readable runtime provenance. This is intentionally exposed on the
+/// browser root so a screenshot can identify its loaded WASM build instead of
+/// relying on an ambiguous dev-server port or a stale tab.
+/// Stamped into the DOM at startup so isolated browser evidence can prove the
+/// exact WASM bundle it exercised rather than guessing from a server port.
+pub const BUILD_ID: &str = "woodland-command-tempo-20260913.100";
 /// Ceiling on how many device pixels the 3D scene is rendered at per point.
 ///
 /// The HUD stays crisp at the display's real scale; the 3D scene does not need
 /// to be supersampled, and on a 2x display the difference between 1.0 and 1.35
-/// here is 1.8x the fill rate for something nobody can see.
-const MAX_SCENE_DPR: f32 = 1.0;
+/// here is meaningful for fine tower silhouettes. Balanced quality clamps at
+/// two device pixels per CSS point; the quality governor still protects frame
+/// pacing on constrained adapters.
+const MAX_SCENE_DPR: f32 = 2.0;
 /// Key light direction, shared by the shader and the shadow camera.
 const LIGHT_DIR: [f32; 3] = [-0.40, -0.52, 0.76];
 
@@ -87,23 +91,105 @@ fn browser_power_preference() -> wgpu::PowerPreference {
     wgpu::PowerPreference::None
 }
 
-/// -1 at the low edge, +1 at the high edge, and zero in the safe middle.
-/// Kept separate from camera state so the literal window-edge behavior is
-/// easy to regression-test without constructing an egui frame.
-fn edge_scroll_axis(lo: f32, hi: f32, at: f32) -> f32 {
-    f32::from(at >= hi - CAM_EDGE) - f32::from(at <= lo + CAM_EDGE)
+/// Reset/shot camera. Interactive play uses [`BattleView`] below, but still
+/// starts at this exact fit-to-route overview rather than a different camera.
+pub fn play_camera(aspect: f32) -> Camera {
+    let rig = Rig::new(aspect, PLAY_CAM_PITCH_DEG.to_radians(), CAM_YAW_DEG.to_radians());
+    rig.camera(lane_middle(), rig.widest_span(game::greentd_map::VIEW))
 }
 
-#[cfg(test)]
-mod camera_input_tests {
-    use super::*;
+/// The 3D callback owns the entire usable central rectangle. The tactical
+/// world remains square in world coordinates and the camera fits it into this
+/// wide/portrait frustum; only the retired render target was square.
+pub fn scene_rect(area: Rect) -> Rect {
+    area
+}
 
-    #[test]
-    fn literal_top_and_bottom_edges_scroll_in_opposite_directions() {
-        assert_eq!(edge_scroll_axis(0.0, 900.0, 0.0), -1.0);
-        assert_eq!(edge_scroll_axis(0.0, 900.0, 899.0), 1.0);
-        assert_eq!(edge_scroll_axis(0.0, 900.0, 450.0), 0.0);
+/// The fixed square play rectangle. The world never stretches, but it is sized
+/// from the usable viewport rather than an arbitrary desktop-stage cap.
+pub fn fixed_board_rect(area: Rect, beside_dock: bool) -> Rect {
+    let dock = if beside_dock { ui::COMMAND_DOCK_W } else { 0.0 };
+    let side = area.height().min((area.width() - dock).max(0.0)).max(0.0);
+    let stage_w = side + dock;
+    let x = area.left() + (area.width() - stage_w).max(0.0) * 0.5;
+    Rect::from_min_size(
+        egui::pos2(x, area.top() + (area.height() - side) * 0.5),
+        egui::vec2(side, side),
+    )
+}
+
+/// The right rail always shares the board's exact height and touches its edge.
+pub fn command_dock_rect(board: Rect) -> Rect {
+    command_dock_rect_with_width(board, ui::COMMAND_DOCK_W)
+}
+
+/// The rail is a deliberate command instrument, not an elastic spacer.  In
+/// particular, a wide browser must not turn the extra aspect-ratio remainder
+/// into a six-hundred-pixel dashboard and make the actual battle look like a
+/// postage stamp.  The whole square board and its fixed-width rail therefore
+/// form one centred tactical stage; the remaining browser area is symmetrical
+/// quiet framing, while the top HUD continues to use the full viewport.
+pub fn command_dock_rect_with_width(board: Rect, width: f32) -> Rect {
+    Rect::from_min_size(
+        board.right_top(),
+        egui::vec2(width.max(ui::COMMAND_DOCK_W), board.height()),
+    )
+}
+
+/// Desktop composition: a full-width HUD and the largest square that remains
+/// beside a responsive rail. Surplus belongs to live command information, not
+/// a centred fake application window.
+#[derive(Clone, Copy)]
+pub struct DesktopStage {
+    pub hud: Rect,
+    pub board: Rect,
+    pub dock: Rect,
+}
+
+pub fn desktop_stage(viewport: Rect) -> DesktopStage {
+    let usable_w = (viewport.width() - STAGE_PAD * 2.0).max(0.0);
+    let side = (viewport.height() - ui::TOP_H - STAGE_PAD * 2.0)
+        .min(usable_w - ui::COMMAND_DOCK_W)
+        .max(0.0);
+    let hud = Rect::from_min_size(
+        egui::pos2(viewport.left(), viewport.top()),
+        egui::vec2(viewport.width(), ui::TOP_H),
+    );
+    let stage_w = side + ui::COMMAND_DOCK_W;
+    let stage_left = viewport.left() + (viewport.width() - stage_w).max(0.0) * 0.5;
+    let board = Rect::from_min_size(
+        egui::pos2(stage_left, hud.bottom() + STAGE_PAD),
+        egui::vec2(side, side),
+    );
+    DesktopStage {
+        hud,
+        board,
+        dock: command_dock_rect(board),
     }
+}
+
+/// The desktop HUD is another fixed piece of the stage, not a full-browser
+/// bar. It is deliberately plain so gold, pressure and the next action win.
+pub fn desktop_top_bar_area(
+    ctx: &egui::Context,
+    rect: Rect,
+    game: &mut Game,
+    ust: &mut ui::UiState,
+    perf: &str,
+) {
+    egui::Area::new(egui::Id::new("hud"))
+        .fixed_pos(rect.left_top())
+        .default_size(rect.size())
+        .movable(false)
+        .order(egui::Order::Foreground)
+        .show(ctx, |ui| {
+            ui.set_min_size(rect.size());
+            let outer = ui.max_rect();
+            ui.painter().rect_filled(outer, 0.0, ui::pal::PANEL);
+            let inner = outer.shrink2(egui::vec2(10.0, 4.0));
+            let mut content = ui.new_child(egui::UiBuilder::new().max_rect(inner));
+            ui::top_bar(game, &mut content, ust, perf);
+        });
 }
 
 #[cfg(test)]
@@ -116,6 +202,37 @@ mod browser_gpu_tests {
             browser_power_preference(),
             wgpu::PowerPreference::None
         ));
+    }
+
+    #[test]
+    fn smallest_desktop_stage_can_contain_the_entire_command_rail() {
+        let viewport = Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(ui::COMPACT_WIDTH, ui::MIN_DESKTOP_DOCK_H),
+        );
+        assert!(
+            !ui::compact_for_view(viewport.width(), viewport.height()),
+            "the declared desktop breakpoint unexpectedly uses compact chrome"
+        );
+        let stage = desktop_stage(viewport);
+        assert!(
+            stage.board.height() + 0.01 >= ui::MIN_DESKTOP_BOARD,
+            "board {:?} cannot hold the {}px rail",
+            stage.board,
+            ui::MIN_DESKTOP_BOARD
+        );
+        assert_eq!(stage.board.height(), stage.dock.height());
+        assert!((stage.board.left() - STAGE_PAD).abs() < 0.01);
+        assert!((stage.dock.right() - (viewport.right() - STAGE_PAD)).abs() < 0.01);
+    }
+
+    #[test]
+    fn wide_desktop_keeps_the_command_rail_compact_and_centres_the_stage() {
+        let viewport = Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1414.0, 860.0));
+        let stage = desktop_stage(viewport);
+        assert!((stage.dock.width() - ui::COMMAND_DOCK_W).abs() < 0.01);
+        assert!((stage.board.left() - (viewport.width() - stage.board.width() - stage.dock.width()) * 0.5).abs() < 0.01);
+        assert!((viewport.right() - stage.dock.right() - stage.board.left()).abs() < 0.01);
     }
 }
 
@@ -194,20 +311,18 @@ impl egui_wgpu::CallbackTrait for BoardCallback {
 struct Keys {
     pause: bool,
     speed: bool,
+    reset_view: bool,
     send: bool,
     cancel: bool,
     upgrade: bool,
     sell: bool,
     help: bool,
     bloom: bool,
-    shift: bool,
     digits: [bool; 11],
-    /// Which way the player is scrolling, in screen terms: x across, y down,
-    /// each -1, 0 or 1. Held rather than tapped, so it is read every frame.
-    pan: [f32; 2],
     /// Debug builds only: fill pads / grant gold, for playtesting.
     dev_fill: bool,
     dev_gold: bool,
+    persist: bool,
 }
 
 fn read_keys(ui: &egui::Ui) -> Keys {
@@ -229,32 +344,20 @@ fn read_keys(ui: &egui::Ui) -> Keys {
         for (n, key) in NUMS.iter().enumerate() {
             digits[n] = i.key_pressed(*key);
         }
-        let axis = |back: &[Key], fwd: &[Key]| {
-            let held = |keys: &[Key]| keys.iter().any(|k| i.key_down(*k));
-            f32::from(held(fwd)) - f32::from(held(back))
-        };
         Keys {
             pause: i.key_pressed(Key::Space),
             speed: i.key_pressed(Key::F),
+            reset_view: i.key_pressed(Key::R),
             send: i.key_pressed(Key::Enter),
             cancel: i.key_pressed(Key::Escape),
             upgrade: i.key_pressed(Key::U),
             sell: i.key_pressed(Key::S),
             help: i.key_pressed(Key::H),
             bloom: i.key_pressed(Key::B),
-            shift: i.modifiers.shift,
             digits,
-            pan: [
-                axis(&[Key::ArrowLeft, Key::A], &[Key::ArrowRight, Key::D]),
-                // S is missing from that row on purpose. It is the sell hotkey
-                // the command bar advertises, and holding it to scroll south
-                // would sell the selected tower for a fraction of what it cost,
-                // with no way to undo it. Down arrow, the screen edge and the
-                // middle mouse button all scroll that way instead.
-                axis(&[Key::ArrowUp, Key::W], &[Key::ArrowDown]),
-            ],
             dev_fill: cfg!(debug_assertions) && i.key_pressed(Key::T),
             dev_gold: cfg!(debug_assertions) && i.key_pressed(Key::G),
+            persist: i.key_pressed(Key::F7),
         }
     })
 }
@@ -309,6 +412,161 @@ fn now_ms() -> f64 {
 
 // ---------------------------------------------------------------- app
 
+/// Mutable, bounded player view over the fixed tactical world.  The terrain
+/// and route never move; only this camera target/span changes after a deliberate
+/// wheel, pinch or pan gesture. Keeping it separate from `Game` guarantees
+/// camera interaction cannot alter wave clocks, simulation state or saves.
+#[derive(Clone, Copy, Debug)]
+struct BattleView {
+    centre: [f32; 2],
+    span: f32,
+    initialized: bool,
+    reset_requested: bool,
+    /// Set by a touch drag/pinch until its release click has been consumed.
+    /// This is what prevents a gesture ending on grass from buying a tower.
+    suppress_primary: bool,
+}
+
+impl Default for BattleView {
+    fn default() -> Self {
+        Self {
+            centre: lane_middle(),
+            span: 0.0,
+            initialized: false,
+            reset_requested: false,
+            suppress_primary: false,
+        }
+    }
+}
+
+impl BattleView {
+    fn rig(rect: Rect) -> Rig {
+        Rig::new(
+            rect.width() / rect.height().max(1.0),
+            PLAY_CAM_PITCH_DEG.to_radians(),
+            CAM_YAW_DEG.to_radians(),
+        )
+    }
+
+    fn reset(&mut self, rig: &Rig) {
+        self.centre = lane_middle();
+        self.span = rig.widest_span(game::greentd_map::VIEW);
+        self.initialized = true;
+        self.reset_requested = false;
+    }
+
+    fn clamp(&mut self, rig: &Rig) {
+        let bounds = game::board::BUILD_WORLD;
+        self.span = rig.clamp_span(self.span, PLAY_CAM_TIGHTEST_SPAN, game::greentd_map::VIEW);
+        self.centre = rig.clamp_pan(self.centre, self.span, bounds, bounds);
+    }
+
+    fn camera(&mut self, rect: Rect) -> Camera {
+        let rig = Self::rig(rect);
+        if !self.initialized || self.reset_requested {
+            self.reset(&rig);
+        }
+        self.clamp(&rig);
+        rig.camera(self.centre, self.span)
+    }
+
+    fn zoom_at(&mut self, rig: &Rig, camera: &Camera, rect: Rect, pointer: egui::Pos2, factor: f32) {
+        let u = (pointer.x - rect.left()) / rect.width().max(1.0);
+        let v = (pointer.y - rect.top()) / rect.height().max(1.0);
+        let before = camera.ground_pick(u, v);
+        self.span = rig.clamp_span(
+            self.span / factor.clamp(0.78, 1.28),
+            PLAY_CAM_TIGHTEST_SPAN,
+            game::greentd_map::VIEW,
+        );
+        if let (Some(before), Some(after)) = (
+            before,
+            rig.camera(self.centre, self.span).ground_pick(u, v),
+        ) {
+            // Move the target by the exact ray-plane difference so the grass
+            // under a wheel/pinch midpoint stays under that midpoint.
+            self.centre[0] += before[0] - after[0];
+            self.centre[1] += before[1] - after[1];
+        }
+        self.clamp(rig);
+    }
+
+    fn pan_by(&mut self, rig: &Rig, rect: Rect, delta: egui::Vec2) {
+        if delta == egui::Vec2::ZERO {
+            return;
+        }
+        let shift = rig.drag(
+            self.span,
+            delta.x / rect.width().max(1.0),
+            delta.y / rect.height().max(1.0),
+        );
+        self.centre[0] += shift[0];
+        self.centre[1] += shift[1];
+        self.clamp(rig);
+    }
+
+    /// Applies only navigation gestures that originate over the scene
+    /// rectangle. Returns whether a primary click must be ignored this frame
+    /// because it completed a touch gesture rather than a placement tap.
+    fn navigate(
+        &mut self,
+        ctx: &egui::Context,
+        resp: &egui::Response,
+        rect: Rect,
+        camera: &Camera,
+    ) -> bool {
+        let rig = Self::rig(rect);
+        if self.reset_requested {
+            self.reset(&rig);
+        }
+
+        let pointer = resp.hover_pos();
+        if let Some(pointer) = pointer.filter(|p| rect.contains(*p)) {
+            let scroll = ctx.input(|input| input.smooth_scroll_delta.y);
+            if scroll.abs() > 0.01 {
+                // Wheel ticks and trackpads report very different magnitudes;
+                // exponential scaling keeps both smooth and bounded.
+                self.zoom_at(&rig, camera, rect, pointer, (scroll * 0.0022).exp());
+            }
+        }
+
+        let mut touch_gesture = false;
+        if let Some(touch) = ctx.input(|input| input.multi_touch())
+            && rect.contains(touch.center_pos)
+        {
+            touch_gesture = true;
+            self.suppress_primary = true;
+            self.zoom_at(&rig, camera, rect, touch.center_pos, touch.zoom_delta);
+            self.pan_by(&rig, rect, touch.translation_delta);
+        }
+
+        // Middle drag is deliberately the desktop pan gesture, leaving a
+        // normal left click unambiguous for build/selection. A one-finger
+        // touch drag pans only after it has become a drag and the view is
+        // zoomed in; a tap remains a placement tap.
+        if resp.dragged_by(PointerButton::Middle) {
+            self.pan_by(&rig, rect, resp.drag_delta());
+        }
+        let touch_active = ctx.input(|input| input.any_touches());
+        let overview = rig.widest_span(game::greentd_map::VIEW);
+        if touch_active
+            && self.span < overview - 0.03
+            && resp.dragged_by(PointerButton::Primary)
+        {
+            self.suppress_primary = true;
+            self.pan_by(&rig, rect, resp.drag_delta());
+        }
+
+        let suppressed = self.suppress_primary || touch_gesture;
+        // Keep suppression through the release frame: egui may emit the
+        // primary click after the touch list has emptied.
+        if self.suppress_primary && !touch_active && !ctx.input(|i| i.pointer.button_down(PointerButton::Primary)) {
+            self.suppress_primary = false;
+        }
+        suppressed
+    }
+}
+
 struct App {
     audio: audio::Audio,
     game: Game,
@@ -325,21 +583,67 @@ struct App {
     /// frame goes is how you end up optimising a shader on a card that was
     /// never the bottleneck, so the HUD reports it.
     prof: Profile,
-    /// Where the player has scrolled to, in tiles, and how much of the board
-    /// is in frame. They live here rather than in [`ui::UiState`] because the
-    /// camera belongs to the app: the HUD never moves it, and the shot paths
-    /// frame the board without a `UiState` at all.
-    pan: [f32; 2],
-    span: f32,
-    /// The rectangle every build pad falls inside. The pan clamp needs it: the
-    /// pads stop short of the arena's edge, and a camera that cannot be aimed
-    /// at one is a plot the player cannot build on.
-    pads: [f32; 4],
     /// When the next frame is due, for the native frame limiter.
     #[cfg(not(target_arch = "wasm32"))]
     next_frame: Option<std::time::Instant>,
     /// Whether the one-time viewport-dependent setup has run.
     sized_once: bool,
+    view: BattleView,
+    /// Opt-in URL-driven evidence state. This is never a player-facing cheat:
+    /// it is accepted only after the normal Campaign menu action and the
+    /// resulting run is never written to the real save envelope.
+    campaign_diagnostic: Option<CampaignDiagnostic>,
+    /// URL-only, non-saving art capture. Unlike transition diagnostics it does
+    /// not use the instant-kill pilot: a granted mixed roster fights a live
+    /// commander through ordinary simulation ticks.
+    visual_showcase: bool,
+}
+
+/// One of the intentionally narrow, visibly labelled browser transition
+/// traces. The pilot stops only after an actual target encounter has spawned,
+/// leaving an inspectable live frame rather than racing past a number in a
+/// table.
+#[derive(Clone, Copy)]
+struct CampaignDiagnostic {
+    start: u16,
+    target: u16,
+    reached: bool,
+}
+
+fn requested_campaign_diagnostic() -> Option<CampaignDiagnostic> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let search = web_sys::window()?.location().search().ok()?;
+        let start = search
+            .trim_start_matches('?')
+            .split('&')
+            .find_map(|pair| {
+                let (key, value) = pair.split_once('=')?;
+                (key == "td_fixture").then_some(value)
+            })
+            .and_then(|value| value.parse::<u16>().ok())?;
+        let target = Game::diagnostic_fixture_target(start)?;
+        return Some(CampaignDiagnostic {
+            start,
+            target,
+            reached: false,
+        });
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        None
+    }
+}
+
+fn requested_visual_showcase() -> bool {
+    #[cfg(target_arch = "wasm32")]
+    {
+        web_sys::window()
+            .and_then(|window| window.location().search().ok())
+            .is_some_and(|search| search.split('&').any(|pair| pair == "td_showcase=1" || pair == "?td_showcase=1"))
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    { false }
 }
 
 impl App {
@@ -349,6 +653,16 @@ impl App {
             .as_ref()
             .expect("wgpu render state (the wgpu backend must be enabled)")
             .clone();
+
+        #[cfg(target_arch = "wasm32")]
+        if let Some(document) = web_sys::window().and_then(|window| window.document()) {
+            let _ = document.document_element().map(|root| {
+                root.set_attribute(
+                    "data-green-td-backend",
+                    &format!("{:?}", rs.adapter.get_info().backend),
+                )
+            });
+        }
 
         let game = Game::new();
         let decor = Decor::build(&game.board);
@@ -366,7 +680,6 @@ impl App {
 
         ui::install_style(&cc.egui_ctx);
 
-        let pads = pad_bounds(&game.board);
         let mut app = Self {
             audio: audio::Audio::new(),
             game,
@@ -383,15 +696,58 @@ impl App {
             fps: 60.0,
             anim: 0.0,
             prof: Profile::default(),
-            pan: lane_middle(),
-            span: CAM_SPAN,
-            pads,
             #[cfg(not(target_arch = "wasm32"))]
             next_frame: None,
             sized_once: false,
+            view: BattleView::default(),
+            campaign_diagnostic: requested_campaign_diagnostic(),
+            visual_showcase: requested_visual_showcase(),
         };
         app.apply_demo_env();
         app
+    }
+
+    /// A diagnostic point for browser interaction checks. It deliberately
+    /// searches for *visible* legal grass closest to the useful middle of the
+    /// current frustum instead of publishing the first valid coordinate in a
+    /// scan. At a close zoom that old point could sit on the bottom edge, where
+    /// a wheel's final inertial frame made a correct pointer click look like an
+    /// unreliable free-placement system.
+    ///
+    /// This never changes gameplay placement: players still aim directly at
+    /// any grass. It only gives the isolated browser test a safe ordinary
+    /// pointer coordinate after every camera/viewport change.
+    #[cfg(target_arch = "wasm32")]
+    fn visible_grass_probe(&self, camera: &Camera) -> Option<[f32; 2]> {
+        let b = self.game.board.build_world();
+        let mut best: Option<([f32; 2], f32)> = None;
+        const CELLS: usize = 28;
+        for gy in 0..=CELLS {
+            let y = (b[1] + TOWER_FOOTPRINT_RADIUS)
+                + (b[3] - b[1] - TOWER_FOOTPRINT_RADIUS * 2.0) * gy as f32 / CELLS as f32;
+            for gx in 0..=CELLS {
+                let x = (b[0] + TOWER_FOOTPRINT_RADIUS)
+                    + (b[2] - b[0] - TOWER_FOOTPRINT_RADIUS * 2.0) * gx as f32 / CELLS as f32;
+                let Ok(pos) = self.game.buildability_at([x, y], false) else {
+                    continue;
+                };
+                let Some(screen) = camera.to_screen(v3(pos[0], pos[1], 0.0)) else {
+                    continue;
+                };
+                // Keep this diagnostic coordinate away from the scene edge,
+                // the top strip and the command console. It must be an actual
+                // point a player could click, not merely a projected world
+                // coordinate that happens to be numerically finite.
+                if !(0.12..=0.88).contains(&screen[0]) || !(0.15..=0.82).contains(&screen[1]) {
+                    continue;
+                }
+                let score = (screen[0] - 0.50).powi(2) + (screen[1] - 0.56).powi(2);
+                if best.is_none_or(|(_, prior)| score < prior) {
+                    best = Some((pos, score));
+                }
+            }
+        }
+        best.map(|(pos, _)| pos)
     }
 
     /// `TD_DEMO=1` seeds a played-in board and starts the first wave. Used for
@@ -443,85 +799,60 @@ impl App {
         }
     }
 
-    /// Scrolling and zooming, the way Warcraft III does it.
-    ///
-    /// Four ways in, and all of them end up as one drag measured in fractions
-    /// of the viewport: the keys, the cursor resting against the edge of the
-    /// board, the middle mouse button, and the wheel for the zoom. Going
-    /// through the rig rather than adding tiles directly is what makes a drag
-    /// keep the same patch of ground under the cursor at every zoom, and makes
-    /// a key press scroll by the same fraction of the screen whether the
-    /// camera is close in or right out.
-    ///
-    /// The clamp at the end is the whole reason this is not just an addition:
-    /// the player should never be able to drift beyond the compact arena.
-    fn camera_input(&mut self, resp: &egui::Response, rect: Rect, rig: &Rig, k: &Keys, dt: f32) {
-        let mut scroll = [k.pan[0], k.pan[1]];
-        let mut drag = [0.0f32, 0.0];
-
-        if let Some(p) = resp.hover_pos() {
-            // Horizontal edge scroll stays on the board, where it cannot fire
-            // while the player is reading the side panels.
-            scroll[0] += edge_scroll_axis(rect.left(), rect.right(), p.x);
-
-            let wheel = resp.ctx.input(|i| i.smooth_scroll_delta.y);
-            if wheel != 0.0 {
-                // Geometric, so a notch feels the same at every zoom rather
-                // than crawling when close in and jumping when far out.
-                self.span *= (-wheel * CAM_WHEEL).exp();
+    /// A visibly labelled, non-persistent art fixture. It grants setup gold
+    /// and moves to the final commander encounter, but never damages or clears
+    /// enemies: every projectile/effect in its capture is production combat.
+    fn start_visual_showcase(&mut self, difficulty: game::Difficulty) {
+        self.game.start_campaign(seed_now(), difficulty);
+        self.game.gold = 40_000_000;
+        let shop = game::defs::shop_order();
+        let slot_count = self.game.board.slots.len();
+        for n in 0..slot_count {
+            if n % 3 != 0 || n >= 30 { continue; }
+            self.game.build_choice = Some((shop[n % shop.len()], 1));
+            if self.game.try_build(n) {
+                let ti = self.game.towers.len() - 1;
+                for _ in 0..3 {
+                    let Some(&(into, _)) = self.game.upgrade_choices(ti).first() else { break };
+                    self.game.upgrade_into(ti, into);
+                }
             }
         }
-
-        // The command bar covers the board's bottom edge and the status bar
-        // covers its top edge. Looking only at `resp.hover_pos()` therefore
-        // made vertical edge scrolling stop exactly where an RTS player moves
-        // the cursor. Use the literal viewport edge for Y; the narrow 14-point
-        // strip sits outside the actual controls, and holding a mouse button
-        // suppresses it so clicking the HUD never drags the battlefield.
-        let (pointer, button_down) = resp.ctx.input(|i| {
-            (
-                i.pointer.hover_pos(),
-                i.pointer.primary_down() || i.pointer.secondary_down() || i.pointer.middle_down(),
-            )
-        });
-        if !button_down && let Some(p) = pointer {
-            let viewport = resp.ctx.content_rect();
-            scroll[1] += edge_scroll_axis(viewport.top(), viewport.bottom(), p.y);
-        }
-
-        // A drag that started on the board keeps working past the edge of it,
-        // which is what a player throwing the view across expects.
-        if resp.dragged_by(egui::PointerButton::Middle) {
-            let d = resp.drag_delta();
-            drag[0] += d.x / rect.width().max(1.0);
-            drag[1] += d.y / rect.height().max(1.0);
-        }
-
-        // Scrolling is dragging backwards: the keys and the screen edge move
-        // the camera, a drag moves the ground under it. The direction is
-        // capped at one so that a key held down while the cursor also rests on
-        // the edge does not scroll at twice the speed.
-        for (d, s) in drag.iter_mut().zip(scroll) {
-            *d -= s.clamp(-1.0, 1.0) * CAM_PAN_SPEED * dt;
-        }
-        let step = rig.drag(self.span, drag[0], drag[1]);
-        self.pan = [self.pan[0] + step[0], self.pan[1] + step[1]];
-
-        let view = crate::game::greentd_map::VIEW;
-        self.span = rig.clamp_span(self.span, CAM_SPAN_MIN, view);
-        self.pan = rig.clamp_pan(self.pan, self.span, view, self.pads);
+        self.game.build_choice = None;
+        self.game.selected = None;
+        if let Some(state) = self.game.campaign.as_mut() { state.encounter = 600; }
+        self.game.wave = 599;
+        self.game.phase = game::Phase::Build;
+        self.game.prep = false;
+        self.game.wave_timer = 0.0;
+        self.game.speed = 10.0;
+        self.game.campaign_pressure_grace = 1_000_000.0;
+        self.game.wants_save = false;
+        self.game.notice("SHOWCASE: granted roster / live commander / not saved".to_owned());
+        self.game.send_wave();
     }
 
-    /// Board interaction. The cursor is cast as a ray onto the ground plane,
-    /// then snapped to the nearest build pad.
-    fn board_input(&mut self, resp: &egui::Response, rect: Rect, cam: &Camera, shift: bool) {
+    /// Board interaction. The cursor is cast into the live camera's ground
+    /// plane and stays in world coordinates: grass placement never falls back
+    /// to an old nearest socket after a zoom, pan or viewport resize.
+    fn board_input(
+        &mut self,
+        resp: &egui::Response,
+        rect: Rect,
+        cam: &Camera,
+        suppress_primary: bool,
+    ) {
         let g = &mut self.game;
         g.hover_slot = None;
+        g.hover_pos = None;
 
         if let Some(p) = resp.hover_pos() {
             let u = (p.x - rect.left()) / rect.width().max(1.0);
             let v = (p.y - rect.top()) / rect.height().max(1.0);
             if let Some(w) = cam.ground_pick(u, v) {
+                g.hover_pos = Some(w);
+                // Compatibility only: older HUD hints can still identify a
+                // historical pad, but the build path below never requires it.
                 g.hover_slot = g.board.slot_at(w);
             }
         }
@@ -531,26 +862,44 @@ impl App {
             g.selected = None;
         }
 
-        if resp.clicked() {
-            match g.hover_slot {
-                Some(slot) => {
-                    if let Some(ti) = g.tower_in_slot(slot) {
-                        // Clicking an existing tower always inspects it.
-                        g.selected = Some(ti);
-                        g.build_choice = None;
-                    } else if g.build_choice.is_some() {
-                        let built = g.try_build(slot);
-                        if built && !shift {
-                            g.build_choice = None;
-                        }
-                    }
+        if resp.clicked_by(PointerButton::Primary) && !suppress_primary {
+            match g.hover_pos {
+                Some(pos) if g.tower_at(pos).is_some() => {
+                    // A real plinth always wins selection over a still-armed
+                    // build card. This stays true for free grass positions.
+                    g.selected = g.tower_at(pos);
+                    g.build_choice = None;
                 }
-                None => g.selected = None,
+                Some(pos) if g.build_choice.is_some() => {
+                    // Construction stays armed until cancel. A failed query
+                    // cannot spend gold, and a successful click stores this
+                    // actual world position instead of a pad ID.
+                    g.try_build_at(pos);
+                }
+                _ => {
+                    g.selected = None;
+                }
             }
         }
     }
 
     fn apply_keys(&mut self, k: &Keys) {
+        if self.ust.show_threat_intel {
+            if k.cancel {
+                self.ust.show_threat_intel = false;
+                self.ust.threat_intel_rect = None;
+            }
+            return;
+        }
+        // The doctrine modal owns its choice input. Do not let keyboard
+        // gameplay actions (notably Space) alter a frozen simulation behind
+        // it; egui still receives the card input independently.
+        if self.game.pending_doctrine {
+            return;
+        }
+        if k.reset_view {
+            self.view.reset_requested = true;
+        }
         if k.help {
             self.ust.show_help = !self.ust.show_help;
         }
@@ -564,6 +913,8 @@ impl App {
         if k.pause {
             g.paused = !g.paused;
         }
+        // Campaign's F ladder contains only rapid 10x/25x/50x/100x values;
+        // Legacy keeps its separate historic tempo ladder.
         if k.speed {
             g.cycle_speed();
         }
@@ -587,6 +938,9 @@ impl App {
         }
         if k.dev_gold {
             g.gold += 5_000;
+        }
+        if k.persist && !self.net.is_online() {
+            g.wants_save = true;
         }
         if k.dev_fill {
             // Scatter a playable board of towers, for testing the view quickly.
@@ -693,7 +1047,11 @@ impl App {
                 if q <= self.ust.quality_ceiling {
                     self.ust.quality = q;
                     self.ust.quality_dirty = true;
-                    self.game.toast(format!("Graphics raised to {}", q.label()));
+                    // A quiet automatic improvement is already visible in
+                    // the top-strip quality label. A large cyan board toast
+                    // was masking the opening horde in every fast browser
+                    // capture, so reserve in-world notices for decisions and
+                    // placement feedback instead.
                 }
             }
         }
@@ -732,16 +1090,46 @@ impl App {
             });
 
         match menu::show(&ctx, &mut self.menu, &mut self.net, dt) {
-            menu::Action::SinglePlayer(difficulty) => {
+            menu::Action::Campaign(difficulty) => {
+                self.net.leave();
+                let started_diagnostic = self.campaign_diagnostic.is_some_and(|fixture| {
+                    self.game.start_campaign_diagnostic_fixture(
+                        seed_now(),
+                        difficulty,
+                        fixture.start,
+                    )
+                });
+                if self.visual_showcase {
+                    self.start_visual_showcase(difficulty);
+                } else if !started_diagnostic {
+                    self.game.start_campaign(seed_now(), difficulty);
+                }
+                // A URL-driven evidence trace must never clear or replace a
+                // player's ordinary Campaign/Legacy save. The isolated
+                // browser checker owns a fresh profile, but this guard also
+                // makes a copied diagnostic URL safe in a real browser.
+                if !started_diagnostic && !self.visual_showcase {
+                    save::clear();
+                }
+                self.view.reset_requested = true;
+                self.menu.screen = Screen::Playing;
+            }
+            menu::Action::Legacy(difficulty) => {
                 self.net.leave();
                 self.game.start_run_with_difficulty(seed_now(), difficulty);
                 save::clear();
+                self.campaign_diagnostic = None;
+                self.view.reset_requested = true;
                 self.menu.screen = Screen::Playing;
             }
             menu::Action::Resume => {
                 self.net.leave();
                 match save::load().map(|s| s.restore(&mut self.game)) {
-                    Some(true) => self.menu.screen = Screen::Playing,
+                    Some(true) => {
+                        self.view.reset_requested = true;
+                        self.menu.screen = Screen::Playing;
+                        self.campaign_diagnostic = None;
+                    }
                     _ => {
                         // The save was unreadable. Say so rather than silently
                         // dropping the player into a fresh run they did not ask
@@ -782,6 +1170,51 @@ impl App {
     }
 }
 
+/// A deliberately unmissable label for URL-driven Campaign evidence. It lives
+/// above the 3D callback (not in its pixels), so its wording stays readable at
+/// every DPR and cannot be mistaken for an ordinary player run in a capture.
+fn diagnostic_banner(ctx: &egui::Context, diagnostic: CampaignDiagnostic, game: &Game) {
+    let viewport = ctx.content_rect();
+    let width = (viewport.width() - 24.0).clamp(180.0, 470.0);
+    let x = (viewport.center().x - width * 0.5).max(8.0);
+    let chapter = game.campaign_chapter().unwrap_or(0);
+    let status = if diagnostic.reached {
+        format!(
+            "TARGET LIVE: C{chapter} E{} — PAUSED FOR INSPECTION",
+            diagnostic.target
+        )
+    } else {
+        format!(
+            "PILOT RUNNING: E{} -> E{} THROUGH LIVE TRANSITIONS",
+            diagnostic.start, diagnostic.target
+        )
+    };
+    egui::Area::new(egui::Id::new("campaign_transition_diagnostic"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(egui::pos2(x, ui::top_h(false) + 8.0))
+        .show(ctx, |ui| {
+            ui.set_width(width);
+            egui::Frame::NONE
+                .fill(egui::Color32::from_rgb(55, 35, 22))
+                .stroke(egui::Stroke::new(1.0, ui::pal::GOLD))
+                .corner_radius(egui::CornerRadius::same(4))
+                .inner_margin(egui::Margin::symmetric(10, 6))
+                .show(ui, |ui| {
+                    ui.label(
+                        egui::RichText::new("DIAGNOSTIC FIXTURE — NOT SAVED")
+                            .strong()
+                            .size(11.0)
+                            .color(ui::pal::GOLD),
+                    );
+                    ui.label(
+                        egui::RichText::new(status)
+                            .size(10.0)
+                            .color(ui::pal::INK),
+                    );
+                });
+        });
+}
+
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
@@ -790,8 +1223,8 @@ impl eframe::App for App {
         self.fps += (1.0 / dt - self.fps) * 0.05;
 
         // A phone-sized viewport gets the compact HUD and the cheap preset.
-        let view_w = ui.max_rect().width();
-        self.ust.compact = ui::compact_for(view_w);
+        let view = ui.max_rect();
+        self.ust.compact = ui::compact_for_view(view.width(), view.height());
         if !self.sized_once {
             self.sized_once = true;
             if self.ust.compact || ctx.pixels_per_point() > 2.0 {
@@ -824,6 +1257,89 @@ impl eframe::App for App {
                 Screen::Playing => "playing",
             };
             let _ = root.set_attribute("data-green-td-screen", screen);
+            let _ = root.set_attribute("data-green-td-build", BUILD_ID);
+            let _ = root.set_attribute("data-green-td-mode", self.game.mode.label());
+            let _ = root.set_attribute(
+                "data-green-td-encounter",
+                &self
+                    .game
+                    .campaign_encounter()
+                    .map(|encounter| encounter.to_string())
+                    .unwrap_or_else(|| "legacy".to_owned()),
+            );
+            let _ = root.set_attribute("data-green-td-phase", &format!("{:?}", self.game.phase));
+            let _ = root.set_attribute(
+                "data-green-td-armed",
+                if self.game.build_choice.is_some() { "true" } else { "false" },
+            );
+            let _ = root.set_attribute(
+                "data-green-td-paused",
+                if self.game.paused { "true" } else { "false" },
+            );
+            let _ = root.set_attribute("data-green-td-towers", &self.game.towers.len().to_string());
+            let _ = root.set_attribute("data-green-td-creeps", &self.game.creeps.len().to_string());
+            // Expose the simulation-owned tempo to the isolated browser test;
+            // a painted HUD label cannot prove that the selected fast clock is
+            // actually advancing
+            // the fixed-step game clock.
+            let _ = root.set_attribute(
+                "data-green-td-speed",
+                &format!("{:.0}", self.game.speed),
+            );
+            if let Some(diagnostic) = self
+                .campaign_diagnostic
+                .filter(|_| self.game.diagnostic_fixture.is_some())
+            {
+                let _ = root.set_attribute(
+                    "data-green-td-diagnostic",
+                    &format!(
+                        "E{}->E{}:{}",
+                        diagnostic.start,
+                        diagnostic.target,
+                        if diagnostic.reached { "reached" } else { "running" }
+                    ),
+                );
+            } else {
+                let _ = root.remove_attribute("data-green-td-diagnostic");
+            }
+            // The menu is drawn by egui, whose modal position follows the
+            // *actual* CSS viewport. Publish its live Continue hitbox for the
+            // isolated browser smoke instead of baking an assumed phone size
+            // into an input test. This is diagnostic only; normal interaction
+            // still goes through the same pointer events as a player.
+            if self.menu.screen == Screen::Title {
+                if let Some(rect) = self.menu.resume_rect {
+                    let _ = root.set_attribute(
+                        "data-green-td-resume-rect",
+                        &format!(
+                            "{:.2},{:.2},{:.2},{:.2}",
+                            rect.left(),
+                            rect.top(),
+                            rect.width(),
+                            rect.height()
+                        ),
+                    );
+                } else {
+                    let _ = root.remove_attribute("data-green-td-resume-rect");
+                }
+                if let Some(rect) = self.menu.campaign_rect {
+                    let _ = root.set_attribute(
+                        "data-green-td-campaign-rect",
+                        &format!(
+                            "{:.2},{:.2},{:.2},{:.2}",
+                            rect.left(),
+                            rect.top(),
+                            rect.width(),
+                            rect.height()
+                        ),
+                    );
+                } else {
+                    let _ = root.remove_attribute("data-green-td-campaign-rect");
+                }
+            } else {
+                let _ = root.remove_attribute("data-green-td-resume-rect");
+                let _ = root.remove_attribute("data-green-td-campaign-rect");
+            }
         }
 
         // --- menu: the board keeps rendering behind it as a live backdrop
@@ -833,7 +1349,7 @@ impl eframe::App for App {
         }
         if self.ust.want_menu {
             self.ust.want_menu = false;
-            if !self.net.is_online() {
+            if !self.net.is_online() && self.game.diagnostic_fixture.is_none() && !self.visual_showcase {
                 save::store(&self.game);
             }
             self.net.leave();
@@ -844,17 +1360,54 @@ impl eframe::App for App {
         }
 
         let keys = read_keys(ui);
-        self.apply_keys(&keys);
+        if self.ust.show_threat_intel {
+            if keys.cancel {
+                self.ust.show_threat_intel = false;
+                self.ust.threat_intel_rect = None;
+            }
+        } else {
+            self.apply_keys(&keys);
+        }
         self.auto_quality();
 
         // --- simulate
         let t_frame = now_ms();
-        self.game.update(dt);
+        if !self.ust.show_threat_intel {
+            self.game.update(dt);
+        }
+        // Query-selected boundary evidence runs only after the ordinary update
+        // has spawned and stepped its real bodies. The pilot damages those
+        // bodies through the production combat path on the next line; it never
+        // changes the campaign cursor or reward ledger itself. At the target,
+        // pause on an actually spawned formation so the browser capture shows
+        // the achieved transition rather than a transient number in a HUD.
+        if let Some(diagnostic) = self.campaign_diagnostic.as_mut()
+            && self.game.diagnostic_fixture.is_some()
+        {
+            let target_is_live = self.game.campaign_encounter() == Some(diagnostic.target)
+                && self.game.wave == diagnostic.target as u32
+                && self.game.phase == game::Phase::Combat
+                && self
+                    .game
+                    .creeps
+                    .iter()
+                    .any(|creep| creep.campaign_encounter == diagnostic.target);
+            if !diagnostic.reached && target_is_live {
+                diagnostic.reached = true;
+                self.game.paused = true;
+                self.game.notice(format!(
+                    "DIAGNOSTIC target E{} reached through live Campaign transition; paused for inspection",
+                    diagnostic.target
+                ));
+            } else if !diagnostic.reached {
+                self.game.diagnostic_pilot_tick();
+            }
+        }
         self.net.push(self.game.snapshot(), dt);
         if std::mem::take(&mut self.game.wants_save) {
             // Solo runs only: a room's run belongs to the room, and resuming
             // into one nobody else is playing any more would be a lie.
-            if !self.net.is_online() {
+            if !self.net.is_online() && self.game.diagnostic_fixture.is_none() && !self.visual_showcase {
                 save::store(&self.game);
             }
         }
@@ -876,6 +1429,10 @@ impl eframe::App for App {
         }
         let perf = self.ust.perf.clone();
         let t_hud = now_ms();
+        // The same RTS hierarchy is used on every viewport: a slim resource
+        // strip and a bottom command console.  In particular, the build grid
+        // lives at the bottom-right rather than in a tall side catalogue, so
+        // its click targets are physically separated from battlefield picking.
         egui::Panel::top("hud")
             .exact_size(ui::top_h(self.ust.compact))
             .resizable(false)
@@ -887,7 +1444,6 @@ impl eframe::App for App {
             .show(ui, |ui| {
                 ui::top_bar(&mut self.game, ui, &mut self.ust, &perf);
             });
-
         egui::Panel::bottom("shop")
             .exact_size(ui::command_h(self.ust.compact))
             .resizable(false)
@@ -900,12 +1456,141 @@ impl eframe::App for App {
                 ui::command_bar(&mut self.game, ui, &mut self.ust);
             });
 
+        if std::mem::take(&mut self.ust.reset_view) {
+            self.view.reset_requested = true;
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        if let Some(root) = web_sys::window()
+            .and_then(|window| window.document())
+            .and_then(|document| document.document_element())
+        {
+            // Real browser QA provenance for the RTS build palette. These
+            // values are read-only mirrors of the egui rectangles and game
+            // state; the smoke test still uses normal pointer events to arm
+            // the icon and place the tower.
+            let palette = self.ust.palette_rect;
+            let _ = root.set_attribute(
+                "data-green-td-palette-css",
+                &format!(
+                    "{:.2},{:.2},{:.2},{:.2}",
+                    palette.left(),
+                    palette.top(),
+                    palette.width(),
+                    palette.height()
+                ),
+            );
+            let _ = root.set_attribute(
+                "data-green-td-card-css",
+                &self
+                    .ust
+                    .card_rects
+                    .iter()
+                    .map(|card| format!(
+                        "{:.2},{:.2},{:.2},{:.2}",
+                        card.left(),
+                        card.top(),
+                        card.width(),
+                        card.height()
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(";"),
+            );
+            let _ = root.set_attribute(
+                "data-green-td-card-defs",
+                &self
+                    .ust
+                    .hotkeys
+                    .iter()
+                    .map(|def| def.to_string())
+                    .collect::<Vec<_>>()
+                    .join(","),
+            );
+            let view = self.ust.view_rect;
+            let _ = root.set_attribute(
+                "data-green-td-view-css",
+                &format!(
+                    "{:.2},{:.2},{:.2},{:.2}",
+                    view.left(),
+                    view.top(),
+                    view.width(),
+                    view.height()
+                ),
+            );
+            let speed = self.ust.speed_rect;
+            let _ = root.set_attribute(
+                "data-green-td-speed-css",
+                &format!(
+                    "{:.2},{:.2},{:.2},{:.2}",
+                    speed.left(),
+                    speed.top(),
+                    speed.width(),
+                    speed.height()
+                ),
+            );
+            let controls = self
+                .ust
+                .command_rects
+                .iter()
+                .map(|(name, rect)| format!(
+                    "{}:{:.2},{:.2},{:.2},{:.2}",
+                    name, rect.left(), rect.top(), rect.width(), rect.height()
+                ))
+                .collect::<Vec<_>>()
+                .join(";");
+            let _ = root.set_attribute("data-green-td-command-css", &controls);
+            let armed = self
+                .game
+                .build_choice
+                .and_then(|(def, _)| game::defs::TOWERS.get(def))
+                .map_or("", |def| def.name);
+            let armed_cost = self
+                .game
+                .build_choice
+                .and_then(|(def, _)| game::defs::TOWERS.get(def))
+                .map_or(0, |def| def.gold);
+            let last_tower = self.game.towers.last().map_or("", |tower| tower.full_name());
+            let _ = root.set_attribute("data-green-td-armed-tower", armed);
+            let _ = root.set_attribute("data-green-td-armed-cost", &armed_cost.to_string());
+            let _ = root.set_attribute("data-green-td-last-tower", last_tower);
+            let _ = root.set_attribute("data-green-td-gold", &self.game.gold.to_string());
+        }
+
         // --- board
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE)
             .show(ui, |ui| {
-                let (rect, resp) =
-                    ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
+                let area = ui.available_rect_before_wrap();
+                // The scene owns the entire central viewport. The tactical
+                // square is fitted by the oblique camera in world space; it
+                // is no longer a square render target with black side gutters.
+                ui.painter().rect_filled(area, 0.0, ui::pal::PANEL_DEEP);
+                let rect = scene_rect(area);
+                #[cfg(target_arch = "wasm32")]
+                if let Some(root) = web_sys::window()
+                    .and_then(|window| window.document())
+                    .and_then(|document| document.document_element())
+                {
+                    // Read-only browser QA provenance: the same rectangle
+                    // drives the egui callback, the camera, and picking. This
+                    // lets an isolated test prove a resize did not leave input
+                    // in an obsolete board coordinate system.
+                    let _ = root.set_attribute(
+                        "data-green-td-board-css",
+                        &format!(
+                            "{:.2},{:.2},{:.2},{:.2}",
+                            rect.left(),
+                            rect.top(),
+                            rect.width(),
+                            rect.height()
+                        ),
+                    );
+                }
+                let resp = ui.interact(
+                    rect,
+                    ui.id().with("world_scene"),
+                    Sense::click_and_drag(),
+                );
                 // The browser reports devicePixelRatio here, which on a 2x display
                 // asks for four times the pixels. The HUD stays crisp at native
                 // scale; the 3D scene does not need to be supersampled.
@@ -914,20 +1599,128 @@ impl eframe::App for App {
                     (rect.width() * ppp).round().max(8.0) as u32,
                     (rect.height() * ppp).round().max(8.0) as u32,
                 ];
-                let rig = Rig::new(
-                    rect.width() / rect.height().max(1.0),
-                    CAM_PITCH_DEG.to_radians(),
-                    CAM_YAW_DEG.to_radians(),
-                );
-                self.camera_input(&resp, rect, &rig, &keys, dt);
-                // One camera drives rendering, picking and the text overlay, so
-                // they can never disagree about where something is on screen.
-                // That is why the scrolling is settled first: the ray a click
-                // is cast along has to come from the frame the player is
-                // looking at, not the one before it.
-                let camera = rig.camera(self.pan, self.span);
+                // The initial/reset pose fits the whole route. Thereafter a
+                // wheel/pinch or deliberate pan changes this one camera, and
+                // the rebuilt value below drives rendering, ghost picking and
+                // labels together in the same frame.
+                let initial_camera = self.view.camera(rect);
+                let suppress_primary = self.view.navigate(&ctx, &resp, rect, &initial_camera);
+                let camera = self.view.camera(rect);
 
-                self.board_input(&resp, rect, &camera, keys.shift);
+                #[cfg(target_arch = "wasm32")]
+                if let Some(root) = web_sys::window()
+                    .and_then(|window| window.document())
+                    .and_then(|document| document.document_element())
+                {
+                    let _ = root.set_attribute(
+                        "data-green-td-camera",
+                        &format!(
+                            "{:.3},{:.3},{:.3}",
+                            self.view.centre[0], self.view.centre[1], self.view.span
+                        ),
+                    );
+                }
+
+                #[cfg(target_arch = "wasm32")]
+                if let Some(root) = web_sys::window()
+                    .and_then(|window| window.document())
+                    .and_then(|document| document.document_element())
+                {
+                    // This is an input probe, not a game command: automation
+                    // still sends a normal pointer event through `board_input`.
+                    // It makes viewport/picking regression checks use an
+                    // actual legal grass point after every resize instead of a
+                    // fragile guessed pixel coordinate.
+                    if let Some(probe) = self.visible_grass_probe(&camera)
+                        && let Some(point) = camera.to_screen(v3(probe[0], probe[1], 0.0))
+                    {
+                        let _ = root.set_attribute(
+                            "data-green-td-probe-world",
+                            &format!("{:.3},{:.3}", probe[0], probe[1]),
+                        );
+                        let _ = root.set_attribute(
+                            "data-green-td-input-probe",
+                            &format!(
+                                "{:.2},{:.2}",
+                                rect.left() + point[0] * rect.width(),
+                                rect.top() + point[1] * rect.height()
+                            ),
+                        );
+                    }
+                    // A route point is deliberately not a build socket. It
+                    // gives the browser check a deterministic invalid click
+                    // that proves the palette/placement path never spends
+                    // gold on illegal terrain.
+                    let route = self.game.board.start();
+                    if let Some(point) = camera.to_screen(v3(route[0], route[1], 0.0)) {
+                        let _ = root.set_attribute(
+                            "data-green-td-invalid-probe",
+                            &format!(
+                                "{:.2},{:.2}",
+                                rect.left() + point[0] * rect.width(),
+                                rect.top() + point[1] * rect.height()
+                            ),
+                        );
+                    }
+                }
+
+                self.board_input(&resp, rect, &camera, suppress_primary);
+
+                #[cfg(target_arch = "wasm32")]
+                if let Some(root) = web_sys::window()
+                    .and_then(|window| window.document())
+                    .and_then(|document| document.document_element())
+                {
+                    // Read-only interaction provenance for the isolated
+                    // browser check. It mirrors the exact world point the
+                    // normal pointer path just used, so a compact-viewport
+                    // regression can distinguish a lost click from a clean
+                    // footprint rejection without inventing a test-only build
+                    // command.
+                    let hover = self.game.hover_pos.map_or_else(
+                        || "".to_owned(),
+                        |p| format!("{:.3},{:.3}", p[0], p[1]),
+                    );
+                    let toast = self
+                        .game
+                        .toast
+                        .as_ref()
+                        .map_or("", |(message, _, _)| message.as_str());
+                    let hover_buildability = self.game.hover_pos.map_or_else(
+                        || "".to_owned(),
+                        |p| match self.game.buildability_at(p, true) {
+                            Ok(pos) => format!("ok:{:.3},{:.3}", pos[0], pos[1]),
+                            Err(issue) => format!("blocked:{}", issue.label()),
+                        },
+                    );
+                    let _ = root.set_attribute("data-green-td-hover-world", &hover);
+                    let _ = root.set_attribute("data-green-td-placement-feedback", toast);
+                    let _ = root.set_attribute("data-green-td-hover-buildability", &hover_buildability);
+                    // `board_input` can buy a tower in this very frame. Keep
+                    // these read-only QA mirrors coherent with the ghost
+                    // result above instead of exposing the pre-click count
+                    // until the next repaint (which may be deliberately
+                    // paused while a player is choosing a placement).
+                    let armed = self
+                        .game
+                        .build_choice
+                        .and_then(|(def, _)| game::defs::TOWERS.get(def))
+                        .map_or("", |def| def.name);
+                    let armed_cost = self
+                        .game
+                        .build_choice
+                        .and_then(|(def, _)| game::defs::TOWERS.get(def))
+                        .map_or(0, |def| def.gold);
+                    let last_tower = self.game.towers.last().map_or("", |tower| tower.full_name());
+                    let _ = root.set_attribute(
+                        "data-green-td-towers",
+                        &self.game.towers.len().to_string(),
+                    );
+                    let _ = root.set_attribute("data-green-td-armed-tower", armed);
+                    let _ = root.set_attribute("data-green-td-armed-cost", &armed_cost.to_string());
+                    let _ = root.set_attribute("data-green-td-last-tower", last_tower);
+                    let _ = root.set_attribute("data-green-td-gold", &self.game.gold.to_string());
+                }
 
                 let t_build = now_ms();
                 self.draw.clear();
@@ -940,12 +1733,72 @@ impl eframe::App for App {
                 ui.painter()
                     .add(egui_wgpu::Callback::new_paint_callback(rect, BoardCallback));
 
-                ui::board_text(&self.game, ui, &camera, rect);
+                // The build selector is now below the board at every size, so
+                // board-local placement feedback stays available on desktop.
+                ui::board_text(&self.game, ui, &camera, rect, true);
                 ui::board_hover(&self.game, &resp, &camera, rect);
             });
 
         menu::room_scoreboard(&ctx, &self.net, self.ust.compact);
         ui::modals(&mut self.game, &ctx, &mut self.ust);
+
+        #[cfg(target_arch = "wasm32")]
+        if let Some(root) = web_sys::window()
+            .and_then(|window| window.document())
+            .and_then(|document| document.document_element())
+        {
+            let controls = self
+                .ust
+                .command_rects
+                .iter()
+                .map(|(name, rect)| format!(
+                    "{}:{:.2},{:.2},{:.2},{:.2}",
+                    name, rect.left(), rect.top(), rect.width(), rect.height()
+                ))
+                .collect::<Vec<_>>()
+                .join(";");
+            let _ = root.set_attribute("data-green-td-command-css", &controls);
+            let _ = root.set_attribute(
+                "data-green-td-intel-open",
+                if self.ust.show_threat_intel { "true" } else { "false" },
+            );
+            let intel_rect_str = self
+                .ust
+                .threat_intel_rect
+                .map(|r| format!("{:.2},{:.2},{:.2},{:.2}", r.left(), r.top(), r.width(), r.height()))
+                .unwrap_or_default();
+            let _ = root.set_attribute("data-green-td-intel-rect", &intel_rect_str);
+            let active_sec = self.game.campaign.as_ref().map_or(0.0, |c| c.active_seconds);
+            let _ = root.set_attribute(
+                "data-green-td-active-seconds",
+                &format!("{:.2}", active_sec),
+            );
+            let _ = root.set_attribute(
+                "data-green-td-paused",
+                if self.game.paused { "true" } else { "false" },
+            );
+        }
+        if let Some(diagnostic) = self
+            .campaign_diagnostic
+            .filter(|_| self.game.diagnostic_fixture.is_some())
+        {
+            diagnostic_banner(&ctx, diagnostic, &self.game);
+        } else if self.visual_showcase {
+            egui::Area::new(egui::Id::new("campaign_visual_showcase"))
+                .order(egui::Order::Foreground)
+                .fixed_pos(egui::pos2(14.0, ui::top_h(false) + 8.0))
+                .show(&ctx, |ui| {
+                    egui::Frame::NONE
+                        .fill(egui::Color32::from_rgb(42, 31, 20))
+                        .stroke(egui::Stroke::new(1.0, ui::pal::GOLD))
+                        .corner_radius(egui::CornerRadius::same(4))
+                        .inner_margin(egui::Margin::symmetric(10, 6))
+                        .show(ui, |ui| {
+                            ui.label(egui::RichText::new("VISUAL SHOWCASE — GRANTED ROSTER / LIVE COMMANDER / NOT SAVED")
+                                .strong().size(10.0).color(ui::pal::GOLD));
+                        });
+                });
+        }
         // Drain after board input and modal actions as well as simulation, so
         // a build click and an automatic wave boundary both sound this frame.
         if self.ust.sound_enabled {
@@ -969,40 +1822,38 @@ impl eframe::App for App {
     }
 }
 
-/// Where the camera opens, in tiles: a point on the lane, near the spawn.
+/// Where the camera opens, in tiles.
 ///
-/// Two wrong answers preceded this one, and both are instructive.
-///
-/// The middle of the arena rectangle put the camera in the open with the
-/// fighting off at the edge of frame. So it was changed to the centroid of the
-/// lane - which is correct for a lane that runs *through* the field, and
-/// nonsense for this one: the map's lane is a closed ring, and the centroid of
-/// a ring is the hollow middle of it. That framing opened the game on sixty
-/// tiles of empty grass with the entire circuit off-screen in every direction.
-///
-/// A point *on* the lane has neither failure. This is the first waypoint, which
-/// is the corner the map's own Red player feeds creeps into.
+/// The road now winds through the whole arena, so its geometric centre is the
+/// useful tactical overview. It puts multiple lanes and their nearby build
+/// tiles on screen immediately; players can still zoom to the spawn or a kill
+/// zone with the wheel and drag controls.
 pub fn lane_middle() -> [f32; 2] {
     let lap = game::greentd_map::LAP;
-    match (lap.first(), lap.get(1)) {
-        // Start a few tiles beyond the portal. The gate remains in frame as a
-        // landmark without sitting over the exact point the player needs to
-        // read, select and build around.
-        (Some(a), Some(b)) => {
-            let on_lane = [a[0] + (b[0] - a[0]) * 0.18, a[1] + (b[1] - a[1]) * 0.18];
-            let v = game::greentd_map::VIEW;
-            let centre = [(v[0] + v[2]) * 0.5, (v[1] + v[3]) * 0.5];
-            // Bias a few tiles into the arena. The gate stays in view, but the
-            // board—not empty space beyond its wall—owns the opening frame.
-            [
-                on_lane[0] + (centre[0] - on_lane[0]) * 0.12,
-                on_lane[1] + (centre[1] - on_lane[1]) * 0.12,
-            ]
-        }
-        (Some(p), None) => *p,
-        _ => {
-            let v = game::greentd_map::VIEW;
-            [(v[0] + v[2]) * 0.5, (v[1] + v[3]) * 0.5]
+    if lap.len() > 8 {
+        let v = game::greentd_map::VIEW;
+        [(v[0] + v[2]) * 0.5, (v[1] + v[3]) * 0.5]
+    } else {
+        match (lap.first(), lap.get(1)) {
+            // Start a few tiles beyond the portal. The gate remains in frame as a
+            // landmark without sitting over the exact point the player needs to
+            // read, select and build around.
+            (Some(a), Some(b)) => {
+                let on_lane = [a[0] + (b[0] - a[0]) * 0.18, a[1] + (b[1] - a[1]) * 0.18];
+                let v = game::greentd_map::VIEW;
+                let centre = [(v[0] + v[2]) * 0.5, (v[1] + v[3]) * 0.5];
+                // Bias a few tiles into the arena. The gate stays in view, but the
+                // board—not empty space beyond its wall—owns the opening frame.
+                [
+                    on_lane[0] + (centre[0] - on_lane[0]) * 0.12,
+                    on_lane[1] + (centre[1] - on_lane[1]) * 0.12,
+                ]
+            }
+            (Some(p), None) => *p,
+            _ => {
+                let v = game::greentd_map::VIEW;
+                [(v[0] + v[2]) * 0.5, (v[1] + v[3]) * 0.5]
+            }
         }
     }
 }

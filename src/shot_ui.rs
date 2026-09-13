@@ -20,7 +20,7 @@ use crate::game::Game;
 use crate::game::board::{BH, BW};
 use crate::gfx::draw::DrawList;
 use crate::gfx::{Quality, Renderer};
-use crate::math::{Rig, shadow_view_proj};
+use crate::math::shadow_view_proj;
 use crate::shot::Shot;
 use crate::ui::{self, UiState};
 use crate::view;
@@ -49,7 +49,7 @@ fn run_ui(
     ust: &mut UiState,
     size: [f32; 2],
 ) -> (Vec<egui::ClippedPrimitive>, Rect, Deltas) {
-    ust.compact = ui::compact_for(size[0]);
+    ust.compact = ui::compact_for_view(size[0], size[1]);
     let mut input = RawInput {
         screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(size[0], size[1]))),
         ..Default::default()
@@ -102,14 +102,10 @@ fn run_ui(
             board = egui::CentralPanel::default()
                 .frame(egui::Frame::NONE)
                 .show(ui, |ui| {
-                    let rect = ui.available_rect_before_wrap();
-                    let rig = Rig::new(
-                        rect.width() / rect.height().max(1.0),
-                        crate::CAM_PITCH_DEG.to_radians(),
-                        crate::CAM_YAW_DEG.to_radians(),
-                    );
-                    let camera = rig.camera(crate::lane_middle(), crate::CAM_SPAN);
-                    ui::board_text(g, ui, &camera, rect);
+                    let area = ui.available_rect_before_wrap();
+                    let rect = crate::scene_rect(area);
+                    let camera = crate::play_camera(rect.width() / rect.height().max(1.0));
+                    ui::board_text(g, ui, &camera, rect, true);
                     rect
                 })
                 .inner;
@@ -153,16 +149,9 @@ pub fn capture(g: &mut Game, decor: &Decor, width: u32, height: u32, quality: Qu
 
             let bw = (board_rect.width().max(8.0)) as u32;
             let bh = (board_rect.height().max(8.0)) as u32;
-            // The same rig the app builds, from the rect the HUD left for the
-            // board. It used to frame the arena from a yaw of zero, a quarter
-            // turn away from the way the game actually plays, so every HUD
-            // capture judged the interface against a board nobody sees.
-            let rig = Rig::new(
-                bw as f32 / bh as f32,
-                crate::CAM_PITCH_DEG.to_radians(),
-                crate::CAM_YAW_DEG.to_radians(),
-            );
-            let camera = rig.camera(crate::lane_middle(), crate::CAM_SPAN);
+            // HUD captures share the fixed combat overview exactly, including
+            // its square viewport beside the desktop command rail.
+            let camera = crate::play_camera(bw as f32 / bh as f32);
             let light = shadow_view_proj(BW, BH, LIGHT_DIR);
 
             let mut egui_renderer =

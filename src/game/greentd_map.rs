@@ -1,7 +1,8 @@
-//! The Green Circle TD terrain, and the lane one player defends.
+//! Green Circle TD terrain, plus the compact solo lane this port uses.
 //!
 //! **Generated from `GREEN TD 9.3c PEIN.w3x` by `tools/emit_map.py` - do
-//! not hand-edit.**
+//! not hand-edit.** The terrain is extracted; the solo circuit is the
+//! deliberate `SOLO_LAP` override in that emitter.
 //!
 //! `TEXTURE` is the map's own ground-texture grid, one byte a tile, and
 //! it is the level: the corridors are painted in rock and everything else
@@ -612,31 +613,42 @@ pub static LEVEL: &[u8; MAP_W * MAP_H] = &[
     2,
 ];
 
-/// Where this compact solo board's creeps come from, in tiles.
-pub const SPAWN_TILE: [f32; 2] = [5.0, 33.0];
+/// Where this compact solo board's creeps enter, in tiles.
+pub const SPAWN_TILE: [f32; 2] = [2.6, 20.8];
 
 /// The solo lap, in tiles.
 ///
-/// Green TD's extracted Red circuit was roughly sixty tiles across. That size
-/// made sense when eight Warcraft III players shared a 96-tile field, but it
-/// left a solo player scrolling through long stretches where nothing could
-/// interact. This keeps the reference circuit's eight-sided, closed geometry
-/// at just under half its linear size: one player can read the whole battle,
-/// towers cover meaningful sections, and a missed wave becomes pressure much
-/// sooner instead of taking minutes to come around.
+/// This is deliberately a small winding closed circuit, not a giant perimeter
+/// rectangle. Every lane fits in one fixed tactical view, with short grass
+/// islands for tower clusters instead of an empty lawn around the road. It
+/// remains closed because the game uses clockwise/counter-clockwise travel and
+/// escalating laps rather than a conventional exit/lives system.
 pub static LAP: &[[f32; 2]] = &[
-    [5.12, 32.82],
-    [19.18, 33.00],
-    [32.94, 32.78],
-    [33.00, 18.88],
-    [32.82, 5.12],
-    [19.18, 5.00],
-    [5.18, 5.22],
-    [5.00, 18.82],
+    [2.60, 20.80],
+    [8.80, 22.00],
+    [16.30, 21.40],
+    [21.60, 18.10],
+    [21.00, 15.30],
+    [16.40, 13.80],
+    [10.00, 14.50],
+    [5.00, 12.60],
+    [3.70, 10.00],
+    [6.70, 8.00],
+    [12.80, 8.70],
+    [18.40, 7.60],
+    [21.50, 5.20],
+    [19.30, 2.90],
+    [12.50, 3.80],
+    [6.30, 2.90],
+    [2.40, 5.60],
+    [1.80, 10.50],
+    [2.00, 16.60],
 ];
 
 /// The compact field one player defends: min x, min y, max x, max y.
-pub const ARENA: [f32; 4] = [0.0, 0.0, 38.0, 38.0];
+pub const ARENA: [f32; 4] = [0.0, 0.0, 24.0, 24.0];
 
-/// What the solo camera may pan across.
-pub const VIEW: [f32; 4] = ARENA;
+/// The fixed solo camera's frame, with a small border around the battlefield.
+// A tactical margin, not a decorative moat: this frames the edge vegetation
+// and gate while allowing the actual battlefield to occupy the square viewport.
+pub const VIEW: [f32; 4] = [-0.65, -0.65, 24.65, 24.65];

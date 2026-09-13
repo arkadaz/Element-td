@@ -15,6 +15,13 @@ use super::{models, theme};
 use crate::game::{BOSS_MENDER_RANGE, Creep};
 use crate::gfx::draw::{DrawList, Material, Shape, rgba};
 
+/// Campaign's fixed whole-board camera needs a little more silhouette than the
+/// extracted Legacy collision envelope supplied. This is render-only: route
+/// spacing, targeting and saved physical radii remain untouched, while a live
+/// C1 infantryman moves from a near-indistinguishable dash toward the brief's
+/// 14--22px torso/head target. Legacy keeps its historical render scale.
+const CAMPAIGN_RENDER_SCALE: f32 = 1.08;
+
 /// Draws one monster.
 ///
 /// `detail` says whether this instance may afford the fine parts of its model -
@@ -24,8 +31,21 @@ use crate::gfx::draw::{DrawList, Material, Shape, rgba};
 /// something four pixels wide. A wave of fifteen can, and should.
 pub fn draw(d: &mut DrawList, c: &Creep, detail: bool) {
     let skin = Skin::wearing(c.model, c.armour_type.color(), c.flash);
-    let r = c.radius;
-    let ground = if c.flying { c.height() - r * 1.2 } else { 0.21 };
+    let collision_r = c.radius;
+    // A source body has one authored silhouette, but an army of 200 exact
+    // clones reads like a spreadsheet even after its formation gains gaps.
+    // The uid is stable through a save/resume, so this is a small individual
+    // stature difference rather than a frame-to-frame pulse or an RNG-only
+    // cosmetic that would make a restored battle visibly rearrange itself.
+    let stature = 0.89 + (c.uid as f32 * 12.9898).sin().abs() * 0.19;
+    let r = collision_r
+        * if c.campaign_encounter > 0 {
+            CAMPAIGN_RENDER_SCALE
+        } else {
+            0.92
+        }
+        * stature;
+    let ground = if c.flying { c.height() - collision_r * 1.2 } else { 0.21 };
 
     // Contact shadow - a flat disc, so it reads as a shadow not a plate. A
     // flyer's is smaller and fainter, which is most of what tells you at a
@@ -42,16 +62,11 @@ pub fn draw(d: &mut DrawList, c: &Creep, detail: bool) {
         0.0,
     );
 
-    // Vanguards are a gameplay rule, not a hidden multiplier. Their restrained
-    // gold seal survives a crowded wave without bleaching the creature itself.
+    // Vanguards are a gameplay rule, not a hidden multiplier. A single gold
+    // crown above the silhouette stays readable in a horde; the former 24-piece
+    // ground ring under every Vanguard became visual static on hard waves.
     if c.elite {
-        d.ground_ring(
-            c.pos,
-            r * 1.55,
-            (r * 0.12).clamp(0.045, 0.085),
-            rgba([1.0, 0.67, 0.20], 0.82),
-            24,
-        );
+        elite_crown(d, c);
     }
 
     // A commander's repair field is a rule the player must be able to see.
@@ -62,43 +77,63 @@ pub fn draw(d: &mut DrawList, c: &Creep, detail: bool) {
         d.ground_ring(
             c.pos,
             BOSS_MENDER_RANGE,
-            0.065,
-            rgba([1.0, 0.66, 0.20], 0.38),
-            48,
-        );
-    }
-
-    // A survivor that completed the circuit is no longer ordinary pressure on
-    // Veteran or Nightmare: it has accelerated without minting extra bounty.
-    // A thin outer warning ring makes that escalation readable without tinting
-    // away the monster's armour identity. Red means three or more laps.
-    if c.laps > 0 && (detail || c.laps >= 3 || c.is_boss()) {
-        let warning = if c.laps >= 3 {
-            [1.0, 0.24, 0.15]
-        } else {
-            [1.0, 0.55, 0.14]
-        };
-        d.ground_ring(
-            c.pos,
-            r * (1.72 + c.laps.min(4) as f32 * 0.07),
-            (r * 0.07).clamp(0.03, 0.055),
-            rgba(warning, 0.78),
-            24,
+            0.042,
+            rgba([1.0, 0.66, 0.20], 0.26),
+            32,
         );
     }
 
     let pose = Pose {
         pos: c.pos,
         z: ground,
-        yaw: c.facing,
+        // A tiny deterministic gait turn breaks the perfectly parallel source
+        // mesh fence without lying about where a creature is travelling.  It
+        // is especially important for shield-and-spear silhouettes in a dense
+        // column, where exact yaw alignment otherwise becomes one blue stripe.
+        yaw: c.facing
+            + (c.bob * 2.17).sin() * 0.055
+            + (c.uid as f32 * 5.177).sin() * 0.030,
         // Collision remains generous for targeting; the render footprint is
         // smaller so the authored high-count waves do not become one mesh.
-        r: r * 0.92,
+        r,
         t: c.bob,
         walk: c.stun <= 0.0,
         lights: detail || c.is_boss() || c.elite,
     };
-    models::draw(d, c.model, &pose, &skin);
+    // Preserve a tiny stable difference in dusty cloth/armour value across a
+    // mass formation.  It is based only on the saved uid, never on frame time,
+    // so a restored battle keeps the same individual horde character instead
+    // of shimmer-recolouring while it walks.  Material ids still decide what
+    // is iron, hide, cloth or chitin; this only stops exact clones reading as
+    // a single blue/orange regiment at the full-board camera.
+    let weather = (c.uid as f32 * 17.371).sin();
+    let hue = (c.uid as f32 * 5.913).cos();
+    let tint = match c.model {
+        // The opening infantry keeps cold forged iron as its dominant part,
+        // but dusty dark cloth and leather temper the former blue-primary
+        // parade stripe. Bronze remains a tiny, readable local glint.
+        crate::game::defs::Model::Warrior => [
+            0.90 + weather * 0.055,
+            0.79 + hue * 0.045,
+            0.66 - weather * 0.045,
+            1.0,
+        ],
+        // The shell runner is a dark earth-and-iron counterpoint, not a pale
+        // grey clone. Its amber eyes remain the only bright local accent.
+        crate::game::defs::Model::Brute => [
+            0.74 + weather * 0.045,
+            0.72 + hue * 0.040,
+            0.57 - weather * 0.035,
+            1.0,
+        ],
+        _ => [
+            0.82 + weather * 0.055,
+            0.84 + hue * 0.045,
+            0.80 - weather * 0.040,
+            1.0,
+        ],
+    };
+    models::draw_with_tint(d, c.model, &pose, &skin, tint);
 
     status(d, c, detail);
     health_bar(d, c);
@@ -109,11 +144,15 @@ pub fn draw(d: &mut DrawList, c: &Creep, detail: bool) {
 fn status(d: &mut DrawList, c: &Creep, detail: bool) {
     let r = c.radius;
     let bz = c.height();
+    // A crowd is already communicating its pressure through movement and
+    // density. Reserve per-creep flashes, particles, and glows for the few
+    // units the player can act on individually, plus bosses and Vanguards.
+    let featured = detail || c.is_boss() || c.elite;
     // The model already flashes under damage. This short, tight energy bloom
     // adds contact at the exact body position so even a fast bolt feels like it
     // struck something rather than merely disappearing. Crowds suppress the
     // extra facets; commanders and Vanguards always keep the reaction.
-    if c.flash > 0.03 && (detail || c.is_boss() || c.elite) {
+    if c.flash > 0.03 && featured {
         let hit = c.flash.clamp(0.0, 1.0);
         let col = c.armour_type.color();
         d.glow(
@@ -125,7 +164,7 @@ fn status(d: &mut DrawList, c: &Creep, detail: bool) {
                 hit * 0.22,
             ),
         );
-        let facets = if c.is_boss() { 3 } else { 2 };
+        let facets = if c.is_boss() { 2 } else { 1 };
         for i in 0..facets {
             let a = c.bob * 1.7 + i as f32 * std::f32::consts::TAU / facets as f32;
             d.sphere_lit(
@@ -140,9 +179,9 @@ fn status(d: &mut DrawList, c: &Creep, detail: bool) {
             );
         }
     }
-    // At most one glow per monster, and a faint one. A wave is a hundred and
-    // fifty creeps, and a hundred and fifty additive sprites on top of each
-    // other is a white sheet rather than a status effect.
+    // At most one glow per featured monster. A wave is a hundred and fifty
+    // creeps, and a hundred and fifty additive sprites on top of each other is
+    // a white sheet rather than a status effect.
     let tint = if c.burn.t > 0.0 {
         Some([1.0, 0.45, 0.12])
     } else if c.poison.t > 0.0 {
@@ -152,10 +191,10 @@ fn status(d: &mut DrawList, c: &Creep, detail: bool) {
     } else {
         None
     };
-    if let Some(col) = tint {
-        d.glow([c.pos[0], c.pos[1], bz], r * 1.9, 0.7, rgba(col, 0.13));
+    if let Some(col) = tint.filter(|_| featured) {
+        d.glow([c.pos[0], c.pos[1], bz], r * 1.55, 0.6, rgba(col, 0.10));
     }
-    if detail || c.is_boss() || c.elite {
+    if featured {
         if c.burn.t > 0.0 {
             // Two little tongues crawl up the silhouette instead of painting
             // the entire creature orange.
@@ -211,7 +250,7 @@ fn status(d: &mut DrawList, c: &Creep, detail: bool) {
             }
         }
     }
-    if c.stun > 0.0 {
+    if c.stun > 0.0 && featured {
         // Roots: a ring of sparks spinning overhead.
         for i in 0..3 {
             let a = c.bob * 3.0 + i as f32 * 2.094;
@@ -229,6 +268,22 @@ fn status(d: &mut DrawList, c: &Creep, detail: bool) {
     }
 }
 
+/// One compact marker is enough to identify a Vanguard in a crowded lane.
+/// It is deliberately above the body rather than on the road, so it neither
+/// competes with a selected tower's range indicator nor adds another circle to
+/// the combat floor.
+fn elite_crown(d: &mut DrawList, c: &Creep) {
+    let r = c.radius;
+    d.pyramid(
+        [c.pos[0], c.pos[1], c.height() + r * 0.92],
+        (r * 0.46).clamp(0.16, 0.30),
+        (r * 0.30).clamp(0.10, 0.20),
+        c.bob * 0.35,
+        rgba([1.0, 0.69, 0.22], 0.94),
+        Material::GEM,
+    );
+}
+
 /// A health bar, on the few monsters it tells you something about.
 ///
 /// Warcraft III does not float a bar over every unit on the field, and the
@@ -238,14 +293,14 @@ fn status(d: &mut DrawList, c: &Creep, detail: bool) {
 /// them entirely was the single largest improvement to the picture in this
 /// whole pass.
 ///
-/// So the bar earns its place. A boss always has one, because a boss is the one
-/// monster a player tracks individually. Everything else gets one only once it
-/// is under half, which is the point the number changes a decision - whether to
-/// let it round again or spend on another tower - and by then only a handful of
-/// the wave qualifies at any instant.
+/// So the bar earns its place. A damaged boss has one, because a boss is the
+/// one monster a player tracks individually. Everything else gets one only
+/// once it is under half, which is the point the number changes a decision -
+/// whether to let it round again or spend on another tower - and by then only a
+/// handful of the wave qualifies at any instant.
 fn health_bar(d: &mut DrawList, c: &Creep) {
     let hp = c.hp_frac();
-    if hp >= 0.999 || (hp > 0.5 && !c.is_boss() && !c.elite && c.laps == 0) {
+    if hp >= 0.999 || (hp > 0.5 && !c.is_boss()) {
         return;
     }
     let r = c.radius;

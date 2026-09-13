@@ -156,7 +156,7 @@ def waypoints():
     # The script lives at Scripts\war3map.j inside the archive; there is a
     # stub at the root that reads back as nothing.
     a = mpq.Archive(MAP)
-    raw = a.read('Scripts\war3map.j') or a.read('war3map.j')
+    raw = a.read('Scripts\\war3map.j') or a.read('war3map.j')
     if not raw:
         raise SystemExit('the archive has no trigger script - the route cannot be read')
     text = raw.decode('latin-1', 'replace')
@@ -231,14 +231,41 @@ VIEW = (
 # is the whole field the ring encloses plus the margin outside it.
 ARENA = VIEW
 
+# ---------------------------------------------------------------- solo board
+#
+# The extracted terrain remains useful source material, but the original Red
+# ring is much too sparse for a one-player browser board.  Keep the multiplayer
+# route above as extraction data and emit this compact, winding closed circuit
+# for solo play.  It stays closed so the port's clockwise/counter-clockwise
+# lanes and escalating-lap pressure still mean the same thing.
+SOLO_LAP = [
+    # One continuous woodland trail.  The previous lap doubled back through
+    # its own lower sweep: that made the material look like a tangle of brown
+    # tape rather than a route through a real place.  These broad, separated
+    # bends form a simple non-crossing circuit with usable meadow islands
+    # between them.  A player can read every approach at a glance, while the
+    # slight offsets keep it from becoming an E-shaped spreadsheet maze.
+    (2.6, 20.8), (8.8, 22.0), (16.3, 21.4), (21.6, 18.1),
+    (21.0, 15.3), (16.4, 13.8), (10.0, 14.5), (5.0, 12.6),
+    (3.7, 10.0), (6.7, 8.0), (12.8, 8.7), (18.4, 7.6),
+    (21.5, 5.2), (19.3, 2.9), (12.5, 3.8), (6.3, 2.9),
+    (2.4, 5.6), (1.8, 10.5), (2.0, 16.6),
+]
+SOLO_ARENA = (0.0, 0.0, 24.0, 24.0)
+# Keep just enough exterior turf for the natural frame without shrinking the
+# actionable square into a decorative diorama.
+SOLO_VIEW = (-0.65, -0.65, 24.65, 24.65)
+SOLO_SPAWN = SOLO_LAP[0]
+
 
 def emit():
     out = []
     w = out.append
-    w('//! The Green Circle TD terrain, and the lane one player defends.')
+    w('//! Green Circle TD terrain, plus the compact solo lane this port uses.')
     w('//!')
     w('//! **Generated from `GREEN TD 9.3c PEIN.w3x` by `tools/emit_map.py` - do')
-    w('//! not hand-edit.**')
+    w('//! not hand-edit.**  The terrain is extracted; the solo circuit is')
+    w('//! the deliberate `SOLO_LAP` override in that emitter.')
     w('//!')
     w('//! `TEXTURE` is the map\'s own ground-texture grid, one byte a tile, and')
     w('//! it is the level: the corridors are painted in rock and everything else')
@@ -264,34 +291,30 @@ def emit():
         w('    ' + ''.join('%d,' % LVL[y * W + x] for x in range(W)))
     w('];')
     w('')
-    w('/// Where the Red player\'s creeps come from, in tiles.')
-    w('pub const SPAWN_TILE: [f32; 2] = [%.1f, %.1f];' % SPAWN)
+    w('/// Where compact solo-board creeps enter, in tiles.')
+    w('pub const SPAWN_TILE: [f32; 2] = [%.1f, %.1f];' % SOLO_SPAWN)
     w('')
-    w('/// The lap, in tiles.')
+    w('/// The compact solo lap, in tiles.')
     w('///')
-    w('/// The map orders Red\'s creeps along four regions and then shuttles them')
-    w('/// between the last two forever, so the "lap" is a corridor walked down')
-    w('/// and back. Written as a closed loop down one half of the corridor and')
-    w('/// up the other, which is how two streams pass in a three-tile passage.')
+    w('/// This deliberately winds through the board rather than tracing a giant')
+    w('/// outer rectangle. It stays closed so split-direction, escalating-lap')
+    w('/// gameplay remains intact.')
     w('pub static LAP: &[[f32; 2]] = &[')
-    for x, y in LAP:
+    for x, y in SOLO_LAP:
         w('    [%.2f, %.2f],' % (x, y))
     w('];')
     w('')
-    w('/// The quarter of the map this player defends: min x, min y, max x, max y,')
-    w('/// in tiles. The rest of the field belongs to the other seven players and')
-    w('/// is drawn but never built on.')
-    w('pub const ARENA: [f32; 4] = [%.1f, %.1f, %.1f, %.1f];' % ARENA)
+    w('/// The compact field one player defends: min x, min y, max x, max y.')
+    w('pub const ARENA: [f32; 4] = [%.1f, %.1f, %.1f, %.1f];' % SOLO_ARENA)
     w('')
-    w('/// What the camera frames: the lane and the ground a tower can reach from')
-    w('/// it. Tighter than the arena, because Warcraft III sits about twenty-five')
-    w('/// tiles from edge to edge and the whole arena is sixty.')
-    w('pub const VIEW: [f32; 4] = [%.1f, %.1f, %.1f, %.1f];' % VIEW)
+    w('/// What the solo camera may pan across.')
+    w('pub const VIEW: [f32; 4] = [%.1f, %.1f, %.1f, %.1f];' % SOLO_VIEW)
     open('../src/game/greentd_map.rs', 'w', newline='\n').write('\n'.join(out) + '\n')
     print('map: %dx%d tiles, %d corridor tiles' % (W, H, sum(1 for t in TEX if t == ROCK)))
     print('spawn %s  entry %s  junction %s  far %s' % (SPAWN, ENTRY, JUNCTION, FAR))
-    print('lap %s' % (LAP,))
-    print('arena %s' % (ARENA,))
+    print('source lap %s' % (LAP,))
+    print('solo lap %s' % (SOLO_LAP,))
+    print('solo arena %s' % (SOLO_ARENA,))
 
 
 if __name__ == '__main__':

@@ -8,7 +8,8 @@ change it is to edit the map and regenerate.
 | I want to... | Do this |
 | --- | --- |
 | Retune a tower, a wave, an ability, the upgrade graph | Edit the map, then `python extract.py && python emit.py` in `tools/` |
-| Redraw the level | Edit the map's terrain, then `python emit_map.py` |
+| Redraw the extracted terrain | Edit the map's terrain, then `python emit_map.py` |
+| Change the compact solo route | Edit `SOLO_LAP` in `tools/emit_map.py`, then regenerate |
 | Change the attack-versus-armour table | Edit `war3mapMisc.txt` in the map, then regenerate |
 | Support a map version with new fields | `tools/emit.py`, and the row types in `game/greentd_types.rs` |
 | Change what a tower or a monster looks like | `view/models.rs` |
@@ -21,7 +22,9 @@ change it is to edit the map and regenerate.
 The two generated modules - `game/greentd.rs` and `game/greentd_map.rs` - are
 never hand-edited. They carry a header saying so. If you find yourself wanting
 to change a number in one of them, the change belongs in the map or in the
-emitter that reads it.
+emitter that reads it. The compact route is intentional port configuration in
+`emit_map.py`'s `SOLO_LAP`, rather than a claim that the source map's outer
+ring is a good one-player layout.
 
 ---
 
@@ -72,9 +75,9 @@ two tests that enforce them:
 ## The board
 
 `game/board.rs` builds everything from `greentd_map.rs`: the lane polyline from
-`LAP`, then 56 protected inner/outer shoulder pads sampled beside useful parts
-of that lane. There is no runtime waypoint list to edit. `VIEW` is what the
-camera may pan across and `ARENA` bounds the compact solo adaptation.
+`LAP`, then 164 tile-sized shoulder sockets beside useful parts of that lane.
+There is no runtime waypoint list to edit. `VIEW` is what the fixed gameplay
+camera frames and `ARENA` bounds the compact solo adaptation.
 
 ---
 

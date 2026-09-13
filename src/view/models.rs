@@ -559,13 +559,44 @@ fn baked(m: Model) -> Option<usize> {
     table[i]
 }
 
-/// Scale applied to the baked model envelope, in units of `Pose::r`.
-///
-/// Upright figures are normalised to one unit tall; wide aircraft and ships are
-/// footprint-limited and therefore shorter. A creep's `r` is its collision
-/// radius, and a figure roughly two and a half radii tall is what the generated
-/// builds were already drawing.
-const BAKED_HEIGHT: f32 = 2.45;
+/// Uniform scale used by the older imported meshes.  Their authored envelope
+/// is deliberately footprint-limited (ships, rotors and wings are not people),
+/// so a single uniform transform remains the least surprising fallback.
+const BAKED_HEIGHT: f32 = 5.00;
+
+/// The two opening-Campaign authored bodies get an intentionally different
+/// transform from generic imported props. The fixed combat camera is high and
+/// tactical, which means a physically human-height mesh can be twenty pixels
+/// wide yet project its torso and head to only six pixels vertically. The first
+/// correction solved that by stretching height far beyond width; on a real board
+/// that made the figures look like marching pins. Keep the approved projected
+/// 14--22px read, but spend more of it in a broad shield/shoulder silhouette and
+/// less in a vertical toy-pillar. This is render-only: route spacing, targeting
+/// and save radii remain simulation values.
+// Keep a whole-body silhouette at overview scale, but leave actual daylight
+// between shoulders in a four-column Brood Tide. The prior 4.08 transform
+// was wide enough for adjacent saved lane positions to overlap, recreating a
+// single blue wall despite the formation's physical weave.
+const CAMPAIGN_BODY_FOOTPRINT: f32 = 3.45;
+// The lower, more oblique overview makes the same authored model project much
+// taller than it did at the former near-top-down pitch. Keep the whole-board
+// horde in the documented 14--22px readability band without changing its
+// simulation footprint, collision radius, target point, or saved position.
+const CAMPAIGN_BODY_HEIGHT: f32 = 4.38;
+
+fn baked_scale(m: Model, r: f32) -> [f32; 3] {
+    match m {
+        Model::Warrior | Model::Brute => [
+            r * CAMPAIGN_BODY_FOOTPRINT,
+            r * CAMPAIGN_BODY_FOOTPRINT,
+            r * CAMPAIGN_BODY_HEIGHT,
+        ],
+        _ => {
+            let h = r * BAKED_HEIGHT;
+            [h, h, h]
+        }
+    }
+}
 
 /// Draw a named mesh that is not a Warcraft III archetype, such as one of the
 /// CC0 Quaternius weapon turrets baked into the same runtime asset.
@@ -583,6 +614,56 @@ pub fn draw_downloaded(
     mat: Material,
     em: f32,
 ) -> bool {
+    draw_downloaded_animated(d, name, pos, scale, yaw, color, mat, em, 0.0)
+}
+
+/// Draw a named baked asset with its authored second pose.  Imported towers
+/// use this for recoil while creatures use [`draw`]'s staggered walk time.
+/// Keeping it alongside the rigid helper makes animation opt-in for props and
+/// prevents a rock or menu icon from acquiring motion accidentally.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_downloaded_animated(
+    d: &mut DrawList,
+    name: &str,
+    pos: [f32; 3],
+    scale: f32,
+    yaw: f32,
+    color: Color,
+    mat: Material,
+    em: f32,
+    anim: f32,
+) -> bool {
+    draw_downloaded_animated_scaled(
+        d,
+        name,
+        pos,
+        [scale, scale, scale],
+        yaw,
+        color,
+        mat,
+        em,
+        anim,
+    )
+}
+
+/// As [`draw_downloaded_animated`], but preserves a deliberately authored
+/// non-uniform instance envelope. Tower sources are broad timber/iron
+/// constructions with a short normalized height; rendering them uniformly at
+/// a whole-board camera reduced them to bright plinths. This keeps the baked
+/// mesh, its UVs, materials and second pose intact while giving its height the
+/// same readable construction scale as its projectile muzzle profile.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_downloaded_animated_scaled(
+    d: &mut DrawList,
+    name: &str,
+    pos: [f32; 3],
+    scale: [f32; 3],
+    yaw: f32,
+    color: Color,
+    mat: Material,
+    em: f32,
+    anim: f32,
+) -> bool {
     let Some((_, slot)) = crate::gfx::mesh::model_slots()
         .iter()
         .find(|(asset, _)| asset == name)
@@ -592,10 +673,10 @@ pub fn draw_downloaded(
     d.model(
         *slot,
         pos,
-        [scale, scale, scale],
+        scale,
         yaw,
         0.0,
-        0.0,
+        anim,
         color,
         mat,
         em,
@@ -603,15 +684,21 @@ pub fn draw_downloaded(
     true
 }
 
-pub fn draw(d: &mut DrawList, m: Model, p: &Pose, s: &Skin) {
+/// Draw a gameplay model with its authored materials and a stable, per-unit
+/// daylight variation.  A thousand identical source meshes in the same cool
+/// blue paint become a regimented toy wall even when their lane positions are
+/// correctly staggered.  This tint is intentionally subtle and multiplicative:
+/// it preserves the separate iron, cloth, hide and bronze vertices rather than
+/// recolouring a creature into a UI faction colour.
+pub fn draw_with_tint(d: &mut DrawList, m: Model, p: &Pose, s: &Skin, tint: Color) {
     if let Some(slot) = baked(m) {
-        let h = p.r * BAKED_HEIGHT;
         d.model(
             slot,
             [p.pos[0], p.pos[1], p.z],
-            // The mesh stands on z = 0 and is one unit tall, so a uniform scale
-            // is the whole transform.
-            [h, h, h],
+            // The mesh stands on z = 0 and is one unit tall.  The two live
+            // Campaign body families use a slender, elevated tactical transform
+            // (see `baked_scale`); every other baked asset remains uniform.
+            baked_scale(m, p.r),
             // The downloaded glTF figures face local -Y after the bake's
             // Y-up to Z-up conversion. The simulation's zero heading is +X,
             // so a quarter turn aligns every creature's authored front with
@@ -626,13 +713,24 @@ pub fn draw(d: &mut DrawList, m: Model, p: &Pose, s: &Skin) {
             // Preserve the author's vertex colours, with a warm, short hit
             // flash carried by the instance. The old all-white tint meant
             // downloaded models never reacted when damaged or upgraded.
-            [1.0, 1.0 - s.flash * 0.30, 1.0 - s.flash * 0.40, 1.0],
+            [
+                tint[0],
+                tint[1] * (1.0 - s.flash * 0.30),
+                tint[2] * (1.0 - s.flash * 0.40),
+                tint[3],
+            ],
             baked_material(m),
             0.0,
         );
         return;
     }
     draw_generated(d, m, p, s)
+}
+
+/// Default authored-material draw used by tower fallbacks and inspections.
+/// Campaign creeps call [`draw_with_tint`] with their stable formation value.
+pub fn draw(d: &mut DrawList, m: Model, p: &Pose, s: &Skin) {
+    draw_with_tint(d, m, p, s, [1.0, 1.0, 1.0, 1.0]);
 }
 
 fn baked_material(m: Model) -> Material {
@@ -4762,4 +4860,39 @@ fn mix4(a: Color, b: Color, k: f32) -> Color {
         a[2] + (b[2] - a[2]) * k,
         a[3],
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The fixed full-board camera is a contract: a source mesh that happens
+/// to look good in a close asset render is not good enough if an ordinary
+/// live creature collapses below a readable torso-and-head silhouette.
+    #[test]
+    fn ordinary_campaign_warrior_projects_to_a_readable_whole_board_height() {
+        let camera = crate::play_camera(1.0);
+        // C1's real adapter resolves an untraited body to Warrior, at scale
+        // 0.94, and `monsters::draw` deliberately lifts Campaign's render
+        // footprint to 108% of collision radius. Measure its normalised mesh
+        // top in a 784px board
+        // rather than asserting an arbitrary world-space constant.
+        let r = Model::Warrior.radius() * 0.94 * 1.08;
+        let base = camera
+            .to_screen(crate::math::v3(12.0, 12.0, 0.21))
+            .expect("centre of fixed board is visible");
+        let top = camera
+            .to_screen(crate::math::v3(
+                12.0,
+                12.0,
+                0.21 + r * CAMPAIGN_BODY_HEIGHT,
+            ))
+            .expect("warrior top is visible");
+        let height_css = (base[1] - top[1]).abs() * 784.0;
+        println!("C1_WARRIOR_PROJECTED_HEIGHT_AT_{}DEG={height_css:.2}px", crate::PLAY_CAM_PITCH_DEG);
+        assert!(
+            (14.0..=22.0).contains(&height_css),
+            "ordinary warrior projects to {height_css:.2}px, outside the 14--22px whole-board target"
+        );
+    }
 }

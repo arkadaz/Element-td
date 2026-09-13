@@ -20,37 +20,44 @@ use crate::game::greentd_map::ARENA;
 use crate::game::{Game, Phase};
 use crate::gfx::draw::{Color, DrawList, GroundTex, Material, Shape, boost, mix, rgba};
 
-/// The map's own palette: Warcraft III's Lordaeron Summer tileset, in
-/// daylight.
+/// The map's own palette: a sun-warmed moss field with packed tan earth where
+/// the creeps have worn a route through it.
 ///
 /// The board used to be lit like a night level - a blue-grey field under a
 /// dark sky - and it looked nothing like the map it is a port of. Green Circle
-/// TD is a bright green field with tan dirt corridors cut through it, and these
-/// are those colours: `Agrs` and `Agrd` for the turf, `Adrt` for the corridors,
-/// `Arck` for the stone. Albedo values, so the lighting can do its work.
+/// TD wants a readable green field with a warm dirt route, rather than cool
+/// stone lanes competing with the tower silhouettes. These are albedo values,
+/// so the lighting can still do its work.
 pub mod theme {
     use super::Color;
-    /// `Agrs`, the lit grass. Mossy, not lime.
-    pub const GRASS_A: [f32; 3] = [0.050, 0.084, 0.043];
-    /// `Agrd`, the darker patches the tileset mixes through it.
-    pub const GRASS_B: [f32; 3] = [0.034, 0.060, 0.036];
-    pub const GRASS_EDGE: [f32; 3] = [0.024, 0.045, 0.030];
-    /// Corner markers, lit only while you are holding a tower you can afford.
-    pub const PAD_ARM: [f32; 3] = [0.40, 0.78, 0.95];
+    /// Lit moss: warm enough to feel like a field, dark enough that units and
+    /// cards remain the high-contrast information.
+    // The field stays dark enough to frame the battle, but its midtone must
+    // survive the browser's filmic output and a whole-board camera. The
+    // former near-black albedo swallowed roots, road shoulders and contact
+    // shadows into one muddy green plane on real mobile/ultrawide captures.
+    pub const GRASS_A: [f32; 3] = [0.038, 0.052, 0.016];
+    /// The gentle low-frequency turf variation under the grass texture.
+    pub const GRASS_B: [f32; 3] = [0.015, 0.027, 0.007];
+    pub const GRASS_EDGE: [f32; 3] = [0.007, 0.014, 0.004];
+    /// Full-tile outline, lit while you are holding a tower you can afford.
+    pub const PAD_ARM: [f32; 3] = [0.33, 0.40, 0.16];
     /// "Your wallet is the problem", not "this plot is the problem".
     pub const PAD_BROKE: [f32; 3] = [0.85, 0.62, 0.24];
-    /// `Arck`, the corridors: cool worn rock like the reference lane, not the
-    /// tan plank-like surface the first standalone pass produced.
-    pub const ROAD: [f32; 3] = [0.118, 0.122, 0.112];
-    pub const ROAD_EDGE: [f32; 3] = [0.052, 0.058, 0.054];
+    /// Damp travelled soil. The authored earth material supplies stone, root
+    /// and moss aggregate; this measured neutral tint keeps it distinct from
+    /// both dark grass and hostile formations without the former orange-ribbon
+    /// look at browser exposure.
+    pub const ROAD: [f32; 3] = [0.052, 0.038, 0.020];
+    /// Flattened grass and damp soil just outside the travelled surface.
+    pub const ROAD_SHOULDER: [f32; 3] = [0.014, 0.024, 0.006];
     /// `Arck`.
-    pub const STONE: [f32; 3] = [0.255, 0.230, 0.184];
-    pub const STONE_DARK: [f32; 3] = [0.125, 0.111, 0.091];
-    pub const WALL: [f32; 3] = [0.094, 0.088, 0.074];
+    pub const STONE: [f32; 3] = [0.105, 0.112, 0.092];
+    pub const STONE_DARK: [f32; 3] = [0.035, 0.041, 0.031];
     pub const HP_BACK: Color = [0.02, 0.02, 0.02, 0.95];
     pub const HP_FILL: Color = [0.30, 0.86, 0.26, 1.0];
     pub const HP_LOW: Color = [0.95, 0.28, 0.20, 1.0];
-    pub const GHOST_OK: [f32; 3] = [0.42, 0.85, 1.00];
+    pub const GHOST_OK: [f32; 3] = [0.60, 0.78, 0.34];
     pub const GHOST_BAD: [f32; 3] = [1.00, 0.32, 0.38];
     pub const SPAWN: [f32; 3] = [1.00, 0.30, 0.36];
 }
@@ -85,10 +92,51 @@ pub fn build_static(g: &Game, decor: &Decor) -> Statics {
     let mut casters = DrawList::default();
     let mut flat = DrawList::default();
     terrain(g, &mut flat, &mut casters);
-    road(g, &mut flat);
+    road(g, &mut flat, &mut casters);
     gates_static(g, &mut casters);
     casters.append_solids(&decor.statics);
     Statics { casters, flat }
+}
+
+/// A flat, clipped corner treatment used only for local, contextual placement
+/// hints.  Persistent marks on every legal tile turn a living field into graph
+/// paper, so idle terrain deliberately carries no socket lattice at all.
+fn corner_marks(d: &mut DrawList, p: [f32; 2], col: Color) {
+    const EDGE: f32 = 0.445;
+    const LEG: f32 = 0.13;
+    const WIDTH: f32 = 0.016;
+    for (sx, sy) in [(-1.0f32, -1.0), (-1.0, 1.0), (1.0, -1.0), (1.0, 1.0)] {
+        // Horizontal leg, then vertical leg: together they read as a corner
+        // rather than a tiny tile or a permanent UI button.
+        d.shape(
+            Shape::Quad,
+            [
+                p[0] + sx * (EDGE - LEG * 0.5),
+                p[1] + sy * EDGE,
+                GROUND_Z + 0.010,
+            ],
+            [LEG, WIDTH, 1.0],
+            0.0,
+            0.0,
+            col,
+            Material::EARTH,
+            0.0,
+        );
+        d.shape(
+            Shape::Quad,
+            [
+                p[0] + sx * EDGE,
+                p[1] + sy * (EDGE - LEG * 0.5),
+                GROUND_Z + 0.011,
+            ],
+            [WIDTH, LEG, 1.0],
+            0.0,
+            0.0,
+            col,
+            Material::EARTH,
+            0.0,
+        );
+    }
 }
 
 /// The arena: min x, min y, max x, max y in tiles, with a tile of margin so the
@@ -102,203 +150,299 @@ fn field() -> (i32, i32, i32, i32) {
     )
 }
 
-fn terrain(g: &Game, d: &mut DrawList, tall: &mut DrawList) {
+fn terrain(_g: &Game, d: &mut DrawList, _tall: &mut DrawList) {
     let (x0, y0, x1, y1) = field();
 
-    // One flat plane under everything, so no gap between tiles can ever show
-    // the sky through the floor.
+    // A continuous moss field, not one quad per logical tile.  The gameplay
+    // grid remains fixed in the simulation, but rendering it tile-by-tile made
+    // the lawn read as a bright spreadsheet before a single tower was built.
+    // This broad physical underlay also continues well beyond the tactical
+    // square. A tilted full-board camera sees farther ground at its top edge
+    // than the fitted square's logical boundary; the old sixteen-tile apron
+    // ended inside that frustum and exposed a blue "missing world" strip.
+    // The larger slab is still one real terrain mesh, not a backdrop or a
+    // cropped camera, and makes the field read as a meadow continuing beyond
+    // the playable arena.
     let (l, b0, r, t) = (x0 as f32, y0 as f32, x1 as f32 + 1.0, y1 as f32 + 1.0);
+    let (w, h) = (r - l, t - b0);
     d.slab_mat(
         [(l + r) * 0.5, (b0 + t) * 0.5],
-        [r - l, t - b0],
-        GROUND_Z - 0.02,
-        0.5,
+        // A very wide camera needs more than the former thirty-two-tile
+        // overhang at its perspective corners.  This is continuous terrain
+        // geometry, not a painted backdrop: it removes the exposed blue
+        // clear colour while the peripheral woodland gives that outer land a
+        // tangible, non-buildable boundary.
+        [w + 224.0, h + 224.0],
+        GROUND_Z - 0.07,
+        0.20,
         rgba(theme::GRASS_EDGE, 1.0),
         Material::EARTH,
     );
-
-    for ty in y0..=y1 {
-        for tx in x0..=x1 {
-            let p = [tx as f32 + 0.5, ty as f32 + 0.5];
-            // Follow the compact, rounded runtime path rather than the
-            // eight-player corridor pixels still present in the source map.
-            let corridor = g.board.dist_to_road(p) <= ROAD_HALF + 0.48;
-
-            // Terrain is drawn as **flat quads**, not as boxes.
-            //
-            // The box mesh is chamfered by twelve percent on every edge - which
-            // is right for a crate and wrong for a floor. Fifteen hundred of
-            // them side by side gave the field a quilted, corduroy surface with
-            // a bright bevel around every single tile, and that, more than any
-            // colour, is what stopped the board reading as ground.
-            let (z, base) = if corridor {
-                (GROUND_Z - 0.012, theme::ROAD)
-            } else {
-                // Turf in patches rather than per-tile noise. White noise on a
-                // grid reads as graph paper; a low-frequency blend reads as a
-                // field, which is what Warcraft III's tilesets do with four
-                // variants of one texture.
-                // Barely any. This used to swing the whole way from GRASS_A to
-                // GRASS_EDGE in three-tile blocks, which was the right call
-                // when a tile was one flat colour and is the wrong one now
-                // there is a grass texture underneath: the blocks read as a
-                // chequerboard laid over the grain. The texture is the
-                // variation; this is only enough to stop it tiling visibly.
-                // Keep the base continuous across tiles. Large per-tile colour
-                // blocks were visible as rectangles from the tactical camera;
-                // the shader supplies broad, world-space variation instead.
-                let c = mix(theme::GRASS_A, theme::GRASS_B, 0.18);
-                (GROUND_Z, c)
-            };
-            // The tile's colour still comes from the palette measured against
-            // a Warcraft III screenshot; the texture multiplies into it. Doing
-            // it that way keeps the field the right green - a photographic
-            // grass albedo on its own is far yellower than Lordaeron Summer -
-            // while giving it the grain a flat fill was missing.
-            d.ground(
-                if corridor {
-                    GroundTex::Stone
-                } else {
-                    GroundTex::Grass
-                },
-                [p[0], p[1], z],
-                [1.0, 1.0],
-                rgba(base, 1.0),
-                Material::EARTH,
-            );
-
-            // The edge where turf meets corridor, and only there: a couple of
-            // hundred strips rather than a bevel on every tile in the field.
-            if corridor {
-                for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
-                    let neighbour = [(tx + dx) as f32 + 0.5, (ty + dy) as f32 + 0.5];
-                    if g.board.dist_to_road(neighbour) <= ROAD_HALF + 0.48 {
-                        continue;
-                    }
-                    d.shape(
-                        Shape::Quad,
-                        [p[0] + dx as f32 * 0.44, p[1] + dy as f32 * 0.44, z + 0.004],
-                        [
-                            if dx == 0 { 1.0 } else { 0.14 },
-                            if dy == 0 { 1.0 } else { 0.14 },
-                            1.0,
-                        ],
-                        0.0,
-                        0.0,
-                        rgba(theme::ROAD_EDGE, 1.0),
-                        Material::EARTH,
-                        0.0,
-                    );
-                }
-                continue;
-            }
-        }
-    }
-
-    // A low wall around the plot, so the board reads as a solid object: a
-    // rusticated base, a chamfered course, then a rounded coping.
-    let (fx0, fy0, fx1, fy1) = field();
-    let (l, b0, r, t) = (fx0 as f32, fy0 as f32, fx1 as f32 + 1.0, fy1 as f32 + 1.0);
-    let (w, h) = (r - l, t - b0);
-    let (mx, my) = ((l + r) * 0.5, (b0 + t) * 0.5);
-    let wall = rgba(theme::WALL, 1.0);
-    let cap = rgba(theme::STONE, 1.0);
-    for (cx, cy, sx, sy) in [
-        (mx, b0 - 0.4, w + 1.6, 0.8),
-        (mx, t + 0.4, w + 1.6, 0.8),
-        (l - 0.4, my, 0.8, h + 1.6),
-        (r + 0.4, my, 0.8, h + 1.6),
-    ] {
-        tall.cube_mat([cx, cy, 0.20], [sx, sy, 0.56], 0.0, wall, Material::STONE);
-        tall.cube_mat(
-            [cx, cy, 0.50],
-            [sx * 0.99, sy * 0.99, 0.10],
-            0.0,
-            cap,
-            Material::STONE,
-        );
-        // Coping: a capsule laid along the wall gives it a rounded top edge.
-        let along = sx > sy;
-        let (ax, ay, bx, by) = if along {
-            (cx - sx * 0.5, cy, cx + sx * 0.5, cy)
-        } else {
-            (cx, cy - sy * 0.5, cx, cy + sy * 0.5)
-        };
-        tall.link(
-            Shape::Capsule,
-            [ax, ay, 0.57],
-            [bx, by, 0.57],
-            if along { sy * 0.72 } else { sx * 0.72 },
-            cap,
-            Material::STONE,
-            0.0,
-        );
-    }
-    // Corner towers: a stone drum with a conical roof, so the board has corners
-    // you can actually see rather than four more cubes.
-    for (cx, cy) in [
-        (l - 0.4, b0 - 0.4),
-        (r + 0.4, b0 - 0.4),
-        (l - 0.4, t + 0.4),
-        (r + 0.4, t + 0.4),
-    ] {
-        tall.cylinder(
-            [cx, cy, 0.45],
-            1.10,
-            1.10,
-            0.0,
-            rgba(theme::STONE_DARK, 1.0),
-            Material::STONE,
-        );
-        tall.cylinder([cx, cy, 1.03], 1.24, 0.14, 0.0, cap, Material::STONE);
-        tall.cone(
-            [cx, cy, 1.38],
-            1.30,
-            0.62,
-            0.0,
-            rgba(theme::STONE_DARK, 1.0),
-            Material::STONE,
-        );
-        tall.sphere([cx, cy, 1.74], 0.24, cap, Material::METAL);
-    }
-    let _ = theme::GRASS_EDGE;
+    d.ground(
+        // The meadow uses the original moss/soil material at a deliberately
+        // low world repeat.  It supplies a real broad turf response under the
+        // separately modelled roots, shrubs and tower shadows rather than a
+        // uniform dark-green plane or a texture-only substitute for geometry.
+        GroundTex::Mosswatch,
+        [(l + r) * 0.5, (b0 + t) * 0.5, GROUND_Z],
+        [w + 224.0, h + 224.0],
+        rgba(mix(theme::GRASS_A, theme::GRASS_B, 0.22), 1.0),
+        Material::EARTH,
+    );
 }
 
-fn road(g: &Game, d: &mut DrawList) {
-    // The textured corridor tiles are the road surface. Continuous low kerbs
-    // read cleanly from the tactical camera. The former
-    // chain of hundreds of spheres looked like beads and added noise precisely
-    // where units need a crisp silhouette.
-    for w in g.board.path.windows(2) {
-        let (a, b) = (w[0], w[1]);
+/// A continuous, rounded soil route constructed from the same rounded
+/// polyline the simulation uses.  The old terrain pass inferred a road from
+/// tile centres; its stair-step edge and every-tile seams are why the lane
+/// read as a mustard maze.  These overlapping oriented surfaces retain the
+/// fixed game lane while giving it shoulders and actual grass geometry at the
+/// edge. It intentionally has no parallel rut decals: those read as a race
+/// track at overview scale rather than a worn woodland route.
+fn road(g: &Game, d: &mut DrawList, tall: &mut DrawList) {
+    // The collision corridor remains the authoritative simulation shape.  The
+    // visible packed-earth strip is fractionally wider so a mass horde belongs
+    // *in* the road rather than marching down a narrow dark slot, while the
+    // moss shoulder stops well before the first legal build plots.
+    // The collision lane is 1.24 tiles wide.  The former 1.48-tile visible
+    // dirt plus a broad feather made the complete board read as a brown ribbon
+    // diagram.  Keep the travelled centre fully grounded, then let irregular
+    // physical verge growth do the transition instead of an ever-wider tint.
+    const SURFACE_HALF: f32 = ROAD_HALF - 0.075;
+    const SHOULDER_HALF: f32 = ROAD_HALF + 0.20;
+    const FEATHER_HALF: f32 = ROAD_HALF + 0.48;
+    for segment in g.board.path.windows(2) {
+        let (a, b) = (segment[0], segment[1]);
         let dx = b[0] - a[0];
         let dy = b[1] - a[1];
         let len = (dx * dx + dy * dy).sqrt();
-        if len < 1e-4 {
+        if len < 0.015 {
             continue;
         }
-        let side = [-dy / len, dx / len];
-        for s in [-1.0f32, 1.0] {
-            let off = ROAD_HALF + 0.18;
-            d.link(
-                Shape::Capsule,
-                [a[0] + side[0] * s * off, a[1] + side[1] * s * off, 0.20],
-                [b[0] + side[0] * s * off, b[1] + side[1] * s * off, 0.20],
-                0.13,
-                rgba(mix(theme::ROAD_EDGE, theme::STONE, 0.34), 1.0),
-                Material::STONE,
+        let yaw = dy.atan2(dx);
+        let centre = [(a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5];
+
+        // Three restrained alpha layers create a moss-to-packed-earth
+        // transition. They are still actual route geometry and stay fully
+        // deterministic for picking, but no longer form a hard green/brown
+        // cutout around every lane.
+        d.ground_oriented(
+            // Match the broad meadow's real Mosswatch turf at the road edge.
+            // The generic bright grass layer made the feather read as a
+            // separate painted stripe once the field's material response was
+            // restored.
+            GroundTex::Mosswatch,
+            [centre[0], centre[1], GROUND_Z + 0.002],
+            [len + 0.22, FEATHER_HALF * 2.0],
+            yaw,
+            rgba(theme::ROAD_SHOULDER, 0.12),
+            Material::EARTH,
+        );
+        d.ground_oriented(
+            GroundTex::Mosswatch,
+            [centre[0], centre[1], GROUND_Z + 0.003],
+            [len + 0.16, SHOULDER_HALF * 2.0],
+            yaw,
+            rgba(theme::ROAD_SHOULDER, 0.28),
+            Material::EARTH,
+        );
+        d.ground_oriented(
+            GroundTex::Dirt,
+            [centre[0], centre[1], GROUND_Z + 0.006],
+            [len + 0.12, SURFACE_HALF * 2.0],
+            yaw,
+            rgba(theme::ROAD, 0.94),
+            Material::EARTH,
+        );
+    }
+    // `round_ring` already emits short tangent segments at every bend. The
+    // former oversized circular join stamps made those bends look like a chain
+    // of brown cookies, which was no more natural than the original ribbon.
+    // Let the continuous rounded polyline carry the travelled soil, then break
+    // its edge with rooted geometry below.
+    road_worn_edge(g, tall, SURFACE_HALF);
+    road_verge_clusters(g, d, SHOULDER_HALF);
+    road_edge_detail(g, tall, SHOULDER_HALF);
+}
+
+/// Let real rooted grass bite into an otherwise exact travel corridor.
+///
+/// The route collision query deliberately stays smooth and deterministic, but
+/// its visible dirt should not look like an orange vinyl ribbon laid over the
+/// meadow.  These low, non-blocking clumps overlap only the painted edge. They
+/// are actual mesh plants with their own normals and cast shadows; no UI grid,
+/// decal or hidden build exclusion is involved.  Their one-sided, jittered
+/// rhythm avoids a hedge while making the road look worn back into grass.
+fn road_worn_edge(g: &Game, tall: &mut DrawList, surface_half: f32) {
+    let mut dist = 1.15;
+    let mut stamp = 0usize;
+    while dist < g.board.total - 1.35 {
+        let seed = stamp as f32 * 1.913;
+        // Deliberate breathing gaps stop the edge from becoming a perfectly
+        // spaced grass fence at whole-board scale.
+        if stamp % 7 != 3 {
+            let centre = g.board.sample(dist);
+            let heading = g.board.heading(dist);
+            let normal = [-heading[1], heading[0]];
+            let side = if stamp % 4 == 1 || stamp % 9 == 0 { -1.0 } else { 1.0 };
+            let inset = 0.020 + (seed.sin() * 0.050 + 0.045).abs();
+            let p = [
+                centre[0] + heading[0] * (seed.cos() * 0.22)
+                    + normal[0] * side * (surface_half - inset),
+                centre[1] + heading[1] * (seed.cos() * 0.22)
+                    + normal[1] * side * (surface_half - inset),
+            ];
+            let name = if stamp % 23 == 0 { "NatureFern" } else { "NatureGrass" };
+            let scale = if name == "NatureFern" {
+                0.25 + (seed * 1.7).sin().abs() * 0.07
+            } else {
+                // The authored grass is low and leaning now; keep the dirt
+                // intrusion subtle so a long route does not become a repeated
+                // hedge of individual plant clumps.
+                0.28 + (seed * 1.7).sin().abs() * 0.07
+            };
+            let _ = models::draw_downloaded(
+                tall,
+                name,
+                [p[0], p[1], GROUND_Z + 0.020],
+                scale,
+                seed,
+                rgba([0.45, 0.44, 0.30], 1.0),
+                Material::FOLIAGE,
                 0.0,
             );
         }
+        dist += 2.18 + ((stamp as f32 * 1.29).sin() + 1.0) * 0.62;
+        stamp += 1;
     }
 }
 
-/// Spawn portal: a downloaded stone arch with a restrained magical halo.
-/// The old asset was a sci-fi landing pad, which did not match either its icon
-/// or this fantasy battlefield. The arch gives the source junction a vertical,
-/// readable silhouette without occupying a build pad.
+/// Small, asymmetric groups of real grass where a route meets the meadow.
+/// These are deliberately sampled by distance along the full path rather than
+/// placed one per segment or on both sides: a regular row looks like fence
+/// posts even when each object has actual blades.  Each one checks actual live
+/// sockets rather than using a coarse distance band, so low edge growth can
+/// break the road silhouette without concealing a valid build target.
+fn road_verge_clusters(g: &Game, d: &mut DrawList, shoulder_half: f32) {
+    let mut dist = 2.2;
+    let mut cluster = 0usize;
+    while dist < g.board.total - 2.0 {
+        let centre = g.board.sample(dist);
+        let heading = g.board.heading(dist);
+        let normal = [-heading[1], heading[0]];
+        let side = if cluster % 3 == 1 { -1.0 } else { 1.0 };
+        // A route shoulder needs gaps.  Even actual plant meshes become a
+        // decorative fence when they recur in paired stamps on every bend.
+        let copies = 1;
+        for copy in 0..copies {
+            let seed = cluster as f32 * 2.37 + copy as f32 * 1.91;
+            let along = (seed.sin() * 0.42) + (copy as f32 - 1.0) * 0.12;
+            let offset = shoulder_half + 0.035 + (seed.cos() * 0.15 + 0.08).abs();
+            let p = [
+                centre[0] + heading[0] * along + normal[0] * side * offset,
+                centre[1] + heading[1] * along + normal[1] * side * offset,
+            ];
+            let clear_of_socket = g.board.slots.iter().all(|slot| {
+                let dx = slot.pos[0] - p[0];
+                let dy = slot.pos[1] - p[1];
+                dx * dx + dy * dy > 0.62 * 0.62
+            });
+            if clear_of_socket && g.board.dist_to_road(p) > ROAD_HALF + 0.16
+            {
+                let scale = 0.28 + (seed * 1.71).sin().abs() * 0.08;
+                models::draw_downloaded(
+                    d,
+                    // Grass blades establish a low rooted verge.  A rare
+                    // asymmetric fern reads as a local plant, not a repeating
+                    // bright star along the entire road.
+                    if cluster % 21 == 0 { "NatureFern" } else { "NatureGrass" },
+                    [p[0], p[1], GROUND_Z + 0.018],
+                    scale,
+                    seed,
+                    rgba([0.57, 0.55, 0.36], 1.0),
+                    Material::FOLIAGE,
+                    0.0,
+                );
+            }
+        }
+        // A deterministic non-grid spacing makes cluster gaps as visible as
+        // the clusters themselves, rather than producing a dotted road edge.
+        dist += 5.20 + ((cluster as f32 * 1.41).sin() + 1.0) * 0.86;
+        cluster += 1;
+    }
+}
+
+/// A road earns its age from physical objects casting into it, not from darker
+/// texture noise.  These sparse rooted stones, cut stumps and moss clumps sit
+/// beyond live tower sockets, so they break the route's engineered ribbon edge
+/// without hiding a legal placement or altering the simulation corridor.
+fn road_edge_detail(g: &Game, tall: &mut DrawList, shoulder_half: f32) {
+    let mut dist = 4.0;
+    let mut cluster = 0usize;
+    while dist < g.board.total - 3.0 {
+        let centre = g.board.sample(dist);
+        let heading = g.board.heading(dist);
+        let normal = [-heading[1], heading[0]];
+        let side = if cluster % 4 == 1 || cluster % 7 == 0 { -1.0 } else { 1.0 };
+        let seed = cluster as f32 * 1.719;
+        let offset = shoulder_half + 0.30 + (seed.sin() * 0.16).abs();
+        let p = [
+            centre[0] + heading[0] * (seed.cos() * 0.28) + normal[0] * side * offset,
+            centre[1] + heading[1] * (seed.cos() * 0.28) + normal[1] * side * offset,
+        ];
+        let inside_field = p[0] > 0.25 && p[0] < 23.75 && p[1] > 0.25 && p[1] < 23.75;
+        let clear_socket = g.board.slots.iter().all(|slot| {
+            let dx = slot.pos[0] - p[0];
+            let dy = slot.pos[1] - p[1];
+            dx * dx + dy * dy > 0.74 * 0.74
+        });
+        if inside_field && clear_socket && g.board.dist_to_road(p) > ROAD_HALF + 0.18 {
+            // Road edges need rooted, low plant silhouette rather than a row
+            // of bright boulder coins. A rare stump or stone tells a story;
+            // most clusters are broad actual grass/fern meshes that soften
+            // the soil edge without becoming a decorative obstacle course.
+            let (name, scale, mat, tint) = match cluster % 11 {
+                0 => (
+                    "NatureRockA",
+                    0.38 + (seed * 1.31).sin().abs() * 0.12,
+                    Material::STONE,
+                    [0.42, 0.47, 0.39],
+                ),
+                6 => (
+                    "NatureStump",
+                    0.40 + (seed * 0.77).cos().abs() * 0.12,
+                    Material::WOOD,
+                    [0.34, 0.20, 0.060],
+                ),
+                _ => (
+                    if cluster % 25 == 0 { "NatureFern" } else { "NatureGrass" },
+                    0.30 + (seed * 0.61).sin().abs() * 0.09,
+                    Material::FOLIAGE,
+                    [0.55, 0.53, 0.35],
+                ),
+            };
+            let _ = models::draw_downloaded(
+                tall,
+                name,
+                [p[0], p[1], GROUND_Z + 0.020],
+                scale,
+                seed,
+                rgba(tint, 1.0),
+                mat,
+                0.0,
+            );
+        }
+        // Intentional gaps matter: a constant hedge is merely another road
+        // border. This is a loose record of use and erosion around bends.
+        dist += 6.10 + ((cluster as f32 * 0.93).sin() + 1.0) * 1.20;
+        cluster += 1;
+    }
+}
+
+/// Spawn portal: a small landmark at the source junction. It must read at a
+/// glance without becoming a building-sized obstruction or a permanent target
+/// ring over the first lane.
 fn gates_static(g: &Game, d: &mut DrawList) {
-    for (dist, col) in [(board::SPAWN_DIST + 0.45, theme::SPAWN)] {
+    for dist in [board::SPAWN_DIST + 0.45] {
         let p = g.board.sample(dist);
         let dir = g.board.heading(dist);
         let yaw = dir[1].atan2(dir[0]);
@@ -306,24 +450,21 @@ fn gates_static(g: &Game, d: &mut DrawList) {
             d,
             "DemonGate",
             [p[0], p[1], 0.035],
-            1.22,
+            0.72,
             yaw,
             rgba([0.78, 0.73, 0.68], 1.0),
             Material::STONE,
             0.04,
         );
-        d.ground_ring([p[0], p[1]], 0.78, 0.055, rgba(col, 0.42), 40);
-        d.sphere_lit([p[0], p[1], 0.64], 0.105, rgba(col, 0.92), 0.55);
+        d.sphere_lit([p[0], p[1], 0.42], 0.075, rgba(theme::SPAWN, 0.92), 0.55);
     }
 }
 
 // ================================================================ dynamic
 
-pub fn draw_scene(g: &Game, decor: &Decor, d: &mut DrawList, t: f32) {
-    torches(decor, d, t);
+pub fn draw_scene(g: &Game, _decor: &Decor, d: &mut DrawList, t: f32) {
     gate_glow(g, d, t);
     chevrons(g, d, t);
-    plots(g, d, t);
     for (i, tw) in g.towers.iter().enumerate() {
         towers::draw(d, tw, g.selected == Some(i), g.time);
     }
@@ -338,52 +479,33 @@ pub fn draw_scene(g: &Game, decor: &Decor, d: &mut DrawList, t: f32) {
     build_ghost(g, d, t);
 }
 
-fn torches(decor: &Decor, d: &mut DrawList, t: f32) {
-    for tor in &decor.torches {
-        let flicker =
-            0.72 + 0.28 * ((t * 9.0 + tor.phase).sin() * 0.5 + (t * 5.3 + tor.phase).sin() * 0.5);
-        // A real flame, not just a light: a cone that leans with the flicker.
-        d.shape(
-            Shape::Cone,
-            [tor.pos[0], tor.pos[1], tor.pos[2] + 0.10 * flicker],
-            [0.20, 0.20, 0.30 * flicker + 0.14],
-            t * 2.0 + tor.phase,
-            ((t * 7.0 + tor.phase).sin()) * 0.14,
-            rgba([1.0, 0.66, 0.26], 1.0),
-            Material::GEM,
-            1.0,
-        );
-        d.glow(
-            tor.pos,
-            1.3 * flicker,
-            2.2,
-            rgba([1.0, 0.58, 0.20], 0.42 * flicker),
-        );
-    }
-}
-
 fn gate_glow(g: &Game, d: &mut DrawList, t: f32) {
     let pulse = 0.55 + 0.45 * (t * 2.0).sin();
-    for (dist, col) in [(board::SPAWN_DIST + 0.9, theme::SPAWN)] {
+    for dist in [board::SPAWN_DIST + 0.9] {
         let p = g.board.sample(dist);
         d.glow(
             [p[0], p[1], 0.34],
             0.64 * pulse.max(0.6),
             2.0,
-            rgba(col, 0.24),
+            rgba(theme::SPAWN, 0.18),
         );
-        d.ground_ring([p[0], p[1]], 0.72, 0.055, rgba(col, 0.38 * pulse), 32);
     }
 }
 
 /// Two separated chevron streams show the source map's split route.
 fn chevrons(g: &Game, d: &mut DrawList, t: f32) {
+    // Route direction is useful before a send, but in combat it is just a
+    // second animated HUD painted underneath the horde.  The board itself and
+    // moving enemies already establish direction once a fight is live.
+    if g.phase != Phase::Build {
+        return;
+    }
     let n = (g.board.total / 4.2) as i32;
     for direction in [-1.0f32, 1.0] {
         for i in 0..n {
             let phase = (t * 0.85 + i as f32 * 0.5).rem_euclid(1.0);
             let dist = (i as f32 * 4.2 + phase * 4.2).min(g.board.total);
-            let a = 0.13 * (1.0 - (phase - 0.5).abs() * 2.0).max(0.0);
+            let a = 0.055 * (1.0 - (phase - 0.5).abs() * 2.0).max(0.0);
             if a <= 0.01 {
                 continue;
             }
@@ -403,113 +525,22 @@ fn chevrons(g: &Game, d: &mut DrawList, t: f32) {
                     [0.23, 0.045, 0.014],
                     yaw + s * 0.72,
                     0.0,
-                    rgba([0.54, 0.68, 0.78], a),
-                    Material::GEM,
-                    0.16,
+                    rgba([0.37, 0.31, 0.17], a),
+                    Material::EARTH,
+                    0.0,
                 );
             }
         }
     }
 }
 
-/// Build plots are part of the static terrain, so all that is drawn here is the
-/// state: which are free while you hold a tower, and which one you are pointing at.
-fn plots(g: &Game, d: &mut DrawList, t: f32) {
-    let Some((def_i, _)) = g.build_choice else {
-        // Idle: the grid stays dark. Only the plot under the cursor answers.
-        if let Some(i) = g.hover_slot {
-            if let Some(s) = g.board.slots.get(i) {
-                if s.tower.is_none() {
-                    outline(d, s.pos, rgba(theme::GHOST_OK, 0.30), 0.06);
-                }
-            }
-        }
-        return;
-    };
-
-    // Only spaced, useful plots light up. Their three-tile lattice is deliberate:
-    // tower silhouettes stay separate and a location is a commitment.
-    let affordable = g.can_afford(TOWERS[def_i].gold);
-    let pulse = 0.5 + 0.5 * (t * 2.2).sin();
-
-    for (i, s) in g.board.slots.iter().enumerate() {
-        let hovered = g.hover_slot == Some(i);
-        if s.tower.is_some() {
-            if hovered {
-                // Occupied: flat and matte. Bad news should never bloom.
-                outline(d, s.pos, rgba(theme::GHOST_BAD, 0.75), 0.07);
-            }
-            continue;
-        }
-        if !affordable {
-            if hovered {
-                outline(d, s.pos, rgba(theme::PAD_BROKE, 0.70), 0.06);
-            }
-            continue;
-        }
-
-        // Four corner markers on the kerb, not a wash over the whole tile.
-        let (col, em, size) = if hovered {
-            (theme::GHOST_OK, 1.0, 0.20)
-        } else {
-            (theme::PAD_ARM, 0.55 + 0.25 * pulse, 0.15)
-        };
-        for (dx, dy) in [(-0.42, -0.42), (0.42, -0.42), (-0.42, 0.42), (0.42, 0.42)] {
-            d.cube_lit(
-                [s.pos[0] + dx, s.pos[1] + dy, PLOT_TOP + 0.09],
-                [size, size, 0.05],
-                0.0,
-                rgba(col, 1.0),
-                em,
-            );
-        }
-        if hovered {
-            // Wash the socket floor, so the target is unmistakable.
-            d.cube_lit(
-                [s.pos[0], s.pos[1], PLOT_TOP - 0.02],
-                [0.84, 0.84, 0.02],
-                0.0,
-                rgba(theme::GHOST_OK, 0.40),
-                1.0,
-            );
-            d.glow(
-                [s.pos[0], s.pos[1], PLOT_TOP + 0.35],
-                0.85,
-                2.2,
-                rgba(theme::GHOST_OK, 0.28),
-            );
-        }
-    }
-}
-
-/// Four thin bars framing a tile.
-fn outline(d: &mut DrawList, p: [f32; 2], col: Color, w: f32) {
-    for (dx, dy, sx, sy) in [
-        (0.0, 0.46, 0.96, w),
-        (0.0, -0.46, 0.96, w),
-        (0.46, 0.0, w, 0.96),
-        (-0.46, 0.0, w, 0.96),
-    ] {
-        d.cube_lit(
-            [p[0] + dx, p[1] + dy, PLOT_TOP + 0.10],
-            [sx, sy, 0.04],
-            0.0,
-            col,
-            1.0,
-        );
-    }
-}
-
 fn build_ghost(g: &Game, d: &mut DrawList, t: f32) {
-    let (Some((def_i, _)), Some(slot)) = (g.build_choice, g.hover_slot) else {
-        return;
-    };
-    let Some(s) = g.board.slots.get(slot) else {
+    let (Some((def_i, _)), Some(raw_pos)) = (g.build_choice, g.hover_pos) else {
         return;
     };
     let def = &TOWERS[def_i];
-    let ok = s.tower.is_none() && g.can_afford(def.gold);
-    let p = s.pos;
+    let p = g.board.quantize_build_pos(raw_pos);
+    let ok = g.buildability_at(p, true).is_ok();
     let pulse = 0.55 + 0.25 * (t * 5.0).sin();
 
     if ok {
@@ -517,9 +548,11 @@ fn build_ghost(g: &Game, d: &mut DrawList, t: f32) {
         d.ground_ring(
             p,
             TOWERS[def_i].range,
-            0.10,
-            rgba(tower_color(def), 0.55),
-            80,
+            // A preview answers one question ("will it reach?") and should
+            // not turn a dense horde into a white spotlight.
+            0.035,
+            rgba(tower_color(def), 0.30),
+            48,
         );
     } else {
         for yaw in [0.7f32, -0.7] {
@@ -802,10 +835,64 @@ mod tests {
         let (g, decor) = fresh();
         let list = build_static(&g, &decor);
         let n = list.casters.solid_count() + list.flat.solid_count();
-        assert!(n > 500, "board is suspiciously empty: {n} solids");
+        // Count visual work as well as instance records. The old floor used
+        // hundreds of one-primitive grass ticks; the real baked grass clumps
+        // replace those with fewer instances but far richer geometry. A check
+        // that only rewarded instance count would actively push the scene back
+        // toward sparse, toy-like markers.
+        let library = crate::gfx::mesh::build();
+        let triangles: usize = (0..SHAPE_COUNT)
+            .map(|i| {
+                let count = list.casters.solid[i].len() + list.flat.solid[i].len();
+                count * library.spans[i].count as usize / 3
+            })
+            .sum();
+        // One continuous physical field and grouped high-detail cover use far
+        // fewer records than the former per-tile marker carpet.  These bounds
+        // catch an accidental loss of the terrain/decor upload without
+        // incentivising repeated visual noise merely to inflate an instance
+        // counter.
+        assert!(n > 260, "board is suspiciously empty: {n} solids");
+        assert!(
+            triangles > 65_000,
+            "board lacks enough real terrain/cover geometry: {triangles} triangles"
+        );
         assert!(
             n <= STATIC_CAP,
             "static scene overflows: {n} > {STATIC_CAP}"
+        );
+    }
+
+    #[test]
+    fn idle_scene_has_no_permanent_socket_lattice() {
+        let g = Game::new();
+        let mut d = DrawList::default();
+        build_ghost(&g, &mut d, 0.0);
+        assert!(
+            d.solid_count() == 0,
+            "idle board drew placement decorations instead of terrain"
+        );
+    }
+
+    #[test]
+    fn armed_free_grass_draws_one_ghost_not_a_socket_grid() {
+        let mut g = Game::new();
+        g.gold = 1_000_000;
+        g.build_choice = Some((0, 1));
+        g.hover_pos = g.first_clear_grass();
+        let mut d = DrawList::default();
+        build_ghost(&g, &mut d, 0.0);
+
+        // The live feedback is one physical tower/range preview. The former
+        // pad implementation could emit hundreds of coloured tile markers.
+        let count = d.solid_count();
+        assert!(count > 0, "armed grass position drew no ghost");
+        // An imported model is a real multi-material assembly, so it may use
+        // far more records than the old four bars. It must still remain a
+        // single local preview rather than one record per historical pad.
+        assert!(
+            count < g.board.slots.len(),
+            "armed state rebuilt a socket lattice: {count} records"
         );
     }
 
@@ -884,6 +971,13 @@ mod tests {
             kb_cd: 0.0,
             flash: 0.0,
             bob: 1.3,
+            shield: 0.0,
+            max_shield: 0.0,
+            regen_per_second: 0.0,
+            resistant: false,
+            campaign_encounter: 0,
+            pressure: 1.0,
+            death_killer: None,
         }
     }
 

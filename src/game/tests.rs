@@ -49,8 +49,8 @@ fn max_out(g: &mut Game, ti: usize) {
 /// Builds one tower of `family` on the free pad nearest `along` tiles down the
 /// lane, and returns its index.
 ///
-/// By position rather than by pad number, because the lane is eighty-five tiles
-/// round and a pad index says nothing about where on it a tower stands - twelve
+/// By position rather than by pad number, because a pad index says nothing
+/// about where on the compact multi-lane circuit a tower stands - twelve
 /// towers on pads 0..12 all ended up at one end of the map, watching an empty
 /// corridor while the test measured the other end.
 fn build(g: &mut Game, family: Family, along: f32) -> usize {
@@ -177,6 +177,56 @@ fn the_road_is_a_closed_circuit_with_no_exit() {
 }
 
 #[test]
+fn winding_route_uses_the_middle_of_the_board() {
+    let b = super::board::Board::new();
+    assert!(
+        (96.0..102.0).contains(&b.total),
+        "winding lane is {:.1} tiles",
+        b.total
+    );
+
+    // An outer rectangle leaves this point a dozen tiles from combat.  This
+    // deliberately leaves a small, scenic central clearing while keeping the
+    // middle comfortably inside ordinary tower range.
+    let middle_distance = b.dist_to_road([12.0, 12.0]);
+    assert!(
+        middle_distance <= 3.2,
+        "the map has become a hollow ring again: middle is {middle_distance:.2} tiles from the lane"
+    );
+
+    // This is a trail, not a scribble.  A self-crossing route creates a false
+    // intersection where two reverse-moving hordes overlap visually and was
+    // the root cause of the rejected tangled lower lane.
+    for i in 0..super::greentd_map::LAP.len() {
+        let a = super::greentd_map::LAP[i];
+        let b = super::greentd_map::LAP[(i + 1) % super::greentd_map::LAP.len()];
+        for j in i + 1..super::greentd_map::LAP.len() {
+            if j == i + 1 || (i == 0 && j + 1 == super::greentd_map::LAP.len()) {
+                continue;
+            }
+            let c = super::greentd_map::LAP[j];
+            let d = super::greentd_map::LAP[(j + 1) % super::greentd_map::LAP.len()];
+            assert!(
+                !segments_cross(a, b, c, d),
+                "route segments {i} and {j} cross"
+            );
+        }
+    }
+}
+
+fn segments_cross(a: [f32; 2], b: [f32; 2], c: [f32; 2], d: [f32; 2]) -> bool {
+    let turn = |p: [f32; 2], q: [f32; 2], r: [f32; 2]| {
+        (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0])
+    };
+    let ab_c = turn(a, b, c);
+    let ab_d = turn(a, b, d);
+    let cd_a = turn(c, d, a);
+    let cd_b = turn(c, d, b);
+    (ab_c > 0.0001 && ab_d < -0.0001 || ab_c < -0.0001 && ab_d > 0.0001)
+        && (cd_a > 0.0001 && cd_b < -0.0001 || cd_a < -0.0001 && cd_b > 0.0001)
+}
+
+#[test]
 fn red_creeps_split_both_ways_like_the_reference_trigger() {
     let b = super::board::Board::new();
     let start_a = b.sample_travel(0.0, 1.0);
@@ -227,17 +277,22 @@ fn show_the_board() {
 }
 
 #[test]
-fn pads_sit_beside_the_road_never_on_it() {
+fn every_dense_build_tile_is_legal_and_touches_the_fight() {
     let b = super::board::Board::new();
-    assert!(
-        (48..=super::board::PAD_LIMIT).contains(&b.slots.len()),
-        "expected 48..={} road-hugging pads, got {}",
-        super::board::PAD_LIMIT,
-        b.slots.len()
-    );
-    for s in &b.slots {
+    assert_eq!(b.slots.len(), 164, "dense shoulder drifted");
+    for (i, s) in b.slots.iter().enumerate() {
         let tx = s.pos[0].floor() as i32;
         let ty = s.pos[1].floor() as i32;
+        assert_eq!(
+            b.tile_slot(s.pos),
+            Some(i),
+            "slot {i} is not on its own tile"
+        );
+        assert_eq!(
+            b.slot_at(s.pos),
+            Some(i),
+            "slot {i} cannot be clicked directly"
+        );
         assert!(
             !super::board::is_corridor(tx, ty),
             "a pad sits in the corridor at {:?}",
@@ -250,14 +305,25 @@ fn pads_sit_beside_the_road_never_on_it() {
             s.pos
         );
     }
-    for (i, a) in b.slots.iter().enumerate() {
-        for b in &b.slots[i + 1..] {
-            let d2 = (a.pos[0] - b.pos[0]).powi(2) + (a.pos[1] - b.pos[1]).powi(2);
-            assert!(
-                d2 >= super::board::PAD_SPACING.powi(2) - 1e-4,
-                "tower pads overlap at {:?} and {:?}",
-                a.pos,
-                b.pos
+
+    // No silent holes: every clear tile in the marked shoulder builds, and
+    // neither the lane nor decorative grass can steal an adjacent click.
+    let a = super::greentd_map::ARENA;
+    for ty in a[1] as i32..=a[3] as i32 {
+        for tx in a[0] as i32..=a[2] as i32 {
+            let p = [tx as f32 + 0.5, ty as f32 + 0.5];
+            let inside = p[0] >= a[0] + 1.25
+                && p[1] >= a[1] + 1.25
+                && p[0] <= a[2] - 1.25
+                && p[1] <= a[3] - 1.25;
+            let wanted = inside
+                && super::board::buildable_tile(tx, ty)
+                && (super::board::PAD_ROAD_MIN..=super::board::PAD_ROAD_MAX)
+                    .contains(&b.dist_to_road(p));
+            assert_eq!(
+                b.tile_slot(p).is_some(),
+                wanted,
+                "tile ({tx}, {ty}) does not agree with the visible build shoulder"
             );
         }
     }
@@ -382,6 +448,7 @@ fn commander_hunters_default_to_strongest_without_overriding_player_intent() {
 fn an_undefended_ring_floods_and_the_run_is_lost() {
     let mut g = Game::new();
     g.start_run(1);
+    g.send_wave();
     run_for(&mut g, 60.0 * 25.0);
     assert_eq!(
         g.phase,
@@ -991,6 +1058,7 @@ fn wave_table_is_well_formed() {
 
 #[test]
 fn a_wave_finishes_arriving_within_its_window() {
+    let lane = super::board::Board::new().total;
     for difficulty in Difficulty::ALL {
         let mut g = Game::new();
         g.start_run_with_difficulty(7, difficulty);
@@ -1005,6 +1073,15 @@ fn a_wave_finishes_arriving_within_its_window() {
             assert!(
                 window <= WAVE_SPAWN_WINDOW + 0.5,
                 "{difficulty:?} wave {n} takes {window:.0}s to arrive"
+            );
+            assert!(
+                w.lead_in + 1e-4 >= window + WAVE_RECOVERY,
+                "{difficulty:?} wave {n} has no recovery after its horde"
+            );
+            let horde_span = w.speed * window;
+            assert!(
+                horde_span <= lane * 0.60,
+                "{difficulty:?} wave {n} is a thin stream spanning {horde_span:.1} of {lane:.1} tiles"
             );
         }
     }
@@ -1220,6 +1297,16 @@ fn difficulty_modes_preserve_classic_and_add_real_pressure() {
 
 #[test]
 fn tempo_rewards_patience_or_risk_but_not_both() {
+    let mut opening = Game::new();
+    let opening_gold = opening.gold;
+    opening.send_wave();
+    assert!(!opening.prep, "Wave 1 did not start on command");
+    assert_eq!(opening.stats.rush_gold, 0, "opening paid fake Rush gold");
+    assert!(
+        opening.gold > opening_gold,
+        "Wave 1 missed its normal stipend"
+    );
+
     let mut patient = Game::new();
     patient.wave = 1;
     let before = patient.gold;
@@ -1230,6 +1317,7 @@ fn tempo_rewards_patience_or_risk_but_not_both() {
 
     let mut rushing = Game::new();
     rushing.wave = 1;
+    rushing.prep = false;
     rushing.wave_timer = 15.0;
     rushing.send_wave();
     assert_eq!(rushing.stats.clean_sweeps, 0);
@@ -1252,40 +1340,109 @@ fn tempo_rewards_patience_or_risk_but_not_both() {
 }
 
 #[test]
-fn campaign_speed_is_readable_and_three_x_is_an_endless_reward() {
+fn campaign_uses_a_rapid_only_ladder_through_the_hundred_x_max() {
     let mut g = Game::new();
     g.cycle_speed();
-    assert_eq!(g.speed, MAX_CAMPAIGN_SPEED);
+    assert_eq!(g.speed, 25.0);
     g.cycle_speed();
-    assert_eq!(g.speed, 1.0);
-
-    g.endless = true;
-    g.cycle_speed();
-    assert_eq!(g.speed, 2.0);
+    assert_eq!(g.speed, 50.0);
     g.cycle_speed();
     assert_eq!(g.speed, MAX_ENDLESS_SPEED);
     g.cycle_speed();
-    assert_eq!(g.speed, 1.0);
+    assert_eq!(g.speed, CAMPAIGN_DEFAULT_SPEED);
+
+    // A fresh expedition opens at the player-facing rapid pace and never
+    // falls through the old 1x/2x/5x values while reaching 100x.
+    g.start_campaign(77, Difficulty::Veteran);
+    assert_eq!(g.speed, CAMPAIGN_DEFAULT_SPEED);
+    g.cycle_speed();
+    assert_eq!(g.speed, 25.0);
+    g.cycle_speed();
+    assert_eq!(g.speed, 50.0);
+    g.cycle_speed();
+    assert_eq!(g.speed, MAX_CAMPAIGN_SPEED);
+    g.cycle_speed();
+    assert_eq!(g.speed, CAMPAIGN_DEFAULT_SPEED);
+
+    // Legacy/Endless retain their rules and save behavior, but no longer
+    // force a player through a historic 1x/2x/5x speed ladder.
+    g.mode = RunMode::Legacy;
+    g.endless = true;
+    g.cycle_speed();
+    assert_eq!(g.speed, 25.0);
+    g.cycle_speed();
+    assert_eq!(g.speed, 50.0);
+    g.cycle_speed();
+    assert_eq!(g.speed, MAX_ENDLESS_SPEED);
+    g.cycle_speed();
+    assert_eq!(g.speed, CAMPAIGN_DEFAULT_SPEED);
 }
 
 #[test]
-fn no_difficulty_can_be_fast_forwarded_into_a_five_minute_campaign() {
+fn tower_progression_reports_the_real_deepest_upgrade_path() {
+    let seed = family_start(Family::Single).expect("starter seed");
+    assert_eq!(ladder_len(Family::Single), 1, "source seed family changed");
+    assert_eq!(display_ladder_len(seed), 16, "seed hid its deepest attached route");
+    assert_eq!(ladder_len(Family::Siege), 20);
+    assert_eq!(display_ladder_len(family_start(Family::Siege).unwrap()), 20);
+    assert!(display_ladder_len(seed) > 10);
+}
+
+#[test]
+fn campaign_auto_deploys_after_a_real_time_build_beat_and_legacy_stays_manual() {
+    let mut campaign = Game::new();
+    campaign.start_campaign(0xA070, Difficulty::Classic);
+    assert_eq!(campaign.phase, Phase::Build);
+    assert!(!campaign.prep, "Campaign inherited Legacy's manual opening flag");
+    assert_eq!(campaign.wave_timer, CAMPAIGN_AUTOSTART_SECONDS);
+
+    // The build beat is wall-clock time, not accelerated simulation time.
+    campaign.update(CAMPAIGN_AUTOSTART_SECONDS - 0.01);
+    assert_eq!(campaign.phase, Phase::Build);
+    campaign.update(0.02);
+    assert_eq!(campaign.phase, Phase::Combat, "Campaign did not auto-deploy");
+    assert_eq!(campaign.wave, 1);
+    assert!(
+        campaign.campaign.as_ref().is_some_and(|state| state.elapsed_seconds > 0.0),
+        "auto deployment did not enter the production encounter adapter"
+    );
+
+    let mut legacy = Game::new();
+    legacy.update(5.0);
+    assert_eq!(legacy.phase, Phase::Build);
+    assert!(legacy.prep, "Legacy opening changed while adding Campaign auto-start");
+    assert_eq!(legacy.wave, 0);
+}
+
+#[test]
+fn legacy_recovery_is_still_held_to_the_standard_two_x_baseline() {
     for difficulty in Difficulty::ALL {
         let mut g = Game::new();
         g.start_run_with_difficulty(7, difficulty);
-        let deployment: f32 = (1..=CAMPAIGN_WAVES)
-            .map(|wave| {
-                let w = g.wave_def(wave);
-                w.spawn_gap * w.count.saturating_sub(1) as f32
-            })
+        // Wave one is player-started. Every later boundary still leaves a
+        // recovery beat, even at 2x, so the campaign does not become a blur.
+        let boundaries: f32 = (2..=CAMPAIGN_WAVES)
+            .map(|wave| g.wave_def(wave).lead_in)
             .sum();
-        let fastest_wall_clock = deployment / MAX_CAMPAIGN_SPEED;
+        let fastest_wall_clock = boundaries / CAMPAIGN_STANDARD_SPEED;
         assert!(
-            fastest_wall_clock >= 10.0 * 60.0,
-            "{difficulty:?} can still be compressed to {:.1} minutes",
+            fastest_wall_clock >= 9.0 * 60.0,
+            "{difficulty:?} can be compressed to only {:.1} minutes",
             fastest_wall_clock / 60.0
         );
     }
+}
+
+#[test]
+fn hundred_x_uses_the_full_fixed_step_budget_at_thirty_hz() {
+    let mut g = Game::new();
+    g.speed = MAX_CAMPAIGN_SPEED;
+    g.update(1.0 / 30.0);
+    assert!(
+        (g.time - 100.0 / 30.0).abs() < 0.003,
+        "100x dropped simulation time at a 30 Hz browser frame: {}",
+        g.time
+    );
 }
 
 #[test]
@@ -1364,6 +1521,85 @@ fn a_tower_cannot_be_built_without_the_gold() {
     assert!(g.towers.is_empty());
 }
 
+#[test]
+fn free_grass_placement_uses_real_positions_and_one_authoritative_footprint_rule() {
+    use super::{FREE_TOWER_SLOT, PlacementIssue};
+    use super::board::{BUILD_WORLD, TOWER_FOOTPRINT_RADIUS};
+
+    let mut g = Game::new();
+    g.gold = 100_000;
+    let root = root(Family::Single);
+    let mut points = Vec::new();
+    let mut y = BUILD_WORLD[1] + TOWER_FOOTPRINT_RADIUS;
+    while y <= BUILD_WORLD[3] - TOWER_FOOTPRINT_RADIUS && points.len() < 3 {
+        let mut x = BUILD_WORLD[0] + TOWER_FOOTPRINT_RADIUS;
+        while x <= BUILD_WORLD[2] - TOWER_FOOTPRINT_RADIUS && points.len() < 3 {
+            if let Ok(p) = g.buildability_at([x, y], false)
+                && points.iter().all(|q: &[f32; 2]| {
+                    let dx = q[0] - p[0];
+                    let dy = q[1] - p[1];
+                    dx * dx + dy * dy > 5.0
+                })
+            {
+                points.push(p);
+            }
+            x += 0.50;
+        }
+        y += 0.50;
+    }
+    assert_eq!(points.len(), 3, "the meadow lost clear grass build positions");
+    assert!(
+        points.iter().any(|p| p[0] < 0.0 || p[1] < 0.0),
+        "expanded rendered grass was silently excluded from building"
+    );
+
+    for p in points {
+        let gold = g.gold;
+        g.build_choice = Some((root, 1));
+        assert!(g.try_build_at(p), "clear grass at {p:?} was rejected");
+        let tower = g.towers.last().expect("tower was built");
+        assert_eq!(tower.pos, p, "tower was moved to a legacy pad");
+        assert_eq!(tower.slot, FREE_TOWER_SLOT, "free tower claimed a hidden pad");
+        assert_eq!(g.gold, gold - TOWERS[root].gold as i64, "purchase did not charge once");
+    }
+
+    let gold = g.gold;
+    g.build_choice = Some((root, 1));
+    assert_eq!(
+        g.buildability_at(g.board.start(), true),
+        Err(PlacementIssue::Road),
+        "route geometry stopped rejecting a full tower footprint"
+    );
+    assert!(!g.try_build_at(g.board.start()));
+    assert_eq!(g.gold, gold, "road click spent gold");
+
+    // Retired landmark coordinates and visible grass cover may not turn into
+    // invisible blockers.  A player can see and build on these positions;
+    // only the actual road, world boundary and tower footprint may reject.
+    for p in [[12.0, 11.6], [10.3, 6.2], [15.7, 6.1], [-4.0, 4.0]] {
+        assert_ne!(
+            g.buildability_at(p, true),
+            Err(PlacementIssue::SolidScenery),
+            "visual meadow cover became an invisible blocker at {p:?}",
+        );
+    }
+
+    assert_eq!(
+        g.buildability_at([BUILD_WORLD[2] + 2.0, BUILD_WORLD[3] + 2.0], true),
+        Err(PlacementIssue::OutsideWorld)
+    );
+    assert!(!g.try_build_at([BUILD_WORLD[2] + 2.0, BUILD_WORLD[3] + 2.0]));
+    assert_eq!(g.gold, gold, "outside click spent gold");
+
+    let occupied = g.towers[0].pos;
+    assert_eq!(g.buildability_at(occupied, true), Err(PlacementIssue::TowerOverlap));
+    assert!(!g.try_build_at(occupied));
+    assert_eq!(g.gold, gold, "overlap click spent gold");
+
+    g.gold = 0;
+    assert_eq!(g.buildability_at(g.first_clear_grass().unwrap(), true), Err(PlacementIssue::NotEnoughGold));
+}
+
 /// Kill money has to keep up with the roster, or the run is decided by
 /// arithmetic rather than by play. This is the one number the map does not
 /// contain, so it is checked against the roster it has to buy.
@@ -1425,11 +1661,23 @@ fn a_sensible_build_clears_the_campaign() {
             break;
         }
         plan.spend(&mut g);
+        if g.prep {
+            g.send_wave();
+        }
         let target = g.wave;
         let mut elapsed = 0.0;
+        let mut next_spend = 1.0;
         while g.wave == target && elapsed < WAVE_PERIOD * 3.0 {
             g.update(1.0 / 60.0);
             elapsed += 1.0 / 60.0;
+            // Players can place or upgrade as kill gold arrives. Waiting until
+            // a wave boundary turns the intended live-build game into an
+            // artificial cash bank, which is especially misleading for the
+            // winding horde route.
+            if elapsed >= next_spend {
+                plan.spend(&mut g);
+                next_spend += 1.0;
+            }
             if matches!(g.phase, Phase::Defeat | Phase::Victory) {
                 break;
             }
@@ -1582,6 +1830,9 @@ fn shallow_mixed_spam_cannot_clear_veteran() {
             next_family += 1;
         }
 
+        if g.prep {
+            g.send_wave();
+        }
         let target = g.wave;
         let mut elapsed = 0.0;
         while g.wave == target && elapsed < WAVE_PERIOD * 3.0 {
@@ -1624,6 +1875,9 @@ fn a_generalist_plan_does_not_trivialize_nightmare() {
             g.choose_doctrine(Doctrine::Arsenal);
         }
         plan.spend(&mut g);
+        if g.prep {
+            g.send_wave();
+        }
         let target = g.wave;
         let mut elapsed = 0.0;
         while g.wave == target && elapsed < WAVE_PERIOD * 3.0 {
@@ -1947,6 +2201,9 @@ fn a_narrated_playthrough() {
         let wave = g.wave + 1;
         let w = g.wave_def(wave);
 
+        if g.prep {
+            g.send_wave();
+        }
         let target = g.wave;
         let mut elapsed = 0.0;
         let mut peak = g.creeps.len();
@@ -2007,4 +2264,2094 @@ pub(crate) fn spend_for_shot(g: &mut Game, built: &mut usize) {
     let mut plan = Planner { built: *built };
     plan.spend(g);
     *built = plan.built;
+}
+
+fn find_in_range_legal_spot(g: &Game, def: usize) -> Option<[f32; 2]> {
+    let range = TOWERS[def].range;
+    let b = g.board.build_world();
+    let mut best: Option<([f32; 2], f32)> = None;
+    let mut y = b[1] + TOWER_FOOTPRINT_RADIUS;
+    while y <= b[3] - TOWER_FOOTPRINT_RADIUS {
+        let mut x = b[0] + TOWER_FOOTPRINT_RADIUS;
+        while x <= b[2] - TOWER_FOOTPRINT_RADIUS {
+            if let Ok(pos) = g.buildability_at([x, y], true) {
+                let d = g.board.dist_to_road(pos);
+                if d <= range {
+                    match best {
+                        None => best = Some((pos, d)),
+                        Some((_, best_d)) if d < best_d => best = Some((pos, d)),
+                        _ => {}
+                    }
+                }
+            }
+            x += 0.50;
+        }
+        y += 0.50;
+    }
+    best.map(|(p, _)| p)
+}
+
+fn find_best_coverage_legal_spot(g: &Game, def: usize) -> Option<[f32; 2]> {
+    let range = TOWERS[def].range;
+    let r2 = range * range;
+    let b = g.board.build_world();
+    let mut best: Option<([f32; 2], f32)> = None;
+    let mut y = b[1] + TOWER_FOOTPRINT_RADIUS;
+    while y <= b[3] - TOWER_FOOTPRINT_RADIUS {
+        let mut x = b[0] + TOWER_FOOTPRINT_RADIUS;
+        while x <= b[2] - TOWER_FOOTPRINT_RADIUS {
+            if let Ok(pos) = g.buildability_at([x, y], true) {
+                let d = g.board.dist_to_road(pos);
+                if d <= range {
+                    let mut covered = 0.0_f32;
+                    let mut dist = 0.0_f32;
+                    while dist < g.board.total {
+                        let pt = g.board.sample(dist);
+                        let dx = pt[0] - pos[0];
+                        let dy = pt[1] - pos[1];
+                        if dx * dx + dy * dy <= r2 {
+                            covered += 1.0;
+                        }
+                        dist += 1.0;
+                    }
+                    let score = covered * 10.0 - d;
+                    match best {
+                        None => best = Some((pos, score)),
+                        Some((_, best_score)) if score > best_score => best = Some((pos, score)),
+                        _ => {}
+                    }
+                }
+            }
+            x += 0.50;
+        }
+        y += 0.50;
+    }
+    best.map(|(p, _)| p)
+}
+
+fn find_entrance_aware_legal_spot(g: &Game, def: usize, initial: bool) -> Option<[f32; 2]> {
+    let range = TOWERS[def].range;
+    let r2 = range * range;
+    let b = g.board.build_world();
+    let mut best: Option<([f32; 2], f32)> = None;
+    let mut y = b[1] + TOWER_FOOTPRINT_RADIUS;
+    while y <= b[3] - TOWER_FOOTPRINT_RADIUS {
+        let mut x = b[0] + TOWER_FOOTPRINT_RADIUS;
+        while x <= b[2] - TOWER_FOOTPRINT_RADIUS {
+            if let Ok(pos) = g.buildability_at([x, y], true) {
+                let d = g.board.dist_to_road(pos);
+                if d <= range {
+                    // 1. Entrance route scoring: sample first 12 route units in BOTH directions from spawn:
+                    let mut entrance_covered = 0.0_f32;
+                    let mut covers_cw = false;
+                    let mut covers_ccw = false;
+                    for step in 0..=12 {
+                        let prog = step as f32;
+                        let p_cw = g.board.sample_travel(prog, 1.0);
+                        let p_ccw = g.board.sample_travel(prog, -1.0);
+                        let d_cw2 = (p_cw[0] - pos[0]).powi(2) + (p_cw[1] - pos[1]).powi(2);
+                        let d_ccw2 = (p_ccw[0] - pos[0]).powi(2) + (p_ccw[1] - pos[1]).powi(2);
+                        if d_cw2 <= r2 {
+                            entrance_covered += 1.0;
+                            if step > 0 { covers_cw = true; }
+                        }
+                        if d_ccw2 <= r2 {
+                            entrance_covered += 1.0;
+                            if step > 0 { covers_ccw = true; }
+                        }
+                    }
+
+                    // Direct spawn point coverage (dist = 0):
+                    let spawn_p = g.board.sample(0.0);
+                    let covers_spawn = (spawn_p[0] - pos[0]).powi(2) + (spawn_p[1] - pos[1]).powi(2) <= r2;
+
+                    // 2. General route coverage:
+                    let mut general_covered = 0.0_f32;
+                    let mut dist = 0.0_f32;
+                    while dist < g.board.total {
+                        let pt = g.board.sample(dist);
+                        let dx = pt[0] - pos[0];
+                        let dy = pt[1] - pos[1];
+                        if dx * dx + dy * dy <= r2 {
+                            general_covered += 1.0;
+                        }
+                        dist += 1.0;
+                    }
+
+                    let dual_flank_bonus = if covers_cw && covers_ccw { 100.0 } else { 0.0 };
+                    let spawn_bonus = if covers_spawn { 60.0 } else { 0.0 };
+
+                    let score = if initial {
+                        entrance_covered * 40.0 + dual_flank_bonus + spawn_bonus + general_covered * 5.0 - d
+                    } else {
+                        entrance_covered * 15.0 + general_covered * 15.0 - d
+                    };
+
+                    match best {
+                        None => best = Some((pos, score)),
+                        Some((_, best_score)) if score > best_score => best = Some((pos, score)),
+                        _ => {}
+                    }
+                }
+            }
+            x += 0.50;
+        }
+        y += 0.50;
+    }
+    best.map(|(p, _)| p)
+}
+
+fn def_by_family(family: Family) -> usize {
+    TOWERS
+        .iter()
+        .position(|t| t.family == family && t.shop)
+        .or_else(|| family_start(family))
+        .unwrap_or_else(|| panic!("No legal start tower for family {family:?}"))
+}
+
+#[test]
+fn campaign_difficulty_baseline_simulations() {
+    // 1. Unattended run on Veteran fails early due to pressure overflow
+    let mut g_unattended = Game::new();
+    g_unattended.start_campaign(42, Difficulty::Veteran);
+    g_unattended.speed = 4.0;
+    g_unattended.update(CAMPAIGN_AUTOSTART_SECONDS + 0.1);
+    let mut ticks = 0;
+    while g_unattended.phase != Phase::Defeat && ticks < 20_000 {
+        g_unattended.update(0.1);
+        ticks += 1;
+    }
+    assert_eq!(
+        g_unattended.phase,
+        Phase::Defeat,
+        "Unattended Veteran board must suffer defeat"
+    );
+    assert!(
+        g_unattended.wave <= 10,
+        "Unattended run must fail in early encounters (failed at encounter {})",
+        g_unattended.wave
+    );
+
+    // 2. Shallow single-type un-upgraded spam fails against mixed waves
+    let mut g_spam = Game::new();
+    g_spam.start_campaign(42, Difficulty::Veteran);
+    g_spam.speed = 2.0;
+    let single_def = def_by_family(Family::Single);
+    for _ in 0..8 {
+        if let Some(pos) = find_in_range_legal_spot(&g_spam, single_def) {
+            g_spam.build_choice = Some((single_def, 1));
+            let _ = g_spam.try_build_at(pos);
+        }
+    }
+    g_spam.send_wave();
+    let mut spam_ticks = 0;
+    while g_spam.phase != Phase::Defeat && spam_ticks < 20_000 && g_spam.wave < 15 {
+        if g_spam.pending_doctrine {
+            g_spam.choose_doctrine(Doctrine::Arsenal);
+        }
+        if g_spam.phase == Phase::Build {
+            if let Some(pos) = find_in_range_legal_spot(&g_spam, single_def) {
+                g_spam.build_choice = Some((single_def, 1));
+                let _ = g_spam.try_build_at(pos);
+            }
+            g_spam.send_wave();
+        }
+        g_spam.update(0.1);
+        spam_ticks += 1;
+    }
+    assert_eq!(
+        g_spam.phase,
+        Phase::Defeat,
+        "Shallow un-upgraded spam must fail to hold mixed campaign encounters"
+    );
+
+    // 3. Competent mixed strategy with legal in-range purchases and upgrades
+    let mut g_mixed = Game::new();
+    g_mixed.start_campaign(42, Difficulty::Veteran);
+    g_mixed.speed = 2.0;
+
+    let siege_def = def_by_family(Family::Siege);
+    let single_def = def_by_family(Family::Single);
+
+    // Build Siege Tower (splash) on legal in-range grass
+    let p_siege = find_in_range_legal_spot(&g_mixed, siege_def).expect("legal spot for siege");
+    g_mixed.build_choice = Some((siege_def, 1));
+    assert!(g_mixed.try_build_at(p_siege));
+    let siege_idx = 0;
+
+    // Upgrade Siege to Tier 2 (Demon Hunter)
+    g_mixed.upgrade(siege_idx);
+
+    // Build Single-target Tower for focused DPS
+    let p_single = find_in_range_legal_spot(&g_mixed, single_def).expect("legal spot for single");
+    g_mixed.build_choice = Some((single_def, 1));
+    assert!(g_mixed.try_build_at(p_single));
+
+    // Send wave and run through multiple encounters
+    g_mixed.send_wave();
+    let mut ticks = 0;
+    while g_mixed.phase != Phase::Defeat && ticks < 25_000 && g_mixed.wave < 7 {
+        if g_mixed.pending_doctrine {
+            let pick = Doctrine::ALL
+                .into_iter()
+                .find(|&d| g_mixed.doctrine_rank(d) < 3)
+                .unwrap_or(Doctrine::Arsenal);
+            g_mixed.choose_doctrine(pick);
+        }
+        if g_mixed.phase == Phase::Build {
+            // Reinvest: upgrade existing towers or add new towers
+            for ti in 0..g_mixed.towers.len() {
+                g_mixed.upgrade(ti);
+            }
+            if let Some(pos) = find_in_range_legal_spot(&g_mixed, siege_def) {
+                g_mixed.build_choice = Some((siege_def, 1));
+                let _ = g_mixed.try_build_at(pos);
+            }
+            g_mixed.send_wave();
+        }
+        g_mixed.update(0.1);
+        ticks += 1;
+    }
+
+    assert_ne!(
+        g_mixed.phase,
+        Phase::Defeat,
+        "Competent mixed build should survive early encounters"
+    );
+    assert!(
+        g_mixed.wave >= 5,
+        "Competent mixed build should advance across multiple encounters (reached {})",
+        g_mixed.wave
+    );
+}
+
+fn boundary_fixture(encounter: u16) -> Game {
+    let mut g = Game::new();
+    assert!(g.start_campaign_diagnostic_fixture(
+        0xCA11_6000 + encounter as u64,
+        Difficulty::Classic,
+        encounter,
+    ));
+    g.speed = 2.0;
+    g
+}
+
+fn pilot_tick(g: &mut Game) {
+    if g.pending_doctrine {
+        let pick = Doctrine::ALL
+            .into_iter()
+            .find(|&d| g.doctrine_rank(d) < 3)
+            .expect("campaign perk cap left no legal choice");
+        g.choose_doctrine(pick);
+        return;
+    }
+    if g.phase == Phase::Build {
+        g.send_wave();
+    }
+    g.update(0.125);
+    let alive = g.creeps.len();
+    for ci in 0..alive {
+        if g.creeps[ci].hp > 0.0 {
+            combat::damage_creep(g, ci, 1_000_000.0, usize::MAX, false);
+        }
+    }
+    if g
+        .campaign
+        .as_ref()
+        .is_some_and(campaign::CampaignState::can_rush)
+    {
+        g.send_wave();
+    }
+}
+
+fn run_until(g: &mut Game, limit: usize, predicate: impl Fn(&Game) -> bool) {
+    for _ in 0..limit {
+        if predicate(g) {
+            return;
+        }
+        pilot_tick(g);
+    }
+    panic!(
+        "campaign diagnostic fixture exceeded {limit} production ticks: phase {:?}, wave {}, creeps {}, expected reward {:?}, campaign {:?}",
+        g.phase,
+        g.wave,
+        g.creeps.len(),
+        g.campaign.as_ref().map(|s| s.current().reward),
+        g.campaign,
+    );
+}
+
+#[test]
+fn campaign_boundary_fixtures_use_live_transition_code() {
+    let mut thirty_five = boundary_fixture(35);
+    run_until(&mut thirty_five, 2_500, |g| {
+        g.phase == Phase::Combat
+            && g.campaign_encounter() == Some(37)
+            && g.wave == 37
+    });
+    assert_ne!(thirty_five.phase, Phase::Victory);
+    assert_eq!(thirty_five.campaign_chapter(), Some(1));
+
+    let mut sixty = boundary_fixture(60);
+    run_until(&mut sixty, 2_500, |g| {
+        g.phase == Phase::Combat
+            && g.campaign_encounter() == Some(61)
+            && g.wave == 61
+    });
+    assert_ne!(sixty.phase, Phase::Victory);
+    assert_eq!(sixty.campaign_chapter(), Some(2));
+    assert!(sixty.gold > 0, "chapter purse did not enter the live economy");
+}
+
+#[test]
+fn campaign_economy_is_tuned_by_difficulty() {
+    // 1. Starting gold distinction
+    assert_eq!(Difficulty::Classic.campaign_starting_gold(), 600);
+    assert_eq!(Difficulty::Veteran.campaign_starting_gold(), 500);
+    assert_eq!(Difficulty::Nightmare.campaign_starting_gold(), 420);
+
+    let enc1 = campaign::resolved_encounter(1);
+    let raw_reward = enc1.reward;
+    let total_bodies: usize = enc1.packets.iter().map(|p| p.bodies as usize).sum();
+
+    let classic_budget = Difficulty::Classic.campaign_encounter_budget(raw_reward, 1, 1);
+    let vet_budget = Difficulty::Veteran.campaign_encounter_budget(raw_reward, 1, 1);
+    let nm_budget = Difficulty::Nightmare.campaign_encounter_budget(raw_reward, 1, 1);
+
+    assert_eq!(classic_budget, raw_reward);
+    assert_eq!(vet_budget, (raw_reward as f32 * 0.82).round() as u32);
+    assert_eq!(nm_budget, (raw_reward as f32 * 0.68).round() as u32);
+    assert!(classic_budget > vet_budget);
+    assert!(vet_budget > nm_budget);
+
+    // 2. Compare live deployment payout on Encounter 1 across Classic, Veteran, Nightmare
+    let mut g_classic = Game::new();
+    g_classic.start_campaign(42, Difficulty::Classic);
+    assert_eq!(g_classic.gold, 600);
+    g_classic.send_wave();
+    let classic_payout = (g_classic.gold - 600) as u32;
+    assert_eq!(classic_payout, classic_budget * 40 / 100);
+
+    let mut g_vet = Game::new();
+    g_vet.start_campaign(42, Difficulty::Veteran);
+    assert_eq!(g_vet.gold, 500);
+    g_vet.send_wave();
+    let vet_payout = (g_vet.gold - 500) as u32;
+    assert_eq!(vet_payout, vet_budget * 40 / 100);
+
+    let mut g_nm = Game::new();
+    g_nm.start_campaign(42, Difficulty::Nightmare);
+    assert_eq!(g_nm.gold, 420);
+    g_nm.send_wave();
+    let nm_payout = (g_nm.gold - 420) as u32;
+    assert_eq!(nm_payout, nm_budget * 40 / 100);
+
+    assert!(classic_payout > vet_payout);
+    assert!(vet_payout > nm_payout);
+
+    // 3. Spawning all bodies on Veteran:
+    // Scaled kill budget = vet_budget - vet_payout.
+    // Quotients and remainders distribute exactly with zero payouts allowed.
+    let vet_kill_budget = vet_budget - vet_payout;
+    let expected_one_bounties = (vet_kill_budget % total_bodies as u32) as usize;
+    let expected_zero_bounties = total_bodies - expected_one_bounties;
+
+    g_vet.campaign_pressure_grace = 1_000_000.0;
+    while g_vet.campaign.as_ref().unwrap().queued_bodies_left > 0 || g_vet.creeps.len() < total_bodies {
+        g_vet.update(0.1);
+    }
+    assert_eq!(g_vet.creeps.len(), total_bodies);
+    let zero_bounties = g_vet.creeps.iter().filter(|c| c.bounty == 0).count();
+    let one_bounties = g_vet.creeps.iter().filter(|c| c.bounty == 1).count();
+    assert_eq!(one_bounties, expected_one_bounties);
+    assert_eq!(zero_bounties, expected_zero_bounties, "Zero payouts must be allowed for excess bodies");
+
+    let total_bounties: u32 = g_vet.creeps.iter().map(|c| c.bounty).sum();
+    assert_eq!(total_bounties, vet_kill_budget);
+
+    // 4. Defeat all creeps and collect all bounties
+    for ci in 0..g_vet.creeps.len() {
+        combat::damage_creep(&mut g_vet, ci, 1_000_000.0, usize::MAX, false);
+    }
+    g_vet.update(0.1);
+    assert_eq!(g_vet.creeps.len(), 0, "All creeps must be cleared");
+    assert_eq!(
+        g_vet.gold,
+        500 + vet_budget as i64,
+        "Total gold earned is starting gold + exact scaled encounter budget"
+    );
+
+    // 5. Advance until encounter 2 transitions
+    for _ in 0..150 {
+        if g_vet.campaign_encounter() == Some(2) {
+            break;
+        }
+        g_vet.update(0.2);
+    }
+    assert_eq!(g_vet.campaign_encounter(), Some(2));
+    assert_eq!(g_vet.gold, 500 + vet_budget as i64);
+
+    // 6. Save and load verification: assert exact total across full kill and save-load
+    g_vet.campaign_pressure_grace = crate::game::campaign::BREACH_SECONDS;
+    let saved = crate::save::Save::capture(&g_vet);
+    let mut g_restored = Game::new();
+    assert!(
+        saved.restore(&mut g_restored),
+        "Campaign state with zero bounties and scaled ledger restores cleanly"
+    );
+    assert_eq!(g_restored.gold, 500 + vet_budget as i64);
+    assert_eq!(g_restored.campaign_encounter(), Some(2));
+}
+
+#[test]
+fn campaign_commander_lap_limit_triggers_defeat_on_veteran() {
+    assert_eq!(Difficulty::Veteran.commander_lap_limit(), Some(4));
+    assert_eq!(Difficulty::Nightmare.commander_lap_limit(), Some(3));
+    assert_eq!(Difficulty::Classic.commander_lap_limit(), None);
+
+    let mut g_vet = Game::new();
+    g_vet.start_campaign(42, Difficulty::Veteran);
+    g_vet.send_wave();
+
+    let wave_def = WaveDef {
+        name: "Test Commander",
+        tag: "Commander",
+        model: Model::Warrior,
+        scale: 1.5,
+        count: 1,
+        hp: 5000.0,
+        armour: 5,
+        armour_type: ArmourType::Hero,
+        speed: 1.0,
+        flying: false,
+        spawn_gap: 0.0,
+        lead_in: 0.0,
+    };
+    g_vet.spawn_creep_ranked(&wave_def, wave_def.hp, 1.0, 0.0, false, true);
+    let boss_idx = g_vet.creeps.len() - 1;
+    g_vet.creeps[boss_idx].boss = true;
+    g_vet.creeps[boss_idx].laps = 3;
+
+    g_vet.check_end();
+    assert_eq!(g_vet.phase, Phase::Combat, "3 laps on Veteran should not defeat yet");
+
+    g_vet.creeps[boss_idx].laps = 4;
+    g_vet.check_end();
+    assert_eq!(g_vet.phase, Phase::Defeat, "4 laps on Veteran must trigger Phase::Defeat");
+
+    let mut g_classic = Game::new();
+    g_classic.start_campaign(42, Difficulty::Classic);
+    g_classic.send_wave();
+    g_classic.spawn_creep_ranked(&wave_def, wave_def.hp, 1.0, 0.0, false, true);
+    let classic_boss_idx = g_classic.creeps.len() - 1;
+    g_classic.creeps[classic_boss_idx].boss = true;
+    g_classic.creeps[classic_boss_idx].laps = 5;
+    g_classic.check_end();
+    assert_ne!(g_classic.phase, Phase::Defeat, "Classic mode has no commander lap limit");
+}
+
+#[test]
+fn campaign_commander_classes_change_rules_and_save_their_one_shots() {
+    let commander = WaveDef {
+        name: "Commander", tag: "Commander", model: Model::Warrior, scale: 1.2,
+        count: 1, hp: 900.0, armour: 8, armour_type: ArmourType::Hero,
+        speed: 0.8, flying: false, spawn_gap: 0.0, lead_in: 0.0,
+    };
+
+    // C1E10 is a Bulwark: breaking its physical shield opens a finite,
+    // visibly different armour window rather than changing an HP multiplier.
+    let mut bulwark = Game::new();
+    bulwark.start_campaign(77, Difficulty::Veteran);
+    bulwark.campaign.as_mut().unwrap().encounter = 10;
+    bulwark.spawn_creep_ranked(&commander, commander.hp, 1.0, 0.0, false, true);
+    let b = bulwark.creeps.len() - 1;
+    bulwark.creeps[b].campaign_encounter = 10;
+    bulwark.creeps[b].shield = 100.0;
+    bulwark.creeps[b].max_shield = 100.0;
+    bulwark.creeps[b].shield = 0.0;
+    bulwark.step_campaign_commander_mechanics(0.1);
+    assert_eq!(bulwark.creeps[b].armour, 0, "Bulwark shield break exposes its core");
+    assert_eq!(bulwark.campaign.as_ref().unwrap().commander_triggers & 1, 1);
+
+    // C1E30 is a Brood Keeper: thresholds add a fixed twelve zero-bounty
+    // bodies and the trigger mask survives an exact campaign save.
+    let mut brood = Game::new();
+    brood.start_campaign(78, Difficulty::Veteran);
+    brood.campaign.as_mut().unwrap().encounter = 30;
+    brood.wave = 29;
+    brood.prep = false;
+    brood.begin_campaign_encounter();
+    brood.spawn_creep_ranked(&commander, commander.hp, 1.0, 0.0, false, true);
+    let boss = brood.creeps.len() - 1;
+    brood.creeps[boss].campaign_encounter = 30;
+    brood.creeps[boss].hp = brood.creeps[boss].max_hp * 0.30;
+    brood.step_campaign_commander_mechanics(0.1);
+    assert_eq!(brood.creeps.len(), 13, "two thresholds create two bounded broods");
+    assert!(brood.creeps.iter().skip(1).all(|c| c.bounty == 0));
+    let saved = crate::save::Save::capture(&brood);
+    let mut restored = Game::new();
+    assert!(saved.restore(&mut restored));
+    assert_eq!(
+        restored.campaign.as_ref().unwrap().commander_triggers,
+        brood.campaign.as_ref().unwrap().commander_triggers,
+        "reload preserves which brood thresholds have already fired"
+    );
+
+    // C1E20's Hunt Captain is born at the final packet, not at encounter
+    // zero. Its first separated pulse fires after birth and a living boss can
+    // be saved well past the 120-second packet schedule.
+    let mut hunt = Game::new();
+    hunt.start_campaign(79, Difficulty::Veteran);
+    hunt.campaign.as_mut().unwrap().encounter = 20;
+    hunt.wave = 19;
+    hunt.prep = false;
+    hunt.begin_campaign_encounter();
+    {
+        let state = hunt.campaign.as_mut().unwrap();
+        state.elapsed_seconds = 146.0;
+        state.commander_spawned_at = Some(122.0);
+    }
+    hunt.spawn_creep_ranked(&commander, commander.hp, 1.0, 2.0, false, true);
+    hunt.spawn_creep_ranked(&commander, commander.hp, 1.0, 2.2, false, false);
+    let hunt_boss = hunt.creeps.len() - 2;
+    hunt.creeps[hunt_boss].campaign_encounter = 20;
+    hunt.creeps[hunt_boss + 1].campaign_encounter = 20;
+    let escort_speed = hunt.creeps[hunt_boss + 1].base_speed;
+    hunt.step_campaign_commander_mechanics(0.1);
+    assert_eq!(hunt.campaign.as_ref().unwrap().commander_triggers & 0x0f, 1);
+    assert!(hunt.creeps[hunt_boss + 1].base_speed > escort_speed, "first Hunt pulse hastes a live escort");
+    let saved_hunt = crate::save::Save::capture(&hunt);
+    let mut resumed_hunt = Game::new();
+    assert!(saved_hunt.restore(&mut resumed_hunt), "living commander cleanup resumes after 120 seconds");
+    resumed_hunt.campaign.as_mut().unwrap().elapsed_seconds = 168.0;
+    resumed_hunt.step_campaign_commander_mechanics(0.1);
+    assert_eq!(resumed_hunt.campaign.as_ref().unwrap().commander_triggers & 0x0f, 2, "second Hunt pulse remains separately timed after resume");
+}
+
+#[test]
+fn campaign_commander_state_resets_between_different_commander_classes() {
+    let mut state = campaign::CampaignState::default();
+    // E10 Bulwark has fired a mechanic; completing it must not pre-arm the
+    // distinct E20 Hunt Captain. Use the production `finish` transition for
+    // every intervening encounter, rather than resetting fields in a fixture.
+    state.encounter = 10;
+    state.commander_triggers = 0b111;
+    state.commander_window_at = 123.0;
+    state.commander_spawned_at = Some(120.0);
+    while state.encounter < 20 {
+        let current = state.current();
+        state.elapsed_seconds = current.duration_seconds as f32;
+        state.deployed_packets = current.packets.len() as u8;
+        assert!(state.finish(0).is_some(), "E{} did not finish", current.id.global);
+        assert_eq!(state.commander_triggers, 0, "E{} inherited a prior commander trigger", state.encounter);
+        assert_eq!(state.commander_window_at, -1.0, "E{} inherited a prior commander window", state.encounter);
+        assert_eq!(state.commander_spawned_at, None, "E{} inherited a prior commander birth", state.encounter);
+    }
+    assert_eq!(state.current().commander, Some(campaign::CommanderClass::HuntCaptain));
+}
+
+#[test]
+fn campaign_poison_uses_tenth_legacy_rider_budget_without_touching_legacy() {
+    let legacy = TOWERS[root(Family::Poison)].abil.poison_dps;
+    assert_eq!(legacy, 100.0, "source Poison root arithmetic changed");
+    let legacy_game = Game::new();
+    assert_eq!(combat::effective_poison_dps(&legacy_game, legacy), 100.0);
+    let mut campaign_game = Game::new();
+    campaign_game.start_campaign(0xC015_0A_u64, Difficulty::Veteran);
+    assert_eq!(combat::effective_poison_dps(&campaign_game, legacy), 10.0);
+    assert_eq!(10.0 * 12.0, 120.0, "Campaign Poison root twelve-stack cap must be explicit");
+}
+
+#[test]
+fn hard_campaign_commanders_use_authored_floor_once_and_classic_isolated() {
+    let encounter = campaign::resolved_encounter(10);
+    let packet = *encounter.packets.last().expect("commander packet");
+    for difficulty in [Difficulty::Veteran, Difficulty::Nightmare] {
+        let mut game = Game::new();
+        game.start_campaign(0xC0AA_0100_u64, difficulty);
+        game.spawn_campaign_body(&encounter, packet, 0, 0, true);
+        let boss = game.creeps.last().expect("spawned commander");
+        let floor = campaign_commander_hp_floor(difficulty, 10);
+        assert!(boss.hp >= floor && boss.max_hp >= floor, "{difficulty:?} commander floor absent");
+        assert_eq!(boss.hp, boss.max_hp, "floor did not reset current HP at birth");
+    }
+    let mut classic = Game::new();
+    classic.start_campaign(0xC0AA_100_u64, Difficulty::Classic);
+    classic.spawn_campaign_body(&encounter, packet, 0, 0, true);
+    assert!(classic.creeps.last().unwrap().max_hp < campaign_commander_hp_floor(Difficulty::Veteran, 10));
+}
+
+#[test]
+fn campaign_ordinary_action_script_veteran_challenge() {
+    let run_simulation = |label: &str, target: u32, freeze_after: Option<u32>, init_fn: &dyn Fn(&mut Game)| -> (Phase, u32, i64, usize, f32, u32, f32, bool) {
+        let mut g = Game::new();
+        g.start_campaign(101, Difficulty::Veteran);
+        g.speed = 4.0;
+        init_fn(&mut g);
+        g.send_wave();
+        let mut ticks = 0;
+        let mut e121_roster_logged = false;
+        let mut weighted_peak_pressure = 0.0_f32;
+        let mut chapter_peak_pressure = [0.0_f32; 10];
+        let mut commander_seconds = Vec::new();
+        // This is ordinary player automation, not the instant-kill diagnostic:
+        // it must survive the first commander (E10) and first air formation
+        // (E21) with legal purchases and reinvested encounter income.
+        while !matches!(g.phase, Phase::Defeat | Phase::Victory) && ticks < 180_000 && g.wave < target {
+            if g.pending_doctrine {
+                let pick = Doctrine::ALL
+                    .into_iter()
+                    .find(|&d| g.doctrine_rank(d) < 3)
+                    .unwrap_or(Doctrine::Arsenal);
+                g.choose_doctrine(pick);
+            }
+            if g.phase == Phase::Build {
+                let investing = freeze_after.is_none_or(|checkpoint| g.wave < checkpoint);
+                // The long trace buys from earned gold only. Rotate coverage
+                // so later armoured/air encounters cannot be passed by an
+                // opening board that merely compounds old tiers forever.
+                if investing && g.gold >= 240 {
+                    let family = match g.wave % 4 {
+                        0 => Family::Siege,
+                        1 => Family::Single,
+                        2 => Family::Air,
+                        _ => Family::Slow,
+                    };
+                    let def = def_by_family(family);
+                    if let Some(pos) = find_in_range_legal_spot(&g, def) {
+                        g.build_choice = Some((def, 1));
+                        let _ = g.try_build_at(pos);
+                    }
+                }
+                if investing {
+                    for ti in 0..g.towers.len() {
+                        if g.towers[ti].has_choice() {
+                            let poison_def = def_by_family(Family::Poison);
+                            g.upgrade_into(ti, poison_def);
+                        } else {
+                            g.upgrade(ti);
+                        }
+                    }
+                }
+                g.send_wave();
+            }
+            // A commander can be born and die inside one simulation update;
+            // preserve the old encounter state so its physical lifetime is
+            // still measurable when the encounter cursor advances.
+            let before = g.campaign.clone();
+            g.update(0.1);
+            let weighted_pressure = g.campaign_pressure();
+            weighted_peak_pressure = weighted_peak_pressure.max(weighted_pressure);
+            if let Some(chapter) = g.campaign_chapter() {
+                let slot = chapter.saturating_sub(1) as usize;
+                if let Some(peak) = chapter_peak_pressure.get_mut(slot) {
+                    *peak = peak.max(weighted_pressure);
+                }
+            }
+            if let Some(previous) = before {
+                let previous_encounter = previous.encounter;
+                if previous.current().commander.is_some()
+                    && g.campaign.as_ref().is_none_or(|state| state.encounter != previous_encounter)
+                    && let Some(spawned) = previous.commander_spawned_at
+                {
+                    commander_seconds.push((previous_encounter, (previous.elapsed_seconds - spawned).max(0.0)));
+                }
+            }
+            if !e121_roster_logged && g.wave >= 121 {
+                e121_roster_logged = true;
+                let mut roster: std::collections::BTreeMap<String, (usize, f32)> = std::collections::BTreeMap::new();
+                for tower in &g.towers {
+                    let entry = roster
+                        .entry(format!("{} L{}", tower.full_name(), tower.level()))
+                        .or_insert((0, 0.0));
+                    entry.0 += 1;
+                    entry.1 += tower.dmg() * tower.rate();
+                }
+                let total_dps: f32 = roster.values().map(|(_, dps)| dps).sum();
+                eprintln!(
+                    "{label} E121 roster: {} towers, {:.0} raw direct DPS, {}",
+                    g.towers.len(), total_dps,
+                    roster.iter().map(|(name, (count, dps))| format!("{count}x {name}={dps:.0}")).collect::<Vec<_>>().join("; ")
+                );
+            }
+            ticks += 1;
+        }
+        let final_dps: f32 = g.towers.iter().map(|tower| tower.dmg() * tower.rate()).sum();
+        let mut final_roster: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+        for tower in &g.towers {
+            *final_roster.entry(format!("{} L{}", tower.full_name(), tower.level())).or_default() += 1;
+        }
+        eprintln!(
+            "{label} final roster: {} towers, {final_dps:.0} raw direct DPS, {}",
+            g.towers.len(),
+            final_roster.iter().map(|(name, count)| format!("{count}x {name}")).collect::<Vec<_>>().join("; ")
+        );
+        eprintln!(
+            "{label} pressure: weighted peak {weighted_peak_pressure:.1}; per-chapter weighted peaks {:?}; commander live seconds {:?}",
+            chapter_peak_pressure, commander_seconds
+        );
+        (g.phase, g.wave, g.gold, g.towers.len(), g.campaign_pressure(), g.stats.peak_circling,
+            weighted_peak_pressure, g.campaign.as_ref().is_some_and(|state| state.complete))
+    };
+
+    let siege_def = def_by_family(Family::Siege);
+    let single_def = def_by_family(Family::Single);
+    let poison_def = def_by_family(Family::Poison);
+
+    // Baseline failures:
+    // 1. Unattended board on Veteran fails in early encounters (wave <= 2)
+    let (phase_unattended, wave_unattended) = {
+        let mut g = Game::new();
+        g.start_campaign(101, Difficulty::Veteran);
+        g.speed = 4.0;
+        g.update(CAMPAIGN_AUTOSTART_SECONDS + 0.1);
+        let mut ticks = 0;
+        while g.phase != Phase::Defeat && ticks < 15_000 {
+            g.update(0.1);
+            ticks += 1;
+        }
+        (g.phase, g.wave)
+    };
+    assert_eq!(phase_unattended, Phase::Defeat, "Unattended Veteran board must fail");
+    assert!(wave_unattended <= 2, "Unattended Veteran board must fail at encounter 1 or 2");
+
+    // 2. Shallow un-upgraded single spam fails early
+    let (phase_spam, wave_spam) = {
+        let mut g = Game::new();
+        g.start_campaign(101, Difficulty::Veteran);
+        g.speed = 4.0;
+        for _ in 0..6 {
+            if let Some(pos) = find_in_range_legal_spot(&g, single_def) {
+                g.build_choice = Some((single_def, 1));
+                let _ = g.try_build_at(pos);
+            }
+        }
+        g.send_wave();
+        let mut ticks = 0;
+        while g.phase != Phase::Defeat && ticks < 20_000 && g.wave < 10 {
+            if g.pending_doctrine {
+                g.choose_doctrine(Doctrine::Arsenal);
+            }
+            if g.phase == Phase::Build {
+                g.send_wave();
+            }
+            g.update(0.1);
+            ticks += 1;
+        }
+        (g.phase, g.wave)
+    };
+    assert_eq!(phase_spam, Phase::Defeat, "Shallow spam must fail on Veteran");
+    assert!(wave_spam <= 3, "Shallow un-upgraded spam must fail by encounter 3");
+
+    // Strategy 1: AoE Siege splash focus
+    let (phase_strat1, wave_strat1, ..) = run_simulation("siege", 22, None, &|g| {
+        let p1 = find_in_range_legal_spot(g, siege_def).expect("siege spot 1");
+        g.build_choice = Some((siege_def, 1));
+        assert!(g.try_build_at(p1));
+        g.upgrade(0);
+
+        let p2 = find_in_range_legal_spot(g, siege_def).expect("siege spot 2");
+        g.build_choice = Some((siege_def, 1));
+        assert!(g.try_build_at(p2));
+        g.upgrade(1);
+    });
+    assert_ne!(phase_strat1, Phase::Defeat, "AoE Siege strategy survives through deep encounters");
+    assert!(wave_strat1 >= 22, "AoE Siege strategy must clear boss E10 and air E21 (reached {})", wave_strat1);
+
+    // Strategy 2: Single-target & Poison branching DPS control
+    let (phase_strat2, wave_strat2, ..) = run_simulation("single-poison", 22, None, &|g| {
+        for _ in 0..3 {
+            if let Some(pos) = find_in_range_legal_spot(g, single_def) {
+                g.build_choice = Some((single_def, 1));
+                let _ = g.try_build_at(pos);
+            }
+        }
+        for ti in 0..g.towers.len() {
+            g.upgrade_into(ti, poison_def);
+            g.upgrade(ti);
+        }
+    });
+    assert_ne!(phase_strat2, Phase::Defeat, "Single-target/Poison strategy survives through deep encounters");
+    assert!(wave_strat2 >= 22, "Single-target/Poison strategy must clear boss E10 and air E21 (reached {})", wave_strat2);
+
+    // Strategy 3: Mixed synergy (AoE Siege + Single DPS + Upgrades)
+    let (phase_strat3, wave_strat3, ..) = run_simulation("mixed", 22, None, &|g| {
+        let p1 = find_in_range_legal_spot(g, siege_def).expect("siege spot");
+        g.build_choice = Some((siege_def, 1));
+        assert!(g.try_build_at(p1));
+        g.upgrade(0);
+
+        let p2 = find_in_range_legal_spot(g, single_def).expect("single spot");
+        g.build_choice = Some((single_def, 1));
+        assert!(g.try_build_at(p2));
+        g.upgrade_into(1, poison_def);
+
+        if let Some(p3) = find_in_range_legal_spot(g, siege_def) {
+            g.build_choice = Some((siege_def, 1));
+            let _ = g.try_build_at(p3);
+        }
+    });
+    assert_ne!(phase_strat3, Phase::Defeat, "Mixed synergy strategy survives through deep encounters");
+    assert!(wave_strat3 >= 22, "Mixed synergy strategy must clear boss E10 and air E21 (reached {})", wave_strat3);
+
+    // A longer, ordinary-action reinvestment trace spans the full campaign. It
+    // does not use the instant-kill fixture, grant gold, reset towers, or
+    // clear enemies; each build beat spends only its accumulated economy.
+    let (phase_long, wave_long, spare_gold, defenses, pressure, raw_peak_count, weighted_peak_pressure, complete) = run_simulation("active", 601, None, &|g| {
+        for family in [Family::Siege, Family::Single, Family::Air, Family::Slow] {
+            let def = def_by_family(family);
+            if let Some(pos) = find_in_range_legal_spot(g, def) {
+                g.build_choice = Some((def, 1));
+                let _ = g.try_build_at(pos);
+            }
+        }
+    });
+    eprintln!("ordinary reinvestment terminal: E{wave_long}, {spare_gold}g spare, {defenses} towers, {pressure:.1} current weighted pressure, raw peak count {raw_peak_count}, weighted peak pressure {weighted_peak_pressure:.1}");
+    assert_eq!(phase_long, Phase::Victory, "ordinary reinvestment must resolve the final commander");
+    assert!(complete, "Victory must carry CampaignState.complete, not a timed-out living boss");
+    assert!(wave_long >= 600, "long reinvestment trace ended at E{wave_long}; gold {spare_gold}, towers {defenses}, pressure {pressure:.1}");
+
+    let (phase_frozen, wave_frozen, frozen_gold, frozen_towers, frozen_pressure, frozen_raw_peak_count, frozen_weighted_peak_pressure, frozen_complete) = run_simulation("frozen-after-E121", 601, Some(121), &|g| {
+        for family in [Family::Siege, Family::Single, Family::Air, Family::Slow] {
+            let def = def_by_family(family);
+            if let Some(pos) = find_in_range_legal_spot(g, def) {
+                g.build_choice = Some((def, 1));
+                let _ = g.try_build_at(pos);
+            }
+        }
+    });
+    eprintln!("frozen-after-E121 terminal: {phase_frozen:?} E{wave_frozen}, {frozen_gold}g spare, {frozen_towers} towers, {frozen_pressure:.1} current weighted pressure, raw peak count {frozen_raw_peak_count}, weighted peak pressure {frozen_weighted_peak_pressure:.1}, complete {frozen_complete}");
+    assert_eq!(
+        phase_frozen,
+        Phase::Defeat,
+        "a board frozen after E121 must actually lose; an incomplete timeout is not balance evidence"
+    );
+}
+
+/// Bounded early-campaign evidence, intentionally separate from the long
+/// regression trace above. Run with:
+/// `cargo test terra_challenge100_first60_baseline -- --ignored --nocapture`
+///
+/// This is a deterministic ordinary-play probe, not an optimal-play claim:
+/// every purchase uses the live campaign purse, every placement goes through
+/// `try_build_at`, and combat advances through production cooldown/projectile
+/// updates. It exists to give tuning a small, auditable first-60 baseline.
+#[derive(Clone, Copy)]
+enum EarlyPolicy {
+    OrdinaryMixed,
+    EntranceAwareMixed,
+    EntranceAwareCorruption,
+    EntranceAwareFrozenAfterE10,
+    CheapPoisonFrozenAfterE10,
+    EntranceAwareMissesFirstAir,
+}
+
+impl EarlyPolicy {
+    fn label(self) -> &'static str {
+        match self {
+            Self::OrdinaryMixed => "ordinary-script-adapted mixed",
+            Self::EntranceAwareMixed => "entrance-aware economical mixed",
+            Self::EntranceAwareCorruption => "entrance-aware mixed with saved Corruption",
+            Self::EntranceAwareFrozenAfterE10 => "entrance-aware mixed, frozen after E10",
+            Self::CheapPoisonFrozenAfterE10 => "cheap-Poison mixed baseline, frozen after E10",
+            Self::EntranceAwareMissesFirstAir => "entrance-aware mixed, ignores first air warning",
+        }
+    }
+
+    fn may_invest(self, encounter: u16) -> bool {
+        !matches!(self, Self::EntranceAwareFrozenAfterE10 | Self::CheapPoisonFrozenAfterE10) || encounter <= 10
+    }
+
+    fn ignores_air(self, encounter: u16) -> bool {
+        matches!(self, Self::EntranceAwareMissesFirstAir) && encounter <= 21
+    }
+}
+
+fn early_has_family(g: &Game, family: Family) -> bool {
+    g.towers.iter().any(|tower| tower.family() == family)
+}
+
+fn early_buy(g: &mut Game, family: Family, entrance_aware: bool) -> bool {
+    let def = def_by_family(family);
+    let pos = if entrance_aware {
+        find_entrance_aware_legal_spot(g, def, g.towers.is_empty())
+    } else {
+        find_best_coverage_legal_spot(g, def)
+    };
+    let Some(pos) = pos else { return false };
+    g.build_choice = Some((def, 1));
+    let bought = g.try_build_at(pos);
+    g.build_choice = None;
+    bought
+}
+
+fn early_has_coming_trait(g: &Game, trait_: campaign::ResolvedTrait) -> bool {
+    let Some(state) = g.campaign.as_ref() else { return false };
+    let start = state.encounter;
+    (start..=(start + 3).min(60)).any(|encounter| {
+        campaign::resolved_encounter(encounter)
+            .packets
+            .iter()
+            .any(|packet| packet.traits.contains(&Some(trait_)))
+    })
+}
+
+fn early_upgrade_one(g: &mut Game) -> bool {
+    let Some((tower, into, _)) = (0..g.towers.len())
+        .filter(|&tower| !g.towers[tower].has_choice())
+        .flat_map(|tower| g.upgrade_choices(tower).into_iter().map(move |(into, cost)| (tower, into, cost)))
+        .min_by_key(|(_, _, cost)| *cost)
+    else { return false };
+    let before = g.stats.gold_spent;
+    g.upgrade_into(tower, into);
+    g.stats.gold_spent != before
+}
+
+fn early_upgrade_one_including_choice(g: &mut Game) -> bool {
+    let Some((tower, into, _)) = cheapest_upgrade(g) else { return false };
+    let before = g.stats.gold_spent;
+    g.upgrade_into(tower, into);
+    g.stats.gold_spent != before
+}
+
+fn early_invest(g: &mut Game, policy: EarlyPolicy) {
+    let encounter = g.campaign.as_ref().map_or(1, |state| state.encounter);
+    if !policy.may_invest(encounter) {
+        return;
+    }
+    let entrance_aware = !matches!(policy, EarlyPolicy::OrdinaryMixed);
+    // The ordinary-script variant begins with the existing test's mixed
+    // roles. The other variants deliberately put their first Siege/Single at
+    // the two-direction entrance, then reserve for warned counters.
+    let wanted_air = early_has_coming_trait(g, campaign::ResolvedTrait::Flying)
+        && !policy.ignores_air(encounter);
+    let wanted_focus = early_has_coming_trait(g, campaign::ResolvedTrait::Armoured)
+        || early_has_coming_trait(g, campaign::ResolvedTrait::Shielded);
+    let next = if !early_has_family(g, Family::Siege) {
+        Some(Family::Siege)
+    } else if !early_has_family(g, Family::Single) {
+        Some(Family::Single)
+    } else if wanted_air && !early_has_family(g, Family::Air) {
+        Some(Family::Air)
+    } else if !early_has_family(g, Family::Slow) {
+        Some(Family::Slow)
+    } else {
+        None
+    };
+    if let Some(family) = next {
+        if early_buy(g, family, entrance_aware) {
+            return;
+        }
+    }
+    // The focused alternative banks through the opening. Its one legal
+    // Corruption purchase is intentionally made from live combat below, when
+    // earned gold reaches the threshold during the first commander.
+    if matches!(policy, EarlyPolicy::EntranceAwareCorruption)
+        && encounter >= 6 && !early_has_family(g, Family::Corruption)
+    {
+        return;
+    }
+    // The Single seed is the deliberately retained focused-damage answer to
+    // armour. Before the first air warning, reserve rather than consuming the
+    // Air purchase in a greedy Siege upgrade; the miss-warning variant makes
+    // the opposite, explicitly labelled choice.
+    if wanted_air && !early_has_family(g, Family::Air) {
+        let _ = early_buy(g, Family::Air, entrance_aware);
+        return;
+    }
+    let _ = wanted_focus; // Single is already present before an armour warning.
+    // A deliberately conservative reinvestment beat: one real upgrade only,
+    // never fixture money or an all-at-once roster.
+    if matches!(policy, EarlyPolicy::CheapPoisonFrozenAfterE10) {
+        let _ = early_upgrade_one_including_choice(g);
+    } else {
+        let _ = early_upgrade_one(g);
+    }
+}
+
+#[test]
+#[ignore = "prints bounded first-60 Campaign challenge evidence"]
+fn terra_challenge100_first60_baseline() {
+    #[derive(Default)]
+    struct Interval {
+        sampled_peak_pressure: f32,
+        seconds_over_70: f32,
+        min_grace: f32,
+        final_deployment_survivors: Vec<String>,
+        purchases: u32,
+        upgrades: u32,
+        spent_start: u64,
+    }
+
+    fn run(policy: EarlyPolicy, difficulty: Difficulty) {
+        const SEED: u64 = 0xC100_0060;
+        let mut g = Game::new();
+        g.start_campaign(SEED, difficulty);
+        // Compare simulated rather than wall-clock time. `update` applies
+        // speed internally; active_seconds is the production campaign clock.
+        g.speed = 2.0;
+        let mut interval = Interval { min_grace: campaign::BREACH_SECONDS, spent_start: g.stats.gold_spent, ..Interval::default() };
+        let mut interval_start = 1_u16;
+        let mut commander_rows: Vec<String> = Vec::new();
+        let mut commander_recorded = std::collections::BTreeSet::new();
+        let mut deployment_recorded = std::collections::BTreeSet::new();
+        let mut focused_purchase: Option<(u16, i64)> = None;
+        let mut ticks = 0_u32;
+
+        while !matches!(g.phase, Phase::Defeat | Phase::Victory)
+            && g.campaign.as_ref().is_some_and(|state| state.encounter <= 60)
+            && ticks < 160_000
+        {
+            if g.pending_doctrine {
+                let doctrine = Doctrine::ALL.into_iter()
+                    .find(|&choice| g.doctrine_rank(choice) < 3)
+                    .unwrap_or(Doctrine::Arsenal);
+                g.choose_doctrine(doctrine);
+            }
+            if g.phase == Phase::Build {
+                let spent = g.stats.gold_spent;
+                let towers = g.towers.len();
+                early_invest(&mut g, policy);
+                if g.stats.gold_spent != spent {
+                    if g.towers.len() > towers { interval.purchases += 1; }
+                    else { interval.upgrades += 1; }
+                }
+                g.send_wave();
+            }
+
+            // A player may build during combat. The focused plan banks its
+            // ordinary income and takes exactly one direct Corruption purchase
+            // during E10 or later once it can legally pay 500g.
+            if matches!(policy, EarlyPolicy::EntranceAwareCorruption)
+                && focused_purchase.is_none()
+                && g.phase == Phase::Combat
+                && g.campaign.as_ref().is_some_and(|state| state.encounter >= 10)
+                && g.gold >= 500
+            {
+                let encounter = g.campaign.as_ref().unwrap().encounter;
+                let before_gold = g.gold;
+                if early_buy(&mut g, Family::Corruption, true) {
+                    focused_purchase = Some((encounter, before_gold - g.gold));
+                }
+            }
+
+            let before = g.campaign.clone();
+            let before_active = before.as_ref().map_or(0.0, |state| state.active_seconds);
+            g.update(0.1);
+            let simulated_dt = g.campaign.as_ref()
+                .map_or(0.0, |state| state.active_seconds - before_active) as f32;
+            let pressure = g.campaign_pressure();
+            interval.sampled_peak_pressure = interval.sampled_peak_pressure.max(pressure);
+            let capacity = g.flood_limit() as f32;
+            if pressure > capacity * 0.70 { interval.seconds_over_70 += simulated_dt; }
+            interval.min_grace = interval.min_grace.min(g.campaign_pressure_grace);
+
+            if let Some(state) = g.campaign.as_ref() {
+                if state.elapsed_seconds >= state.current().duration_seconds as f32
+                    && deployment_recorded.insert(state.encounter)
+                {
+                    let survivors = g.creeps.iter()
+                        .filter(|creep| creep.campaign_encounter == state.encounter).count();
+                    interval.final_deployment_survivors.push(format!("E{}={survivors}", state.encounter));
+                }
+            }
+
+            if let Some(old) = before {
+                let changed = g.campaign.as_ref().is_none_or(|state| state.encounter != old.encounter);
+                let same_commander = old.current().commander.is_some()
+                    && g.campaign.as_ref().is_some_and(|state| state.encounter == old.encounter);
+                let commander_alive = g.creeps.iter().any(|creep|
+                    creep.is_boss() && creep.campaign_encounter == old.encounter && creep.hp > 0.0);
+                if old.current().commander.is_some()
+                    && !commander_recorded.contains(&old.encounter)
+                    && ((same_commander && old.commander_spawned_at.is_some() && !commander_alive) || changed)
+                {
+                    if let Some(spawned) = old.commander_spawned_at {
+                        let death_at = if same_commander {
+                            g.campaign.as_ref().map_or(old.elapsed_seconds, |state| state.elapsed_seconds)
+                        } else {
+                            old.elapsed_seconds
+                        };
+                        commander_rows.push(format!(
+                            "E{} live {:.1}s, mechanics {}",
+                            old.encounter,
+                            (death_at - spawned).max(0.0),
+                            old.commander_triggers.count_ones(),
+                        ));
+                    } else {
+                        commander_rows.push(format!("E{} no physical commander spawn", old.encounter));
+                    }
+                    commander_recorded.insert(old.encounter);
+                }
+                if changed && (old.encounter % 10 == 0 || old.encounter == 60) {
+                    let spent = g.stats.gold_spent - interval.spent_start;
+                    eprintln!(
+                        "{} / {} / E{}-{}: sampled-frame peak pressure {:.1}; >70% {:.1} simulated s at 2x; min breach grace {:.1}s; purchases {}; upgrades {}; spend {}g; final-deployment survivors [{}]; cash {}g; towers {}",
+                        difficulty.label(), policy.label(), interval_start, old.encounter,
+                        interval.sampled_peak_pressure, interval.seconds_over_70, interval.min_grace,
+                        interval.purchases, interval.upgrades, spent, interval.final_deployment_survivors.join(", "),
+                        g.gold, g.towers.len(),
+                    );
+                    interval_start = old.encounter + 1;
+                    interval = Interval { min_grace: campaign::BREACH_SECONDS, spent_start: g.stats.gold_spent, ..Interval::default() };
+                }
+            }
+            ticks += 1;
+        }
+        let roster = board_summary(&g);
+        if matches!(policy, EarlyPolicy::EntranceAwareCorruption) {
+            assert!(
+                early_has_family(&g, Family::Corruption),
+                "focused policy reached {:?} at E{} without its required legal direct Corruption purchase",
+                g.phase, g.wave,
+            );
+            assert!(focused_purchase.is_some(), "focused policy owned Corruption without the recorded live purchase");
+        }
+        eprintln!(
+            "{} / {} terminal: {:?} at E{} after {} ticks; cash {}g, spent {}g, focused live purchase {:?}, roster [{}]; commanders [{}]",
+            difficulty.label(), policy.label(), g.phase, g.wave, ticks, g.gold, g.stats.gold_spent,
+            focused_purchase, roster, commander_rows.join("; "),
+        );
+    }
+
+    eprintln!("TERRA_CHALLENGE100 baseline: fixed seed 0xC1000060; legal purse/placement; live production combat; first 60 only.");
+    for policy in [
+        EarlyPolicy::OrdinaryMixed,
+        EarlyPolicy::EntranceAwareMixed,
+        EarlyPolicy::EntranceAwareCorruption,
+        EarlyPolicy::EntranceAwareFrozenAfterE10,
+        EarlyPolicy::CheapPoisonFrozenAfterE10,
+        EarlyPolicy::EntranceAwareMissesFirstAir,
+    ] {
+        for difficulty in [Difficulty::Veteran, Difficulty::Nightmare] {
+            run(policy, difficulty);
+        }
+    }
+}
+
+/// Legal Veteran probes for the historical "just buy Multi" answer.  These
+/// deliberately spend only the campaign purse: no fixture gold, damage, or
+/// board reset is involved.  Keep the breadth and King-to-SuperMulti policies
+/// separate so a result cannot be dismissed as one poor upgrade script.
+/// Comprehensive proof of campaign counterplay:
+/// 1. Equal legal budgets produce differentiated combat against Swarm, Armoured, and Flying.
+/// 2. Shield break semantics: active shields absorb pellets (0.65x); once shield <= 0, penalty ends.
+/// 3. In-flight captured projectile resolves by launching tower definition even after sale/upgrade.
+/// 4. Corruption on-hit applies 2s suppression (halting regen) and ignores armour per-hit without mutating base creep armour.
+#[test]
+fn campaign_counterplay_combat_effects_at_equal_budget() {
+    let multi_def = def_by_family(Family::Multi);
+    let siege_def = def_by_family(Family::Siege);
+    let corrupt_def = def_by_family(Family::Corruption);
+
+    // 1. Equal 500g Budget Combat Proof: Multi 1 (400g) + Siege 1 (100g) = 500g vs Corruption 1 (500g)
+    let cost_roster_a = TOWERS[multi_def].gold + TOWERS[siege_def].gold;
+    let cost_roster_b = TOWERS[corrupt_def].gold;
+    assert_eq!(cost_roster_a, 500, "Roster A (Multi 400g + Siege 100g) must cost exactly 500g");
+    assert_eq!(cost_roster_b, 500, "Roster B (Corruption 500g) must cost exactly 500g");
+    assert_eq!(cost_roster_a, cost_roster_b, "Both rosters must have equal 500g budget");
+
+    // Micro-simulation runner for isolated combat without ambient campaign packet dispatch:
+    let step_isolated_combat = |g: &mut Game, seconds: f32| {
+        let dt = 1.0 / 60.0;
+        let steps = (seconds / dt) as usize;
+        for _ in 0..steps {
+            g.time += dt;
+            g.spatial.rebuild(&g.creeps);
+            g.step_creeps(dt);
+            combat::step_towers(g, dt);
+            combat::step_projectiles(g, dt);
+        }
+    };
+
+    // Threat Group 1: Many light unarmoured swarm bodies (12 Gnolls, 80 HP, 0 armour, Unarmoured)
+    let swarm_def = creep(80.0, 0, ArmourType::Unarmoured, false);
+
+    // Roster A (Multi + Siege) vs Swarm Pack:
+    let mut g_swarm_a = Game::new();
+    g_swarm_a.start_campaign(42, Difficulty::Classic);
+    assert_eq!(g_swarm_a.gold, 600, "Classic starting gold is 600g");
+    isolate(&mut g_swarm_a);
+    let p_build = 4.0;
+    build(&mut g_swarm_a, Family::Multi, p_build);
+    build(&mut g_swarm_a, Family::Siege, p_build);
+    assert_eq!(600 - g_swarm_a.gold, 500, "Roster A spends exactly 500g");
+    assert_eq!(g_swarm_a.towers.len(), 2);
+
+    let at = g_swarm_a.towers[0].pos;
+    let mut best_track = 0.0f32;
+    let mut best_dist = f32::MAX;
+    let mut d = 0.0;
+    while d < g_swarm_a.board.total {
+        let p = g_swarm_a.board.sample(d);
+        let dd = (p[0] - at[0]).powi(2) + (p[1] - at[1]).powi(2);
+        if dd < best_dist {
+            best_dist = dd;
+            best_track = d;
+        }
+        d += 0.25;
+    }
+
+    let start_uid_swarm_a = g_swarm_a.next_uid;
+    for i in 0..12 {
+        let track_d = best_track - 1.5 + (i as f32) * 0.25;
+        g_swarm_a.spawn_creep(&swarm_def, swarm_def.hp, 1.0, track_d);
+    }
+    let end_uid_swarm_a = g_swarm_a.next_uid;
+    assert_eq!(end_uid_swarm_a - start_uid_swarm_a, 12);
+    for (i, c) in g_swarm_a.creeps.iter_mut().enumerate() {
+        c.dist = best_track - 1.5 + (i as f32) * 0.25;
+        c.route_dir = 1.0;
+        c.lane = 0.0;
+        c.base_speed = 1.0;
+        place(&g_swarm_a.board, c);
+    }
+
+    // Roster B (Corruption) vs Swarm Pack:
+    let mut g_swarm_b = Game::new();
+    g_swarm_b.start_campaign(42, Difficulty::Classic);
+    assert_eq!(g_swarm_b.gold, 600, "Classic starting gold is 600g");
+    isolate(&mut g_swarm_b);
+    build(&mut g_swarm_b, Family::Corruption, p_build);
+    assert_eq!(600 - g_swarm_b.gold, 500, "Roster B spends exactly 500g");
+    assert_eq!(g_swarm_b.towers.len(), 1);
+    assert_eq!(g_swarm_b.towers[0].pos, g_swarm_a.towers[0].pos, "Both primary towers occupy identical pad");
+
+    let start_uid_swarm_b = g_swarm_b.next_uid;
+    for i in 0..12 {
+        let track_d = best_track - 1.5 + (i as f32) * 0.25;
+        g_swarm_b.spawn_creep(&swarm_def, swarm_def.hp, 1.0, track_d);
+    }
+    let end_uid_swarm_b = g_swarm_b.next_uid;
+    assert_eq!(end_uid_swarm_b - start_uid_swarm_b, 12);
+    for (i, c) in g_swarm_b.creeps.iter_mut().enumerate() {
+        c.dist = best_track - 1.5 + (i as f32) * 0.25;
+        c.route_dir = 1.0;
+        c.lane = 0.0;
+        c.base_speed = 1.0;
+        place(&g_swarm_b.board, c);
+    }
+
+    // Step 4.0s of isolated combat at equal budget:
+    step_isolated_combat(&mut g_swarm_a, 4.0);
+    step_isolated_combat(&mut g_swarm_b, 4.0);
+
+    assert!(g_swarm_a.creeps.iter().all(|c| (start_uid_swarm_a..end_uid_swarm_a).contains(&c.uid)));
+    assert!(g_swarm_b.creeps.iter().all(|c| (start_uid_swarm_b..end_uid_swarm_b).contains(&c.uid)));
+    assert!(g_swarm_a.creeps.len() <= 12);
+    assert!(g_swarm_b.creeps.len() <= 12);
+
+    let kills_swarm_a = 12 - g_swarm_a.creeps.len();
+    let kills_swarm_b = 12 - g_swarm_b.creeps.len();
+    let rem_hp_swarm_a: f32 = g_swarm_a.creeps.iter().map(|c| c.hp.max(0.0)).sum();
+    let rem_hp_swarm_b: f32 = g_swarm_b.creeps.iter().map(|c| c.hp.max(0.0)).sum();
+
+    eprintln!(
+        "EQUAL-BUDGET SWARM COMBAT: Multi+Siege kills {kills_swarm_a}/12, rem HP {rem_hp_swarm_a:.1} | Corruption kills {kills_swarm_b}/12, rem HP {rem_hp_swarm_b:.1}"
+    );
+
+    // Multi (3 simultaneous targets) + Siege (splash) shreds swarm pack faster than single-target Corruption:
+    assert!(
+        kills_swarm_a > kills_swarm_b || rem_hp_swarm_a < rem_hp_swarm_b,
+        "Multi+Siege multishot and splash clears swarms better than single-target Corruption: kills {kills_swarm_a} vs {kills_swarm_b}, remaining HP {rem_hp_swarm_a:.1} vs {rem_hp_swarm_b:.1}"
+    );
+
+    // Threat Group 2: Fewer tougher armoured bodies (3 Brutes, 2000 HP, 20 armour, Medium)
+    let heavy_def = creep(2000.0, 20, ArmourType::Medium, false);
+
+    let mut g_heavy_a = Game::new();
+    g_heavy_a.start_campaign(42, Difficulty::Classic);
+    isolate(&mut g_heavy_a);
+    build(&mut g_heavy_a, Family::Multi, p_build);
+    build(&mut g_heavy_a, Family::Siege, p_build);
+    assert_eq!(600 - g_heavy_a.gold, 500);
+
+    let start_uid_heavy_a = g_heavy_a.next_uid;
+    for i in 0..3 {
+        let track_d = best_track - 1.0 + (i as f32) * 0.8;
+        g_heavy_a.spawn_creep(&heavy_def, heavy_def.hp, 1.0, track_d);
+    }
+    let end_uid_heavy_a = g_heavy_a.next_uid;
+    assert_eq!(end_uid_heavy_a - start_uid_heavy_a, 3);
+    for (i, c) in g_heavy_a.creeps.iter_mut().enumerate() {
+        c.dist = best_track - 1.0 + (i as f32) * 0.8;
+        c.route_dir = 1.0;
+        c.lane = 0.0;
+        c.base_speed = 1.0;
+        place(&g_heavy_a.board, c);
+    }
+
+    let mut g_heavy_b = Game::new();
+    g_heavy_b.start_campaign(42, Difficulty::Classic);
+    isolate(&mut g_heavy_b);
+    build(&mut g_heavy_b, Family::Corruption, p_build);
+    assert_eq!(600 - g_heavy_b.gold, 500);
+
+    let start_uid_heavy_b = g_heavy_b.next_uid;
+    for i in 0..3 {
+        let track_d = best_track - 1.0 + (i as f32) * 0.8;
+        g_heavy_b.spawn_creep(&heavy_def, heavy_def.hp, 1.0, track_d);
+    }
+    let end_uid_heavy_b = g_heavy_b.next_uid;
+    assert_eq!(end_uid_heavy_b - start_uid_heavy_b, 3);
+    for (i, c) in g_heavy_b.creeps.iter_mut().enumerate() {
+        c.dist = best_track - 1.0 + (i as f32) * 0.8;
+        c.route_dir = 1.0;
+        c.lane = 0.0;
+        c.base_speed = 1.0;
+        place(&g_heavy_b.board, c);
+    }
+
+    // Step 4.0s of isolated combat against Plated Heavy:
+    step_isolated_combat(&mut g_heavy_a, 4.0);
+    step_isolated_combat(&mut g_heavy_b, 4.0);
+
+    assert!(g_heavy_a.creeps.iter().all(|c| (start_uid_heavy_a..end_uid_heavy_a).contains(&c.uid)));
+    assert!(g_heavy_b.creeps.iter().all(|c| (start_uid_heavy_b..end_uid_heavy_b).contains(&c.uid)));
+    assert!(g_heavy_a.creeps.len() <= 3);
+    assert!(g_heavy_b.creeps.len() <= 3);
+
+    let kills_heavy_a = 3 - g_heavy_a.creeps.len();
+    let kills_heavy_b = 3 - g_heavy_b.creeps.len();
+    let rem_hp_heavy_a: f32 = g_heavy_a.creeps.iter().map(|c| c.hp.max(0.0)).sum();
+    let rem_hp_heavy_b: f32 = g_heavy_b.creeps.iter().map(|c| c.hp.max(0.0)).sum();
+
+    eprintln!(
+        "EQUAL-BUDGET PLATED COMBAT: Multi+Siege kills {kills_heavy_a}/3, rem HP {rem_hp_heavy_a:.1} | Corruption kills {kills_heavy_b}/3, rem HP {rem_hp_heavy_b:.1}"
+    );
+
+    // Corruption pierces 15 armour with 15 armour pen, decimating plated heavies,
+    // whereas Multi (0.60x) and Siege (0.50x) struggle against heavy plated targets:
+    assert!(
+        kills_heavy_b > kills_heavy_a || rem_hp_heavy_b < rem_hp_heavy_a,
+        "Corruption with armour-pen shreds Plated Heavy far better than Multi+Siege: kills {kills_heavy_b} vs {kills_heavy_a}, remaining HP {rem_hp_heavy_b:.1} vs {rem_hp_heavy_a:.1}"
+    );
+
+    // 2. Late E600 Swarm Hit: Swarms retain 1.15x swarm multiplier even with late-game numeric armour
+    let mut g_late = Game::new();
+    g_late.start_campaign(42, Difficulty::Classic);
+    g_late.creeps.push(Creep {
+        uid: 100, dist: 5.0, route_dir: 1.0, lane: 0.0, pos: [10.0, 10.0],
+        facing: 0.0, hp: 500.0, max_hp: 500.0, base_speed: 1.0, armour: 25,
+        armour_type: ArmourType::Unarmoured, model: Model::Gnoll, flying: false,
+        radius: 0.5, bounty: 1, boss: false, elite: false,
+        slow: Timed::default(), burn: Timed::default(), poison: Timed::default(),
+        shred: Timed::default(), stun: 0.0, stun_dr: 0.0, kb_cd: 0.0,
+        suppress: 0.0, stun_immune: 0.0, push_left: PUSHBACK_BUDGET, laps: 0,
+        flash: 0.0, bob: 0.0, shield: 0.0, max_shield: 0.0,
+        regen_per_second: 0.0, resistant: false, campaign_encounter: 600,
+        pressure: 0.20, death_killer: None,
+    });
+    let late_mult = combat::campaign_core_role_multiplier(&g_late.creeps[0], Family::Multi);
+    assert!((late_mult - 1.15).abs() < 0.001, "Late E600 swarm with 25 armour must retain 1.15x swarm multiplier");
+    combat::damage_creep_from_def(&mut g_late, 0, TOWERS[multi_def].damage, 0, multi_def, false);
+    let expected_late_dmg = damage_taken(TOWERS[multi_def].damage * 1.15, Attack::Normal, 25, ArmourType::Unarmoured);
+    let actual_late_dmg = 500.0 - g_late.creeps[0].hp;
+    assert!(
+        (actual_late_dmg - expected_late_dmg).abs() < 0.01,
+        "Late swarm damage must apply 1.15x multiplier: actual {actual_late_dmg:.2} vs expected {expected_late_dmg:.2}"
+    );
+
+    // 3. Shield Break Overflow: breaking a shield does not penalize remaining damage to exposed health
+    let mut g_shield = Game::new();
+    g_shield.start_campaign(42, Difficulty::Classic);
+    g_shield.creeps.push(Creep {
+        uid: 200, dist: 5.0, route_dir: 1.0, lane: 0.0, pos: [10.0, 10.0],
+        facing: 0.0, hp: 100.0, max_hp: 100.0, base_speed: 1.0, armour: 0,
+        armour_type: ArmourType::Unarmoured, model: Model::Gnoll, flying: false,
+        radius: 0.5, bounty: 1, boss: false, elite: false,
+        slow: Timed::default(), burn: Timed::default(), poison: Timed::default(),
+        shred: Timed::default(), stun: 0.0, stun_dr: 0.0, kb_cd: 0.0,
+        suppress: 0.0, stun_immune: 0.0, push_left: PUSHBACK_BUDGET, laps: 0,
+        flash: 0.0, bob: 0.0, shield: 10.0, max_shield: 10.0,
+        regen_per_second: 0.0, resistant: false, campaign_encounter: 11,
+        pressure: 0.20, death_killer: None,
+    });
+    // Multi fires a 50.0 base damage hit against 10.0 shield.
+    // Shield takes 0.65x multiplier: pot_shield_dmg = 50 * 0.65 = 32.5 > 10.0 curr_shield.
+    // Absorbed = 10.0. Frac = 10 / 32.5 = 0.30769. Rem base = 50 * (1 - 0.30769) = 34.615.
+    // Overflow applies core role multiplier 1.15 (unarmoured swarm): 34.615 * 1.15 = 39.81 damage to HP.
+    combat::damage_creep_from_def(&mut g_shield, 0, 50.0, 0, multi_def, false);
+    assert_eq!(g_shield.creeps[0].shield, 0.0, "Shield must be completely shattered");
+    let hp_damage = 100.0 - g_shield.creeps[0].hp;
+    // With proper split, HP took ~39.81 damage. Under old bug with whole-hit 0.65x, it would have taken only 22.5 damage.
+    assert!(
+        hp_damage > 35.0,
+        "Overflow damage must apply core unshielded multiplier to exposed health (took {hp_damage:.2} hp damage)"
+    );
+
+    // 4. Captured projectile definition after sale:
+    let mut g_proj = Game::new();
+    g_proj.start_campaign(42, Difficulty::Classic);
+    let target_creep = creep(100.0, 0, ArmourType::Unarmoured, false);
+    g_proj.spawn_creep(&target_creep, target_creep.hp, 1.0, 5.0);
+    let p1 = find_in_range_legal_spot(&g_proj, multi_def).expect("legal spot for multi");
+    g_proj.build_choice = Some((multi_def, 1));
+    assert!(g_proj.try_build_at(p1));
+    let target_uid = g_proj.creeps[0].uid;
+    let target_pos = g_proj.creeps[0].pos;
+    g_proj.projs.push(Proj {
+        pos: target_pos,
+        z: g_proj.creeps[0].height(),
+        vel: [10.0, 0.0],
+        kind: ProjKind::Dart,
+        tower: 0,
+        def: multi_def,
+        dmg: 50.0,
+        splash: 0.0,
+        bounces: 0,
+        crit: false,
+        target_idx: 0,
+        target_uid,
+        life: 1.0,
+        trail: 1.0,
+    });
+    g_proj.sell(0);
+    assert_eq!(g_proj.towers.len(), 0, "Tower was sold");
+    let prev_hp = g_proj.creeps[0].hp;
+    g_proj.spatial.rebuild(&g_proj.creeps);
+    combat::step_projectiles(&mut g_proj, 1.0 / 60.0);
+    assert!(g_proj.creeps[0].hp < prev_hp, "Captured projectile must still resolve damage by captured def after sale");
+
+    // 5. Corruption on-hit suppression:
+    let mut g_corr = Game::new();
+    g_corr.start_campaign(42, Difficulty::Classic);
+    g_corr.creeps.push(Creep {
+        uid: 10, dist: 5.0, route_dir: 1.0, lane: 0.0, pos: [10.0, 10.0],
+        facing: 0.0, hp: 50.0, max_hp: 100.0, base_speed: 1.0, armour: 15,
+        armour_type: ArmourType::Medium, model: Model::Troll, flying: false,
+        radius: 0.5, bounty: 1, boss: false, elite: false,
+        slow: Timed::default(), burn: Timed::default(), poison: Timed::default(),
+        shred: Timed::default(), stun: 0.0, stun_dr: 0.0, kb_cd: 0.0,
+        suppress: 0.0, stun_immune: 0.0, push_left: PUSHBACK_BUDGET, laps: 0,
+        flash: 0.0, bob: 0.0, shield: 0.0, max_shield: 0.0,
+        regen_per_second: 10.0, resistant: false, campaign_encounter: 15,
+        pressure: 1.0, death_killer: None,
+    });
+    let cp = find_in_range_legal_spot(&g_corr, corrupt_def).expect("legal spot for corrupt");
+    g_corr.build_choice = Some((corrupt_def, 1));
+    assert!(g_corr.try_build_at(cp));
+    combat::on_hit_riders(&mut g_corr, 0, 0);
+    assert!(g_corr.creeps[0].suppress >= 2.0, "Corruption applies 2s healing suppression");
+    assert_eq!(g_corr.creeps[0].armour, 15, "Corruption must NOT permanently strip base armour from creep");
+
+    let before_step = g_corr.creeps[0].hp;
+    g_corr.step_creeps(0.5);
+    assert_eq!(g_corr.creeps[0].hp, before_step, "Suppression must prevent creep regeneration");
+}
+
+/// Legal Campaign strategy probes testing Multi-only opening and alternative mono policy.
+#[derive(Clone, Debug)]
+struct LegalPolicyResult {
+    phase: Phase,
+    wave: u32,
+    gold: i64,
+    gold_spent: u64,
+    towers_len: usize,
+    peak_pressure: f32,
+    max_level: u32,
+    complete: bool,
+    first_tower_pos: [f32; 2],
+    first_tower_dmg: f64,
+    total_damage: f64,
+    kills: u64,
+    defeat_cause: String,
+    roster_str: String,
+}
+
+/// Legal Campaign strategy probes testing Multi-only opening and alternative mono policy.
+/// Spends only earned purse; verifies that neither Multi nor Siege forms a universal exploit.
+fn run_legal_mono_policy(
+    label: &str,
+    diff: Difficulty,
+    policy: &str,
+    family: Family,
+    max_ticks: usize,
+) -> LegalPolicyResult {
+    let mut g = Game::new();
+    let seed = match family {
+        Family::Multi => 0x4D55_4C54,
+        Family::Corruption => 0x434F_5252,
+        Family::Siege => 0x5349_4547,
+        _ => 42,
+    };
+    g.start_campaign(seed, diff);
+    g.speed = 4.0;
+    let def = def_by_family(family);
+
+    let use_entrance = policy == "banking_entrance";
+    let find_spot = |g: &Game, def: usize, initial: bool| {
+        if use_entrance {
+            find_entrance_aware_legal_spot(g, def, initial)
+        } else {
+            find_best_coverage_legal_spot(g, def)
+        }
+    };
+
+    // Initial build with earned starting purse (600g):
+    if let Some(pos) = find_spot(&g, def, true) {
+        if g.can_afford(TOWERS[def].gold) {
+            g.build_choice = Some((def, 1));
+            let _ = g.try_build_at(pos);
+        }
+    }
+    g.send_wave();
+
+    let mut ticks = 0usize;
+    let mut peak_pressure = 0.0_f32;
+    let mut first_tower_fired = false;
+    while !matches!(g.phase, Phase::Victory | Phase::Defeat) && ticks < max_ticks && g.wave < 601 {
+        if !first_tower_fired && !g.towers.is_empty() && g.towers[0].damage > 0.0 {
+            first_tower_fired = true;
+        }
+        if g.pending_doctrine {
+            let pick = Doctrine::ALL
+                .into_iter()
+                .find(|&d| g.doctrine_rank(d) < 3)
+                .unwrap_or(Doctrine::Arsenal);
+            g.choose_doctrine(pick);
+        }
+        let is_build = g.phase == Phase::Build;
+        let is_combat_beat = g.phase == Phase::Combat && ticks % 10 == 0;
+        if is_build || is_combat_beat {
+            if policy == "upgrade_first" {
+                for ti in 0..g.towers.len() {
+                    if g.towers[ti].family() == family {
+                        g.upgrade(ti);
+                    }
+                }
+                if g.can_afford(TOWERS[def].gold) {
+                    if let Some(pos) = find_spot(&g, def, false) {
+                        g.build_choice = Some((def, 1));
+                        let _ = g.try_build_at(pos);
+                    }
+                }
+            } else if policy == "breadth_first" {
+                let mut built = false;
+                if g.can_afford(TOWERS[def].gold) {
+                    if let Some(pos) = find_spot(&g, def, false) {
+                        g.build_choice = Some((def, 1));
+                        if g.try_build_at(pos) {
+                            built = true;
+                        }
+                    }
+                }
+                if !built {
+                    for ti in 0..g.towers.len() {
+                        if g.towers[ti].family() == family {
+                            g.upgrade(ti);
+                        }
+                    }
+                }
+            } else if policy == "banking" || policy == "banking_entrance" {
+                // Phase 1: Establish two Multi towers at Level 2:
+                if g.towers.is_empty() {
+                    if g.can_afford(TOWERS[def].gold) {
+                        if let Some(pos) = find_spot(&g, def, true) {
+                            g.build_choice = Some((def, 1));
+                            let _ = g.try_build_at(pos);
+                        }
+                    }
+                } else if g.towers.len() == 1 {
+                    if g.towers[0].level() == 1 {
+                        if let Some(&next_u) = TOWERS[g.towers[0].def].upgrades.first() {
+                            if g.can_afford(TOWERS[next_u as usize].gold) {
+                                g.upgrade(0);
+                            }
+                        }
+                    } else if g.can_afford(TOWERS[def].gold) {
+                        if let Some(pos) = find_spot(&g, def, true) {
+                            g.build_choice = Some((def, 1));
+                            let _ = g.try_build_at(pos);
+                        }
+                    }
+                } else if g.towers.len() == 2 && g.towers[1].level() == 1 {
+                    if let Some(&next_u) = TOWERS[g.towers[1].def].upgrades.first() {
+                        if g.can_afford(TOWERS[next_u as usize].gold) {
+                            g.upgrade(1);
+                        }
+                    }
+                } else {
+                    // Phase 2: Two Multi towers established at L2+.
+                    // Reserve gold for next upgrade on the lead tower; do not buy fresh towers or cheaper upgrades:
+                    let lead_idx = g.towers.iter().position(|t| !TOWERS[t.def].upgrades.is_empty());
+                    if let Some(lead_ti) = lead_idx {
+                        let next_u = TOWERS[g.towers[lead_ti].def].upgrades[0] as usize;
+                        let upgrade_cost = TOWERS[next_u].gold;
+                        if g.can_afford(upgrade_cost) {
+                            g.upgrade(lead_ti);
+                        }
+                    } else {
+                        // All existing towers fully maxed out: build and raise another tower
+                        if g.can_afford(TOWERS[def].gold) {
+                            if let Some(pos) = find_spot(&g, def, false) {
+                                g.build_choice = Some((def, 1));
+                                let _ = g.try_build_at(pos);
+                            }
+                        }
+                    }
+                }
+            }
+            if is_build {
+                g.send_wave();
+            }
+        }
+        g.update(0.1);
+        peak_pressure = peak_pressure.max(g.campaign_pressure());
+        ticks += 1;
+    }
+
+    if !first_tower_fired && !g.towers.is_empty() && g.towers[0].damage > 0.0 {
+        first_tower_fired = true;
+    }
+
+    let mut roster_map: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    for tower in &g.towers {
+        *roster_map.entry(format!("{} L{}", tower.full_name(), tower.level())).or_default() += 1;
+    }
+    let roster_str = roster_map.iter().map(|(n, c)| format!("{c}x {n}")).collect::<Vec<_>>().join(", ");
+    let max_level = g.towers.iter().map(|t| t.level()).max().unwrap_or(0);
+    let complete = g.campaign.as_ref().is_some_and(|state| state.complete);
+    let first_tower_pos = g.towers.first().map(|t| t.pos).unwrap_or([0.0, 0.0]);
+    let first_tower_dmg = g.towers.first().map(|t| t.damage).unwrap_or(0.0);
+    let total_damage = g.stats.damage;
+    let kills = g.stats.kills;
+    let defeat_cause = g.toast.as_ref().map(|(t, ..)| t.clone()).unwrap_or_else(|| {
+        if g.phase == Phase::Defeat {
+            "Breach: campaign pressure exceeded capacity".to_string()
+        } else {
+            "Victory achieved".to_string()
+        }
+    });
+
+    eprintln!(
+        "{label}: {:?} at E{}; gold: {}g spare, {}g spent; towers: {}; max level: L{}; peak pressure: {:.1}; first pos: [{:.2}, {:.2}] (dmg {:.0}, fired: {}); total dmg: {:.0}; kills: {}; complete: {}; cause: {}; roster: [{}]",
+        g.phase, g.wave, g.gold, g.stats.gold_spent, g.towers.len(), max_level, peak_pressure,
+        first_tower_pos[0], first_tower_pos[1], first_tower_dmg, first_tower_fired, total_damage, kills, complete, defeat_cause, roster_str
+    );
+
+    LegalPolicyResult {
+        phase: g.phase,
+        wave: g.wave,
+        gold: g.gold,
+        gold_spent: g.stats.gold_spent,
+        towers_len: g.towers.len(),
+        peak_pressure,
+        max_level,
+        complete,
+        first_tower_pos,
+        first_tower_dmg,
+        total_damage,
+        kills,
+        defeat_cause,
+        roster_str,
+    }
+}
+
+/// Legal Campaign strategy probes testing Multi-only opening, banking policy, entrance-aware placement, and alternative mono policies.
+/// Spends only earned purse; verifies that neither Multi nor Siege forms a universal exploit.
+#[test]
+fn campaign_multi_legal_baseline_probe() {
+    let mut log_lines = Vec::new();
+    log_lines.push("=== LEGAL CAMPAIGN STRATEGY BASELINE PROBES ===".to_string());
+
+    // 1. Multi Upgrade-First on Classic
+    let r1 = run_legal_mono_policy(
+        "Multi Upgrade-First (Classic)",
+        Difficulty::Classic,
+        "upgrade_first",
+        Family::Multi,
+        180_000,
+    );
+    log_lines.push(format!("Multi Upgrade-First (Classic): {:?} E{}, {}g spare, {}g spent, {} towers, peak pressure {:.1}, roster: [{}]", r1.phase, r1.wave, r1.gold, r1.gold_spent, r1.towers_len, r1.peak_pressure, r1.roster_str));
+
+    // 2. Multi Breadth-First on Classic
+    let r2 = run_legal_mono_policy(
+        "Multi Breadth-First (Classic)",
+        Difficulty::Classic,
+        "breadth_first",
+        Family::Multi,
+        180_000,
+    );
+    log_lines.push(format!("Multi Breadth-First (Classic): {:?} E{}, {}g spare, {}g spent, {} towers, peak pressure {:.1}, roster: [{}]", r2.phase, r2.wave, r2.gold, r2.gold_spent, r2.towers_len, r2.peak_pressure, r2.roster_str));
+
+    // 3. Multi Upgrade-First on Veteran
+    let r3 = run_legal_mono_policy(
+        "Multi Upgrade-First (Veteran)",
+        Difficulty::Veteran,
+        "upgrade_first",
+        Family::Multi,
+        180_000,
+    );
+    log_lines.push(format!("Multi Upgrade-First (Veteran): {:?} E{}, {}g spare, {}g spent, {} towers, peak pressure {:.1}, roster: [{}]", r3.phase, r3.wave, r3.gold, r3.gold_spent, r3.towers_len, r3.peak_pressure, r3.roster_str));
+
+    // 4. Multi Breadth-First on Veteran
+    let r4 = run_legal_mono_policy(
+        "Multi Breadth-First (Veteran)",
+        Difficulty::Veteran,
+        "breadth_first",
+        Family::Multi,
+        180_000,
+    );
+    log_lines.push(format!("Multi Breadth-First (Veteran): {:?} E{}, {}g spare, {}g spent, {} towers, peak pressure {:.1}, roster: [{}]", r4.phase, r4.wave, r4.gold, r4.gold_spent, r4.towers_len, r4.peak_pressure, r4.roster_str));
+
+    // 5. Corruption-Only Sanity Case on Veteran (checks replacement exploit)
+    let r5 = run_legal_mono_policy(
+        "Corruption-Only (Veteran)",
+        Difficulty::Veteran,
+        "upgrade_first",
+        Family::Corruption,
+        180_000,
+    );
+    log_lines.push(format!("Corruption-Only (Veteran): {:?} E{}, {}g spare, {}g spent, {} towers, peak pressure {:.1}, roster: [{}]", r5.phase, r5.wave, r5.gold, r5.gold_spent, r5.towers_len, r5.peak_pressure, r5.roster_str));
+
+    // 6. Mono-Siege Sanity Case on Classic (must fail against Air E21)
+    let r6 = run_legal_mono_policy(
+        "Mono-Siege (Classic)",
+        Difficulty::Classic,
+        "upgrade_first",
+        Family::Siege,
+        180_000,
+    );
+    log_lines.push(format!("Mono-Siege (Classic): {:?} E{}, {}g spare, {}g spent, {} towers, peak pressure {:.1}, roster: [{}]", r6.phase, r6.wave, r6.gold, r6.gold_spent, r6.towers_len, r6.peak_pressure, r6.roster_str));
+
+    // 7. Multi Banking Policy on Classic (Whole-Route Coverage)
+    let r_bc = run_legal_mono_policy(
+        "Multi Banking (Classic)",
+        Difficulty::Classic,
+        "banking",
+        Family::Multi,
+        180_000,
+    );
+    log_lines.push(format!("Multi Banking (Classic): {:?} E{}, {}g spare, {}g spent, {} towers, max level L{}, peak pressure {:.1}, complete: {}, roster: [{}]", r_bc.phase, r_bc.wave, r_bc.gold, r_bc.gold_spent, r_bc.towers_len, r_bc.max_level, r_bc.peak_pressure, r_bc.complete, r_bc.roster_str));
+
+    // 8. Multi Banking Policy on Veteran (Whole-Route Coverage)
+    let r_bv = run_legal_mono_policy(
+        "Multi Banking (Veteran)",
+        Difficulty::Veteran,
+        "banking",
+        Family::Multi,
+        180_000,
+    );
+    log_lines.push(format!("Multi Banking (Veteran): {:?} E{}, {}g spare, {}g spent, {} towers, max level L{}, peak pressure {:.1}, complete: {}, roster: [{}]", r_bv.phase, r_bv.wave, r_bv.gold, r_bv.gold_spent, r_bv.towers_len, r_bv.max_level, r_bv.peak_pressure, r_bv.complete, r_bv.roster_str));
+
+    // 9. Multi Entrance-Aware Banking Policy on Classic
+    let r_ec = run_legal_mono_policy(
+        "Multi Entrance-Aware Banking (Classic)",
+        Difficulty::Classic,
+        "banking_entrance",
+        Family::Multi,
+        180_000,
+    );
+    log_lines.push(format!("Multi Entrance-Aware Banking (Classic): {:?} E{}, {}g spare, {}g spent, {} towers, max level L{}, peak pressure {:.1}, first pos: [{:.2}, {:.2}], total dmg: {:.0}, kills: {}, complete: {}, cause: {}, roster: [{}]", r_ec.phase, r_ec.wave, r_ec.gold, r_ec.gold_spent, r_ec.towers_len, r_ec.max_level, r_ec.peak_pressure, r_ec.first_tower_pos[0], r_ec.first_tower_pos[1], r_ec.total_damage, r_ec.kills, r_ec.complete, r_ec.defeat_cause, r_ec.roster_str));
+
+    // 10. Multi Entrance-Aware Banking Policy on Veteran
+    let r_ev = run_legal_mono_policy(
+        "Multi Entrance-Aware Banking (Veteran)",
+        Difficulty::Veteran,
+        "banking_entrance",
+        Family::Multi,
+        180_000,
+    );
+    log_lines.push(format!("Multi Entrance-Aware Banking (Veteran): {:?} E{}, {}g spare, {}g spent, {} towers, max level L{}, peak pressure {:.1}, first pos: [{:.2}, {:.2}], total dmg: {:.0}, kills: {}, complete: {}, cause: {}, roster: [{}]", r_ev.phase, r_ev.wave, r_ev.gold, r_ev.gold_spent, r_ev.towers_len, r_ev.max_level, r_ev.peak_pressure, r_ev.first_tower_pos[0], r_ev.first_tower_pos[1], r_ev.total_damage, r_ev.kills, r_ev.complete, r_ev.defeat_cause, r_ev.roster_str));
+
+    let _ = std::fs::write("gemini_strategy_verified.log", log_lines.join("\n"));
+
+    let banking_log = format!(
+        "=== MULTI BANKING POLICY RESULTS ===\nMulti Banking (Classic): {:?} E{}, {}g spare, {}g spent, {} towers, max level L{}, peak pressure {:.1}, complete: {}, roster: [{}]\nMulti Banking (Veteran): {:?} E{}, {}g spare, {}g spent, {} towers, max level L{}, peak pressure {:.1}, complete: {}, roster: [{}]\n",
+        r_bc.phase, r_bc.wave, r_bc.gold, r_bc.gold_spent, r_bc.towers_len, r_bc.max_level, r_bc.peak_pressure, r_bc.complete, r_bc.roster_str,
+        r_bv.phase, r_bv.wave, r_bv.gold, r_bv.gold_spent, r_bv.towers_len, r_bv.max_level, r_bv.peak_pressure, r_bv.complete, r_bv.roster_str
+    );
+    let _ = std::fs::write("gemini_multi_banking.log", banking_log);
+
+    let entrance_log = format!(
+        "=== MULTI ENTRANCE-AWARE BANKING POLICY RESULTS ===\n\
+        Multi Entrance-Aware Banking (Classic):\n\
+          Terminal State: {:?} at E{}\n\
+          Economy: {}g spare, {}g spent\n\
+          Defenses: {} towers, max tier: L{}\n\
+          First Tower Position: [{:.2}, {:.2}] (damage dealt: {:.0}, fired: {})\n\
+          Combat Output: {:.0} total damage, {} kills\n\
+          Peak Pressure: {:.1}\n\
+          Defeat Cause: {}\n\
+          Campaign Complete: {}\n\
+          Roster: [{}]\n\n\
+        Multi Entrance-Aware Banking (Veteran):\n\
+          Terminal State: {:?} at E{}\n\
+          Economy: {}g spare, {}g spent\n\
+          Defenses: {} towers, max tier: L{}\n\
+          First Tower Position: [{:.2}, {:.2}] (damage dealt: {:.0}, fired: {})\n\
+          Combat Output: {:.0} total damage, {} kills\n\
+          Peak Pressure: {:.1}\n\
+          Defeat Cause: {}\n\
+          Campaign Complete: {}\n\
+          Roster: [{}]\n",
+        r_ec.phase, r_ec.wave, r_ec.gold, r_ec.gold_spent, r_ec.towers_len, r_ec.max_level,
+        r_ec.first_tower_pos[0], r_ec.first_tower_pos[1], r_ec.first_tower_dmg, r_ec.first_tower_dmg > 0.0,
+        r_ec.total_damage, r_ec.kills, r_ec.peak_pressure, r_ec.defeat_cause, r_ec.complete, r_ec.roster_str,
+        r_ev.phase, r_ev.wave, r_ev.gold, r_ev.gold_spent, r_ev.towers_len, r_ev.max_level,
+        r_ev.first_tower_pos[0], r_ev.first_tower_pos[1], r_ev.first_tower_dmg, r_ev.first_tower_dmg > 0.0,
+        r_ev.total_damage, r_ev.kills, r_ev.peak_pressure, r_ev.defeat_cause, r_ev.complete, r_ev.roster_str,
+    );
+    let _ = std::fs::write("gemini_multi_entrance.log", entrance_log);
+
+    let volley_balance_log = format!(
+        "=== MULTI 40% FAN VOLLEY BALANCE VERIFICATION ===\n\n        1. PRE-FIX REPRODUCTION BASELINE (100% Fan Damage; source of truth: astra_multi_entrance_pre_fan40.log):\n           Classic Entrance-Aware Banking: Victory E600, 177300g spent, 4800g spare, 3 towers (2xMultiL10+1xMultiL5), peak 162.0, complete: true\n           Veteran Entrance-Aware Banking: Defeat E4, 700g spent, 53g spare, 1xMultiL2, peak 156.5, complete: false\n\n        2. POST-FIX OUTCOME (40% Fan Damage on Campaign Multi / SuperMulti):\n           Classic Entrance-Aware Banking:\n             Terminal State: {:?} at E{}\n             Defenses: {} towers, max tier: L{}\n             Economy: {}g spare, {}g spent\n             Peak Pressure: {:.1}\n             Defeat Cause: {}\n             Campaign Complete: {}\n             Combat Output: {:.0} damage, {} kills\n             Roster: [{}]\n\n           Veteran Entrance-Aware Banking:\n             Terminal State: {:?} at E{}\n             Defenses: {} towers, max tier: L{}\n             Economy: {}g spare, {}g spent\n             Peak Pressure: {:.1}\n             Defeat Cause: {}\n             Campaign Complete: {}\n             Combat Output: {:.0} damage, {} kills\n             Roster: [{}]\n\n        3. MULTI STRATEGY COMPARISONS (40% Fan):\n           Multi Upgrade-First (Classic): {:?} E{}, peak pressure {:.1}\n           Multi Breadth-First (Classic): {:?} E{}, peak pressure {:.1}\n           Multi Upgrade-First (Veteran): {:?} E{}, peak pressure {:.1}\n           Multi Breadth-First (Veteran): {:?} E{}, peak pressure {:.1}\n           Corruption-Only (Veteran): {:?} E{}, peak pressure {:.1}\n           Mono-Siege (Classic): {:?} E{}, peak pressure {:.1}\n",
+        r_ec.phase, r_ec.wave, r_ec.towers_len, r_ec.max_level, r_ec.gold, r_ec.gold_spent,
+        r_ec.peak_pressure, r_ec.defeat_cause, r_ec.complete, r_ec.total_damage, r_ec.kills, r_ec.roster_str,
+        r_ev.phase, r_ev.wave, r_ev.towers_len, r_ev.max_level, r_ev.gold, r_ev.gold_spent,
+        r_ev.peak_pressure, r_ev.defeat_cause, r_ev.complete, r_ev.total_damage, r_ev.kills, r_ev.roster_str,
+        r1.phase, r1.wave, r1.peak_pressure,
+        r2.phase, r2.wave, r2.peak_pressure,
+        r3.phase, r3.wave, r3.peak_pressure,
+        r4.phase, r4.wave, r4.peak_pressure,
+        r5.phase, r5.wave, r5.peak_pressure,
+        r6.phase, r6.wave, r6.peak_pressure,
+    );
+    let _ = std::fs::write("gemini_multi_volley_balance.log", volley_balance_log);
+
+    // Assertions:
+    // Mono-Siege must fail against Air (E21) because it is GroundOnly:
+    assert_eq!(r6.phase, Phase::Defeat, "Mono-Siege cannot survive Air encounters (E21) without anti-air");
+    assert!(r6.wave >= 10, "Mono-Siege clears early ground encounters");
+
+    // First tower must actually fire against opening packet:
+    assert!(r_ec.first_tower_dmg > 0.0, "First tower on Classic must fire against opening packet");
+    assert!(r_ev.first_tower_dmg > 0.0, "First tower on Veteran must fire against opening packet");
+
+    // Multi Entrance-Aware Banking must suffer actual Defeat before E600 under the agreed 40% fan volley budget:
+    assert_eq!(r_ec.phase, Phase::Defeat, "Multi Entrance-Aware Banking on Classic must suffer Defeat under 40% fan volley budget");
+    assert!(r_ec.wave < 600, "Multi Entrance-Aware Banking on Classic must be defeated before E600");
+    assert_eq!(r_ev.phase, Phase::Defeat, "Multi Entrance-Aware Banking on Veteran must suffer Defeat");
+    assert!(r_ev.wave < 600, "Multi Entrance-Aware Banking on Veteran must be defeated before E600");
+
+    // All runs must terminate in Victory or Defeat (no timeout/hang):
+    assert!(matches!(r1.phase, Phase::Victory | Phase::Defeat));
+    assert!(matches!(r2.phase, Phase::Victory | Phase::Defeat));
+    assert!(matches!(r3.phase, Phase::Victory | Phase::Defeat));
+    assert!(matches!(r4.phase, Phase::Victory | Phase::Defeat));
+    assert!(matches!(r5.phase, Phase::Victory | Phase::Defeat));
+    assert!(matches!(r_bc.phase, Phase::Victory | Phase::Defeat));
+    assert!(matches!(r_bv.phase, Phase::Victory | Phase::Defeat));
+}
+
+#[test]
+fn test_campaign_multi_volley_fan_scaling_actual_shots() {
+    let multi_def = def_by_family(Family::Multi);
+    let base_damage = TOWERS[multi_def].damage; // 139.0
+    let multishot_count = TOWERS[multi_def].abil.multishot as usize; // 3
+    assert_eq!(multishot_count, 3, "Multi 1 fires at 3 targets (1 primary + 2 extras)");
+
+    // -------------------------------------------------------------
+    // 1. Campaign Mode: Primary shot 100% (139.0), Extra fan shots 40% (55.6)
+    // -------------------------------------------------------------
+    let mut g_camp = Game::new();
+    g_camp.start_campaign(42, Difficulty::Classic);
+    isolate(&mut g_camp);
+
+    let p0 = find_in_range_legal_spot(&g_camp, multi_def).expect("spot for multi");
+    g_camp.build_choice = Some((multi_def, 1));
+    assert!(g_camp.try_build_at(p0));
+    assert_eq!(g_camp.towers.len(), 1);
+    let tower_pos = g_camp.towers[0].pos;
+
+    // Spawn 3 creeps in range
+    let creep_def = creep(200.0, 0, ArmourType::Unarmoured, false);
+    for i in 0..3 {
+        g_camp.spawn_creep(&creep_def, creep_def.hp, 1.0, 5.0 + (i as f32) * 0.3);
+        g_camp.creeps[i].pos = [tower_pos[0] + 1.0 + (i as f32) * 0.2, tower_pos[1]];
+    }
+    g_camp.spatial.rebuild(&g_camp.creeps);
+    g_camp.towers[0].cooldown = 0.0;
+
+    combat::step_towers(&mut g_camp, 1.0 / 60.0);
+    assert_eq!(g_camp.projs.len(), 3, "Multi 1 must launch exactly 3 projectiles for 3 in-range targets");
+
+    // Proj 0 is primary target: 100% base damage
+    let p_prim = &g_camp.projs[0];
+    let prim_ci = p_prim.target_idx;
+    assert!((p_prim.dmg - base_damage).abs() < 1e-3, "Primary shot in Campaign must have 100% base damage ({base_damage}), got {}", p_prim.dmg);
+
+    // Proj 1 and 2 are extra fan shots: 40% damage (0.40 * base_damage)
+    let mut fan_targets = Vec::new();
+    for i in 1..3 {
+        let p_fan = &g_camp.projs[i];
+        let expected_fan = base_damage * 0.40;
+        assert!(
+            (p_fan.dmg - expected_fan).abs() < 1e-3,
+            "Extra fan shot #{i} in Campaign must have 40% damage ({expected_fan}), got {}",
+            p_fan.dmg
+        );
+        assert_ne!(p_fan.target_idx, prim_ci, "Extra shot must target a different creep than primary");
+        fan_targets.push(p_fan.target_idx);
+    }
+    assert_ne!(fan_targets[0], fan_targets[1], "Extra shots must target distinct creeps");
+
+    // Verify definition and damage captured across tower sale:
+    g_camp.sell(0);
+    assert_eq!(g_camp.towers.len(), 0, "Multi tower sold while projectiles in flight");
+    let initial_hps: Vec<f32> = g_camp.creeps.iter().map(|c| c.hp).collect();
+
+    // Step projectiles until impact:
+    for _ in 0..120 {
+        combat::step_projectiles(&mut g_camp, 1.0 / 60.0);
+    }
+    assert_eq!(g_camp.projs.len(), 0, "All projectiles reached targets");
+
+    let expected_prim_dealt = damage_taken(base_damage * 1.15, Attack::Normal, 0, ArmourType::Unarmoured);
+    let expected_fan_dealt = damage_taken(base_damage * 0.40 * 1.15, Attack::Normal, 0, ArmourType::Unarmoured);
+
+    let camp_primary_dealt = initial_hps[prim_ci] - g_camp.creeps[prim_ci].hp;
+    assert!(
+        (camp_primary_dealt - expected_prim_dealt).abs() < 0.1,
+        "Primary hit must deal full 100% damage: got {camp_primary_dealt}, expected {expected_prim_dealt}"
+    );
+    for &ci in &fan_targets {
+        let fan_dealt = initial_hps[ci] - g_camp.creeps[ci].hp;
+        assert!(
+            (fan_dealt - expected_fan_dealt).abs() < 0.1,
+            "Extra hit must deal scaled 40% damage: got {fan_dealt}, expected {expected_fan_dealt}"
+        );
+    }
+
+    // -------------------------------------------------------------
+    // 2. Legacy Mode: Primary 100%, Extra fan shots 100% (UNSCALED)
+    // -------------------------------------------------------------
+    let mut g_leg = Game::new();
+    assert!(!g_leg.is_campaign());
+
+    let p0_leg = find_in_range_legal_spot(&g_leg, multi_def).expect("spot for multi");
+    g_leg.build_choice = Some((multi_def, 1));
+    assert!(g_leg.try_build_at(p0_leg));
+    let tower_pos_leg = g_leg.towers[0].pos;
+
+    for i in 0..3 {
+        g_leg.spawn_creep(&creep_def, creep_def.hp, 1.0, 5.0 + (i as f32) * 0.3);
+        g_leg.creeps[i].pos = [tower_pos_leg[0] + 1.0 + (i as f32) * 0.2, tower_pos_leg[1]];
+    }
+    g_leg.spatial.rebuild(&g_leg.creeps);
+    g_leg.towers[0].cooldown = 0.0;
+
+    combat::step_towers(&mut g_leg, 1.0 / 60.0);
+    assert_eq!(g_leg.projs.len(), 3, "Multi 1 must launch 3 projectiles in Legacy");
+
+    // In Legacy, ALL 3 projectiles retain full 100% base damage:
+    for (i, p) in g_leg.projs.iter().enumerate() {
+        assert!(
+            (p.dmg - base_damage).abs() < 1e-3,
+            "Legacy shot #{i} must remain strictly unscaled at 100% base damage ({base_damage}), got {}",
+            p.dmg
+        );
+    }
+
+    // Step projectiles to impact in Legacy:
+    let initial_hps_leg: Vec<f32> = g_leg.creeps.iter().map(|c| c.hp).collect();
+    for _ in 0..120 {
+        combat::step_projectiles(&mut g_leg, 1.0 / 60.0);
+    }
+    for i in 0..3 {
+        let leg_dealt = initial_hps_leg[i] - g_leg.creeps[i].hp;
+        let expected_leg_dealt = damage_taken(base_damage, Attack::Normal, 0, ArmourType::Unarmoured);
+        assert!(
+            (leg_dealt - expected_leg_dealt).abs() < 0.1,
+            "Legacy creep #{i} must take full unscaled damage: got {leg_dealt}, expected {expected_leg_dealt}"
+        );
+    }
+
+    // -------------------------------------------------------------
+    // 3. Campaign Instant Saturation Path: Covers Detonation fallback
+    // -------------------------------------------------------------
+    let mut g_sat = Game::new();
+    g_sat.start_campaign(42, Difficulty::Classic);
+    isolate(&mut g_sat);
+
+    let p0_sat = find_in_range_legal_spot(&g_sat, multi_def).expect("spot for multi");
+    g_sat.build_choice = Some((multi_def, 1));
+    assert!(g_sat.try_build_at(p0_sat));
+    let tower_pos_sat = g_sat.towers[0].pos;
+
+    // Pre-fill projectiles to MAX_PROJECTILES to force immediate Detonation path
+    for _ in 0..MAX_PROJECTILES {
+        g_sat.projs.push(Proj {
+            pos: [0.0, 0.0],
+            z: 0.0,
+            vel: [0.0, 0.0],
+            kind: ProjKind::Dart,
+            tower: 0,
+            def: multi_def,
+            dmg: 0.0,
+            splash: 0.0,
+            bounces: 0,
+            crit: false,
+            target_idx: 0,
+            target_uid: 0,
+            life: 0.0,
+            trail: 0.0,
+        });
+    }
+    assert_eq!(g_sat.projs.len(), MAX_PROJECTILES);
+
+    for i in 0..3 {
+        g_sat.spawn_creep(&creep_def, creep_def.hp, 1.0, 5.0 + (i as f32) * 0.3);
+        g_sat.creeps[i].pos = [tower_pos_sat[0] + 1.0 + (i as f32) * 0.2, tower_pos_sat[1]];
+    }
+    g_sat.spatial.rebuild(&g_sat.creeps);
+    g_sat.towers[0].cooldown = 0.0;
+
+    let hps_before_sat: Vec<f32> = g_sat.creeps.iter().map(|c| c.hp).collect();
+    combat::step_towers(&mut g_sat, 1.0 / 60.0);
+
+    let sat_prim_uid = g_sat.towers[0].target_uid;
+    let sat_prim_ci = g_sat.creeps.iter().position(|c| c.uid == sat_prim_uid).expect("primary creep");
+
+    // Direct detonation applied on firing frame:
+    let sat_prim_dealt = hps_before_sat[sat_prim_ci] - g_sat.creeps[sat_prim_ci].hp;
+    assert!(
+        (sat_prim_dealt - expected_prim_dealt).abs() < 0.1,
+        "Saturation primary hit must deal full 100% damage: got {sat_prim_dealt}, expected {expected_prim_dealt}"
+    );
+
+    for i in 0..3 {
+        if i != sat_prim_ci {
+            let sat_fan_dealt = hps_before_sat[i] - g_sat.creeps[i].hp;
+            assert!(
+                (sat_fan_dealt - expected_fan_dealt).abs() < 0.1,
+                "Saturation extra hit must deal scaled 40% damage: got {sat_fan_dealt}, expected {expected_fan_dealt}"
+            );
+        }
+    }
+
+    // -------------------------------------------------------------
+    // 4. SuperMulti Campaign Scaling: 100% primary + 40% fan on 10 targets
+    // -------------------------------------------------------------
+    let smulti_def = def_by_family(Family::SuperMulti);
+    let smulti_base_dmg = TOWERS[smulti_def].damage; // 39999.0
+    let mut g_smulti = Game::new();
+    g_smulti.start_campaign(42, Difficulty::Classic);
+    isolate(&mut g_smulti);
+    g_smulti.gold = 200_000;
+    let p_sm = find_in_range_legal_spot(&g_smulti, smulti_def).expect("spot for smulti");
+    g_smulti.build_choice = Some((smulti_def, 1));
+    assert!(g_smulti.try_build_at(p_sm));
+    let sm_pos = g_smulti.towers[0].pos;
+
+    // Spawn 4 creeps in range
+    for i in 0..4 {
+        g_smulti.spawn_creep(&creep_def, 200_000.0, 1.0, 5.0 + (i as f32) * 0.3);
+        g_smulti.creeps[i].pos = [sm_pos[0] + 1.0 + (i as f32) * 0.2, sm_pos[1]];
+    }
+    g_smulti.spatial.rebuild(&g_smulti.creeps);
+    g_smulti.towers[0].cooldown = 0.0;
+    combat::step_towers(&mut g_smulti, 1.0 / 60.0);
+
+    assert_eq!(g_smulti.projs.len(), 4, "SuperMulti fires at all 4 available targets");
+    assert!((g_smulti.projs[0].dmg - smulti_base_dmg).abs() < 1e-2, "SuperMulti primary must be 100%");
+    for i in 1..4 {
+        let expected_sm_fan = smulti_base_dmg * 0.40;
+        assert!(
+            (g_smulti.projs[i].dmg - expected_sm_fan).abs() < 1e-2,
+            "SuperMulti fan shot #{i} must be 40% ({expected_sm_fan}), got {}",
+            g_smulti.projs[i].dmg
+        );
+    }
 }

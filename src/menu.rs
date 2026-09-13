@@ -113,6 +113,15 @@ pub struct MenuState {
     pub copied: f32,
     /// The ruleset the next local run or hosted room will use.
     pub difficulty: Difficulty,
+    /// The actual egui bounds of the title-screen Continue card.  This is
+    /// deliberately retained for the browser QA marker: a CSS viewport can be
+    /// clamped by Chromium (especially on phone emulation), so tests must
+    /// click the control the player can actually see rather than a guessed
+    /// fraction of the requested window size.
+    pub resume_rect: Option<egui::Rect>,
+    /// Actual title-screen Campaign card, retained for viewport-aware browser
+    /// smoke in the same way as the Continue card above.
+    pub campaign_rect: Option<egui::Rect>,
 }
 
 impl Default for MenuState {
@@ -128,6 +137,8 @@ impl Default for MenuState {
             saved: None,
             copied: 0.0,
             difficulty: Difficulty::Veteran,
+            resume_rect: None,
+            campaign_rect: None,
         }
     }
 }
@@ -135,8 +146,10 @@ impl Default for MenuState {
 /// What the menu wants the app to do. The menu never touches the game itself.
 pub enum Action {
     None,
-    /// Start a local run.
-    SinglePlayer(Difficulty),
+    /// Start the authored 10-chapter expedition.
+    Campaign(Difficulty),
+    /// Start the original extracted 36-wave ruleset.
+    Legacy(Difficulty),
     /// Pick up the saved run where it left off.
     Resume,
     /// The player left the lobby; drop back to the title screen.
@@ -147,6 +160,10 @@ pub enum Action {
 
 pub fn show(ctx: &Context, m: &mut MenuState, net: &mut Net, dt: f32) -> Action {
     m.copied = (m.copied - dt).max(0.0);
+    // Never leave a stale title hitbox published while a connect/lobby screen
+    // is on top of the scene.
+    m.resume_rect = None;
+    m.campaign_rect = None;
 
     // Follow the connection: it, not the UI, decides which screen is truthful.
     match net.status {
@@ -192,7 +209,7 @@ fn heading(ui: &mut egui::Ui) {
         );
         ui.label(
             RichText::new(
-                "The Warcraft III classic, expanded: 11 tower families, 131 upgrades, 36 authored waves.",
+                "A fixed-board tower defense: 10 chapters, 600 authored encounters, and a preserved 36-wave Legacy mode.",
             )
                 .size(13.0)
                 .color(pal::DIM),
@@ -201,9 +218,21 @@ fn heading(ui: &mut egui::Ui) {
     });
 }
 
-fn big_button(ui: &mut egui::Ui, text: &str, sub: &str, accent: Color32) -> bool {
+fn big_button(ui: &mut egui::Ui, text: &str, sub: &str, accent: Color32) -> egui::Response {
     let w = ui.available_width();
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, 62.0), Sense::click());
+    // The full desktop summaries do not fit a 390px title modal. Use concise,
+    // truthful campaign/Legacy descriptions there and clip all painted text to
+    // its card as a final guard against an overflow at any viewport.
+    let sub = if rect.width() < 350.0 {
+        match text {
+            "Start Campaign" | "Start new Campaign" => "10 chapters · 600 encounters · autosaves.",
+            "Legacy 36-wave mode" => "Original 36 waves · saves · endless score chase.",
+            _ => sub,
+        }
+    } else {
+        sub
+    };
     let fill = if resp.hovered() {
         pal::CARD_HOVER
     } else {
@@ -220,14 +249,15 @@ fn big_button(ui: &mut egui::Ui, text: &str, sub: &str, accent: Color32) -> bool
         stroke,
         egui::StrokeKind::Inside,
     );
-    ui.painter().text(
+    let painter = ui.painter().with_clip_rect(rect.shrink2(vec2(10.0, 5.0)));
+    painter.text(
         pos2(rect.left() + 16.0, rect.top() + 13.0),
         Align2::LEFT_TOP,
         text,
         egui::FontId::proportional(17.0),
         accent,
     );
-    ui.painter().text(
+    painter.text(
         pos2(rect.left() + 16.0, rect.top() + 37.0),
         Align2::LEFT_TOP,
         sub,
@@ -235,7 +265,7 @@ fn big_button(ui: &mut egui::Ui, text: &str, sub: &str, accent: Color32) -> bool
         pal::DIM,
     );
     ui.add_space(7.0);
-    resp.clicked()
+    resp
 }
 
 fn difficulty_picker(ui: &mut egui::Ui, selected: &mut Difficulty) {
@@ -299,30 +329,38 @@ fn title(ui: &mut egui::Ui, m: &mut MenuState) -> Action {
     let mut action = Action::None;
     if let Some(save) = &m.saved {
         let label = save.label();
-        if big_button(ui, "Continue", &label, pal::GOOD) {
+        let response = big_button(ui, "Continue", &label, pal::GOOD);
+        m.resume_rect = Some(response.rect);
+        if response.clicked() {
             action = Action::Resume;
         }
     }
     difficulty_picker(ui, &mut m.difficulty);
-    let solo = if m.saved.is_some() {
-        "Start new campaign"
-    } else {
-        "Start campaign"
-    };
-    if big_button(
+    let solo = if m.saved.is_some() { "Start new Campaign" } else { "Start Campaign" };
+    let campaign_response = big_button(
         ui,
         solo,
-        "A focused 25-30 minute campaign, autosave, ratings, then endless.",
+        "10 chapters · 600 authored encounters · 5h03m minimum at 2x · autosave.",
         pal::ACC,
-    ) {
-        action = Action::SinglePlayer(m.difficulty);
+    );
+    m.campaign_rect = Some(campaign_response.rect);
+    if campaign_response.clicked() {
+        action = Action::Campaign(m.difficulty);
+    }
+    if big_button(
+        ui,
+        "Legacy 36-wave mode",
+        "The original extracted rules, saves and post-victory endless score chase.",
+        pal::GOLD,
+    ).clicked() {
+        action = Action::Legacy(m.difficulty);
     }
     if big_button(
         ui,
         "Multiplayer",
         "Up to 8 players, same waves, separate boards - highest wave wins.",
         pal::GOLD,
-    ) {
+    ).clicked() {
         m.screen = Screen::Connect;
     }
 

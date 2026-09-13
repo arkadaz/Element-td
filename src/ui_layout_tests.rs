@@ -35,7 +35,7 @@ fn lay_out_page(size: [f32; 2], page: usize) -> Layout {
 
     let mut game = Game::new();
     let mut ust = UiState::default();
-    ust.compact = ui::compact_for(size[0]);
+    ust.compact = ui::compact_for_view(size[0], size[1]);
     ust.palette_page = page;
 
     let mut top = Rect::NOTHING;
@@ -102,8 +102,10 @@ fn lay_out_page(size: [f32; 2], page: usize) -> Layout {
 fn the_resource_readouts_are_never_pushed_off_screen() {
     for size in [
         [360.0, 640.0],
+        [390.0, 844.0],
         [500.0, 400.0],
         [667.0, 375.0],
+        [844.0, 390.0],
         [900.0, 500.0],
         [1280.0, 720.0],
         [1920.0, 1080.0],
@@ -163,6 +165,7 @@ fn the_command_bar_can_hold_everything_it_draws() {
 fn the_hud_lays_out_at_every_common_window_size() {
     for size in [
         // Phones in landscape, then tablets, then desktops.
+        [390.0, 844.0],
         [667.0, 375.0],
         [844.0, 390.0],
         [932.0, 430.0],
@@ -176,7 +179,7 @@ fn the_hud_lays_out_at_every_common_window_size() {
         let l = lay_out(size);
         let (top, bottom, central) = (l.top, l.bottom, l.central);
 
-        let compact = ui::compact_for(size[0]);
+        let compact = ui::compact_for_view(size[0], size[1]);
         assert!(
             (top.height() - ui::top_h(compact)).abs() < 1.0,
             "{size:?}: top strip is {} tall, wanted {}",
@@ -231,6 +234,7 @@ fn every_build_card_is_inside_its_panel() {
     // This is the check that was missing: the panels were the right height, but
     // the cards drawn inside them were not.
     for size in [
+        [390.0, 844.0],
         [667.0, 375.0],
         [844.0, 390.0],
         [1024.0, 640.0],
@@ -429,4 +433,84 @@ fn labels_too_wide_for_their_box_are_shortened_not_cut() {
         },
     );
     out.textures_delta.clear();
+}
+
+/// The live Build HUD and the commander reinforcement modal share a frame in
+/// production. Check their published hit rectangles rather than repeating the
+/// layout constants here: a modal can look centred while its real buttons or
+/// the threat card still escape a short viewport.
+#[test]
+fn build_wave_preview_and_doctrine_choices_fit_real_viewports() {
+    for size in [[1440.0, 900.0], [390.0, 844.0], [844.0, 390.0]] {
+        let ctx = Context::default();
+        ui::install_style(&ctx);
+        let mut game = Game::new();
+        game.start_campaign(0xD0C7_1000, crate::game::Difficulty::Veteran);
+        game.wave = 10;
+        game.pending_doctrine = true;
+        let mut ust = UiState::default();
+        ust.compact = ui::compact_for_view(size[0], size[1]);
+        let input = RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(size[0], size[1]))),
+            ..Default::default()
+        };
+        for _ in 0..3 {
+            let mut out = ctx.run_ui(input.clone(), |ui| {
+                egui::Panel::top("hud")
+                    .exact_size(ui::top_h(ust.compact))
+                    .show(ui, |ui| ui::top_bar(&mut game, ui, &mut ust, "60 fps"));
+                ui::modals(&mut game, &ctx, &mut ust);
+            });
+            out.textures_delta.clear();
+        }
+
+        let screen = Rect::from_min_size(pos2(0.0, 0.0), vec2(size[0], size[1]));
+        let modal = ust.command_rects.iter().find_map(|(name, rect)| (*name == "doctrine_modal").then_some(*rect))
+            .unwrap_or_else(|| panic!("{size:?}: doctrine modal did not publish an actual rect"));
+        assert!(screen.contains_rect(modal), "{size:?}: modal {modal:?} escapes screen {screen:?}");
+        let choices: Vec<_> = ust.command_rects.iter().filter_map(|(name, rect)| (*name == "doctrine_choice").then_some(*rect)).collect();
+        assert_eq!(choices.len(), 3, "{size:?}: expected exactly three doctrine choices");
+        for (i, choice) in choices.iter().enumerate() {
+            assert!(modal.contains_rect(*choice), "{size:?}: choice {i} {choice:?} leaves modal {modal:?}");
+            assert!(choice.height() >= 52.0 && choice.height() <= 60.0, "{size:?}: choice {i} is not a compact card: {choice:?}");
+        }
+        for pair in choices.windows(2) {
+            assert!(!pair[0].intersects(pair[1]), "{size:?}: doctrine cards overlap");
+        }
+        assert!(
+            ust.command_rects.iter().any(|(name, rect)| *name == "intel_open" && screen.contains_rect(*rect)),
+            "{size:?}: Build threat preview has no reachable on-screen input rect"
+        );
+    }
+}
+
+/// The tooltip consumes combat's rider query, rather than maintaining a
+/// second Campaign factor beside its presentation string.
+#[test]
+fn poison_ability_text_uses_the_active_mode_rider_budget() {
+    let poison = crate::game::defs::TOWERS
+        .iter()
+        .find(|tower| tower.family == crate::game::defs::Family::Poison)
+        .expect("Poison tower exists")
+        .abil;
+    let legacy = Game::new();
+    let mut campaign = Game::new();
+    campaign.start_campaign(0xA811_1E57, crate::game::Difficulty::Veteran);
+
+    for game in [&legacy, &campaign] {
+        let effective = crate::game::combat::effective_poison_dps(game, poison.poison_dps);
+        let line = ui::ability_lines(game, &poison)
+            .into_iter()
+            .find(|line| line.starts_with("Poison:"))
+            .expect("Poison ability line");
+        assert!(
+            line.contains(&format!("Poison: {}/s", effective.round() as u32)),
+            "{line:?} did not present combat's {effective}/s rider"
+        );
+    }
+    assert_ne!(
+        crate::game::combat::effective_poison_dps(&legacy, poison.poison_dps),
+        crate::game::combat::effective_poison_dps(&campaign, poison.poison_dps),
+        "the mode-specific check needs distinct Legacy and Campaign budgets"
+    );
 }

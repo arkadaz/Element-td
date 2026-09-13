@@ -25,6 +25,15 @@ pub struct Vertex {
     /// it - an orc's skin, straps and axe are different colours within one mesh
     /// and one draw - which is the whole reason this attribute exists.
     pub col: [f32; 3],
+    /// Source material identity. Generated primitives use zero and retain the
+    /// instance material; baked assets use a compact per-part id so limestone,
+    /// oak, iron, hide and chitin can respond differently inside one draw.
+    pub material: u8,
+    /// Authored model UV coordinates and whether they came from the source.
+    /// The renderer falls back to world triplanar detail for generated meshes
+    /// and old sources with no UV stream.
+    pub uv: [f32; 2],
+    pub has_uv: bool,
     /// Where this vertex sits half a stride later, as an offset, and how its
     /// normal moves with it.
     ///
@@ -41,7 +50,8 @@ pub struct Vertex {
 /// `tools/bake_models.py`; `the_packed_range_matches_the_bake` checks it.
 pub const POS_RANGE: f32 = 4.0;
 
-/// What actually goes in the vertex buffer: twenty-eight bytes, not sixty.
+/// What actually goes in the vertex buffer: thirty-six bytes, not a float
+/// skinning stream.
 ///
 /// Nothing here needs float precision. A model is normalised to one unit tall,
 /// so a sixteen-bit position is good to a fraction of a millimetre at human
@@ -49,8 +59,9 @@ pub const POS_RANGE: f32 = 4.0;
 /// floats the model blob was 28 MB - larger than the rest of the game put
 /// together.
 ///
-/// The fourth component of each vector is padding the GPU formats require
-/// (`Snorm16x4`, `Snorm8x4`, `Unorm8x4`), not spare capacity.
+/// The colour alpha stores the per-part material id. The final four unorm16
+/// values preserve source UV plus an authored-UV flag without requiring a
+/// second vertex stream or a draw per material.
 ///
 /// **Field order must match `MESH_ATTRS`.** `wgpu::vertex_attr_array!` assigns
 /// byte offsets in the order attributes are listed, so a field inserted in the
@@ -65,6 +76,7 @@ pub struct GpuVertex {
     pub col: [u8; 4],
     pub dpos: [i16; 4],
     pub dnrm: [i8; 4],
+    pub uv: [u16; 4],
 }
 
 fn q16(v: f32) -> i16 {
@@ -77,6 +89,14 @@ fn q8(v: f32) -> i8 {
 
 fn u8c(v: f32) -> u8 {
     (v.clamp(0.0, 1.0) * 255.0) as u8
+}
+
+fn u16c(v: f32) -> u16 {
+    // Source UVs may intentionally tile beyond zero-to-one. The shared
+    // material texture repeats, so preserving the fractional coordinate is
+    // the useful, bounded representation in the runtime mesh.
+    let wrapped = v.rem_euclid(1.0);
+    (wrapped * u16::MAX as f32).round() as u16
 }
 
 impl GpuVertex {
@@ -96,6 +116,18 @@ impl GpuVertex {
         let f = |v: i8| v as f32 / 127.0;
         [f(self.nrm[0]), f(self.nrm[1]), f(self.nrm[2])]
     }
+    pub fn material_id(&self) -> u8 {
+        self.col[3]
+    }
+    pub fn uv(&self) -> [f32; 2] {
+        [
+            self.uv[0] as f32 / u16::MAX as f32,
+            self.uv[1] as f32 / u16::MAX as f32,
+        ]
+    }
+    pub fn has_authored_uv(&self) -> bool {
+        self.uv[2] != 0
+    }
 }
 
 impl From<Vertex> for GpuVertex {
@@ -103,9 +135,15 @@ impl From<Vertex> for GpuVertex {
         GpuVertex {
             pos: [q16(v.pos[0]), q16(v.pos[1]), q16(v.pos[2]), 0],
             nrm: [q8(v.nrm[0]), q8(v.nrm[1]), q8(v.nrm[2]), 0],
-            col: [u8c(v.col[0]), u8c(v.col[1]), u8c(v.col[2]), 255],
+            col: [u8c(v.col[0]), u8c(v.col[1]), u8c(v.col[2]), v.material],
             dpos: [q16(v.dpos[0]), q16(v.dpos[1]), q16(v.dpos[2]), 0],
             dnrm: [q8(v.dnrm[0]), q8(v.dnrm[1]), q8(v.dnrm[2]), 0],
+            uv: [
+                u16c(v.uv[0]),
+                u16c(v.uv[1]),
+                if v.has_uv { u16::MAX } else { 0 },
+                0,
+            ],
         }
     }
 }
@@ -196,8 +234,8 @@ static MODEL_BLOB: &[u8] = include_bytes!("../../assets/models.bin");
 ///
 /// Format, all little-endian: magic `GTDM`, a version, a model count, then that
 /// many `(u8 name length, name, u32 first vertex, u32 count)` records, then the
-/// vertices themselves as fifteen floats each - position, normal, colour, and
-/// the offset to the second pose's position and normal.
+/// vertices themselves as packed position, normal, colour/material, source UV
+/// and the offset to the second pose's position and normal.
 ///
 /// A blob that is missing, truncated or of an unknown version leaves the model
 /// slots empty, and every archetype falls back to its generated build. That is
@@ -209,7 +247,7 @@ fn load_models(v: &mut Vec<GpuVertex>, spans: &mut [Span; SHAPE_COUNT]) -> Vec<(
         return out;
     }
     let u32_at = |o: usize| -> u32 { u32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]]) };
-    if u32_at(0) != 0x4D44_5447 || u32_at(4) != 3 {
+    if u32_at(0) != 0x4D44_5447 || u32_at(4) != 4 {
         return out;
     }
     let count = u32_at(8) as usize;
@@ -322,6 +360,9 @@ fn tri(a: [f32; 3], b: [f32; 3], c: [f32; 3], out: &mut Vec<Vertex>) {
         dpos: Z,
         dnrm: Z,
         col: W,
+        material: 0,
+        uv: [0.0; 2],
+        has_uv: false,
     };
     out.push(v(a));
     out.push(v(b));
@@ -343,6 +384,9 @@ fn tri_n(
         dpos: Z,
         dnrm: Z,
         col: W,
+        material: 0,
+        uv: [0.0; 2],
+        has_uv: false,
     };
     out.push(v(a));
     out.push(v(b));
@@ -829,8 +873,137 @@ mod tests {
             "TowerSeed2 was bbox-centred again: y [{y0:.3}, {y1:.3}]"
         );
         assert!(
-            y0 < -0.95 && y1 > 0.25,
+            // The rebuilt oak ballista has a slightly shorter, thicker bolt
+            // than the former downloaded turret. It must remain visibly
+            // forward-asymmetric around its real pivot, not satisfy a stale
+            // absolute extent from that unrelated asset.
+            y0 < -0.85 && y1 > 0.25,
             "unexpected authored forward envelope: y [{y0:.3}, {y1:.3}]"
+        );
+    }
+
+    /// The asset pipeline's key contract is more than loading bytes: prominent
+    /// authored meshes must retain their separate physical construction, their
+    /// unwrap, and a genuinely different second pose.  This catches a future
+    /// baker that quietly writes one object-wide material or pairs a mesh with
+    /// itself again -- both render successfully but collapse back to toy-like
+    /// flat colour and frozen actors.
+    #[test]
+    fn authored_material_uv_and_pose_data_reach_the_runtime_mesh() {
+        let lib = build();
+        for name in ["TowerSeed0", "TowerSiege0", "Warrior", "Brute", "Gnoll"] {
+            let slot = lib
+                .models
+                .iter()
+                .find(|(asset, _)| asset == name)
+                .map(|(_, slot)| *slot)
+                .unwrap_or_else(|| panic!("missing authored asset {name}"));
+            let span = lib.spans[model_bucket(slot)];
+            let verts = &lib.vertices[span.first as usize..(span.first + span.count) as usize];
+            assert!(
+                verts.iter().any(|v| v.material_id() > 0),
+                "{name} lost its per-part material ids"
+            );
+            assert!(
+                verts.iter().any(GpuVertex::has_authored_uv),
+                "{name} lost its authored UV stream"
+            );
+            let max_motion = verts
+                .iter()
+                .map(|v| {
+                    let d = v.position_delta();
+                    (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt()
+                })
+                .fold(0.0f32, f32::max);
+            // The Brute is the opening heavy creature: its gait must be
+            // plainly different at gameplay scale, not merely nonzero after
+            // quantisation. Towers and the slimmer Warrior have smaller,
+            // mechanically appropriate recoil/stride envelopes.
+            let required_motion = match name {
+                "Brute" => 0.16,
+                // The Brood Tide uses this authored packrunner in the first
+                // live campaign chapter.  Its leg/tail stride needs to be
+                // visibly distinct from the former static imported wolf.
+                "Gnoll" => 0.10,
+                _ => 0.015,
+            };
+            assert!(
+                max_motion > required_motion,
+                "{name} second pose is too small to read ({max_motion})"
+            );
+            if name == "Gnoll" {
+                assert!(
+                    verts.iter().any(|v| v.material_id() == 15),
+                    "Gnoll lost its authored rough-fur material id"
+                );
+            }
+        }
+    }
+
+    /// The first material milestone originally covered four hero assets. That
+    /// is not enough once every command family and imported creature is live:
+    /// a future baker must not accidentally leave the rest of the production
+    /// roster at one object-wide fallback surface. OBJ turret sources do not
+    /// all have an unwrap, but their Dark/Light submeshes still need separate
+    /// iron/bronze response; glTF sources with UVs must retain those as well.
+    #[test]
+    fn roster_surface_data_survives_beyond_the_featured_assets() {
+        let lib = build();
+        let model_vertices = |name: &str| {
+            let slot = lib
+                .models
+                .iter()
+                .find(|(asset, _)| asset == name)
+                .map(|(_, slot)| *slot)
+                .unwrap_or_else(|| panic!("missing live asset {name}"));
+            let span = lib.spans[model_bucket(slot)];
+            &lib.vertices[span.first as usize..(span.first + span.count) as usize]
+        };
+
+        let tower_names: Vec<&str> = lib
+            .models
+            .iter()
+            .filter_map(|(name, _)| name.starts_with("Tower").then_some(name.as_str()))
+            .collect();
+        assert_eq!(tower_names.len(), 44, "the complete tower roster must ship");
+        for name in tower_names {
+            assert!(
+                model_vertices(name).iter().any(|v| v.material_id() > 0),
+                "{name} lost its iron/bronze or authored material separation"
+            );
+        }
+
+        let materialized = lib
+            .models
+            .iter()
+            .filter(|(name, _)| model_vertices(name).iter().any(|v| v.material_id() > 0))
+            .count();
+        let unwrapped = lib
+            .models
+            .iter()
+            .filter(|(name, _)| model_vertices(name).iter().any(GpuVertex::has_authored_uv))
+            .count();
+        assert!(
+            materialized >= 65,
+            "only {materialized} baked assets retained real physical surfaces"
+        );
+        assert!(
+            unwrapped >= 45,
+            "only {unwrapped} baked assets retained useful source UVs"
+        );
+
+        // Low vegetation is also a live authored asset, not a shader noise
+        // fallback. The fern supplies the broad leaf silhouettes used to
+        // replace the repeated cone-spike ground cover on the actual map.
+        let fern = model_vertices("NatureFern");
+        assert!(
+            fern.len() >= 96,
+            "NatureFern is too small to be the authored multi-frond mesh ({})",
+            fern.len()
+        );
+        assert!(
+            fern.iter().any(|v| v.material_id() == 9),
+            "NatureFern lost its authored leaf material"
         );
     }
 
@@ -855,9 +1028,9 @@ mod tests {
     /// multiplied by seven hundred in the worst frame the game allows. Eight
     /// thousand is about five and a half million triangles, which a desktop
     /// manages and a phone does not enjoy. Authored weapon turrets get a
-    /// separate ceiling: there are only 56 protected pads and a normal clear
-    /// uses about thirty, so richer barrels, coils and mechanisms cost less than
-    /// one full creep wave.
+    /// separate ceiling: the dense shoulder has 164 legal sockets, although a
+    /// normal clear uses only a fraction of them. Richer barrels, coils and
+    /// mechanisms therefore still have to cost less than a full creep wave.
     #[test]
     fn no_baked_model_is_too_heavy_for_a_full_wave() {
         let lib = build();

@@ -1,4 +1,11 @@
 target
+target-*
+browser_build_*
+build-browser*
+build_browser_*
+shots*
+.local
+*.log
 .git
 .github
 docs

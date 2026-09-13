@@ -5,7 +5,7 @@ Two of the game's data modules are generated, and neither is ever hand-edited:
 | generated | holds | read from |
 | --- | --- | --- |
 | `src/game/greentd.rs` | 131 towers, the upgrade graph, 36 waves | `war3map.w3u`, `war3map.w3a`, `Scripts\war3map.j` |
-| `src/game/greentd_map.rs` | the terrain grid and the player's lane | `war3map.w3e`, `Scripts\war3map.j` |
+| `src/game/greentd_map.rs` | extracted terrain and the compact solo lane | `war3map.w3e`, `Scripts\war3map.j`, `SOLO_LAP` |
 
 The source is **`GREEN TD 9.3c PEIN.w3x`**. It is gitignored, because it is not
 ours to redistribute, so put your own copy in the repository root under that
@@ -33,7 +33,7 @@ Why the game is arranged this way, and what the extracted numbers mean, is in
 | `w3obj.py` | Parses Warcraft III object data. A version header, then an "original" and a "custom" table of objects, each object a base id, a new id and a list of field-id/type/value modifications. Levelled files (`.w3a` abilities) carry a level and a data pointer on every modification and unlevelled ones (`.w3u` units) do not, which is the only difference in the format. |
 | `extract.py` | Pulls the nine files the emitters might want out of the archive. Two of them, `war3map.w3t` and a root-level `war3map.j`, are not in this map; the script says so and carries on. The trigger script lives at `Scripts\war3map.j` and is written out as `script.j`. |
 | `emit.py` | Joins units to abilities to triggers, converts to this game's units, and writes the roster, the upgrade graph and the wave table. |
-| `emit_map.py` | Bakes the terrain texture grid and traces the route the Red player's creeps walk, out of the map's own regions. |
+| `emit_map.py` | Bakes the terrain texture grid, traces Red's source route for reference, and emits the tuned compact `SOLO_LAP` circuit. |
 
 ## What each unpacked file is for
 

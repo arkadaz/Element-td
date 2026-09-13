@@ -28,10 +28,10 @@ baked by `tools/bake_models.py` from the sources below.
 | Acolyte | Monkroose | Quaternius | https://static.poly.pizza/54ca5c4d-aa20-40ff-a510-25c1c6a48ee9.glb |
 | Archer | Archery Second Age Le | Quaternius | https://static.poly.pizza/6e897a9f-7c4c-44c2-85d6-cc79b18d6b07.glb |
 | Mage | Wizard | Quaternius | https://static.poly.pizza/d206c071-7934-40eb-9091-35ebdf93c317.glb |
-| Warrior | Orc | Quaternius | https://static.poly.pizza/52a479b3-a635-4a23-92cb-6697eaa5eed5.glb |
+| Warrior | Original Blender mesh | Green Circle TD | Original project mesh |
 | Demon | Demon | Quaternius | https://static.poly.pizza/46b52ba4-5d2a-4fc8-85cc-3e980f199141.glb |
-| Brute | Enemy Large | Quaternius | https://static.poly.pizza/7a104a5a-9ff9-4e2e-889f-0de51d6d6195.glb |
-| Gnoll | Wolf | Quaternius | https://static.poly.pizza/f1d12388-e39b-4157-b32a-646a1d089fc4.glb |
+| Brute | Original Blender mesh | Green Circle TD | Original project mesh |
+| Gnoll | Original Blender mesh | Green Circle TD | Original project mesh |
 | Skeleton | Skeleton | Quaternius | https://static.poly.pizza/b1ea7fcc-7d7f-4e93-aac5-507358399a7b.glb |
 | Wraith | Ghost Skull | Quaternius | https://static.poly.pizza/0716bf8e-1894-4a90-8d10-34868975a239.glb |
 | Villager | Farmer | Quaternius | https://static.poly.pizza/81f2f0cf-6f53-4b57-92ea-dba0928620f2.glb |
@@ -61,20 +61,66 @@ baked by `tools/bake_models.py` from the sources below.
 | CommandAura | Crown | Quaternius | https://static.poly.pizza/1381b02a-8310-437b-a2a7-82cab0a94a4c.glb |
 | Infernal | Goleling Evolved | Quaternius | https://static.poly.pizza/d6308fbf-fa2e-4cfe-b235-def7ede1ab90.glb |
 | Harpy | Birb | Quaternius | https://static.poly.pizza/05dac745-bdd0-4169-9e64-f497ca21f69a.glb |
+| TowerSeed0 | Original Blender mesh | Green Circle TD | Original project mesh |
+| TowerSeed1 | Original Blender mesh | Green Circle TD | Original project mesh |
+| TowerSeed2 | Original Blender mesh | Green Circle TD | Original project mesh |
+| TowerSeed3 | Original Blender mesh | Green Circle TD | Original project mesh |
+| TowerSiege0 | Original Blender mesh | Green Circle TD | Original project mesh |
+| TowerSiege1 | Original Blender mesh | Green Circle TD | Original project mesh |
+| TowerSiege2 | Original Blender mesh | Green Circle TD | Original project mesh |
+| TowerSiege3 | Original Blender mesh | Green Circle TD | Original project mesh |
+| TowerBounce0 | Original Blender mesh | Green Circle TD | Original project mesh |
+| TowerBounce1 | Original Blender mesh | Green Circle TD | Original project mesh |
+| TowerBounce2 | Original Blender mesh | Green Circle TD | Original project mesh |
+| TowerBounce3 | Original Blender mesh | Green Circle TD | Original project mesh |
+| TowerMulti0 | Original Blender mesh | Green Circle TD | Original project mesh |
+| TowerMulti1 | Original Blender mesh | Green Circle TD | Original project mesh |
+| TowerMulti2 | Original Blender mesh | Green Circle TD | Original project mesh |
+| TowerMulti3 | Original Blender mesh | Green Circle TD | Original project mesh |
+| TowerCorrupt0 | Original Blender mesh | Green Circle TD | Original project mesh |
+| TowerCorrupt1 | Original Blender mesh | Green Circle TD | Original project mesh |
+| TowerCorrupt2 | Original Blender mesh | Green Circle TD | Original project mesh |
+| TowerCorrupt3 | Original Blender mesh | Green Circle TD | Original project mesh |
+| TowerAir0 | Original Blender mesh | Green Circle TD | Original project mesh |
+| TowerAir1 | Original Blender mesh | Green Circle TD | Original project mesh |
+| TowerAir2 | Original Blender mesh | Green Circle TD | Original project mesh |
+| TowerAir3 | Original Blender mesh | Green Circle TD | Original project mesh |
+| TowerChaos0 | Original Blender mesh | Green Circle TD | Original project mesh |
+| TowerChaos1 | Original Blender mesh | Green Circle TD | Original project mesh |
+| TowerChaos2 | Original Blender mesh | Green Circle TD | Original project mesh |
+| TowerChaos3 | Original Blender mesh | Green Circle TD | Original project mesh |
+| TowerDestroy0 | Original Blender mesh | Green Circle TD | Original project mesh |
+| TowerDestroy1 | Original Blender mesh | Green Circle TD | Original project mesh |
+| TowerDestroy2 | Original Blender mesh | Green Circle TD | Original project mesh |
+| TowerDestroy3 | Original Blender mesh | Green Circle TD | Original project mesh |
+| TowerAura0 | Original Blender mesh | Green Circle TD | Original project mesh |
+| TowerAura1 | Original Blender mesh | Green Circle TD | Original project mesh |
+| TowerAura2 | Original Blender mesh | Green Circle TD | Original project mesh |
+| TowerAura3 | Original Blender mesh | Green Circle TD | Original project mesh |
+| TowerDemon0 | Original Blender mesh | Green Circle TD | Original project mesh |
+| TowerDemon1 | Original Blender mesh | Green Circle TD | Original project mesh |
+| TowerDemon2 | Original Blender mesh | Green Circle TD | Original project mesh |
+| TowerDemon3 | Original Blender mesh | Green Circle TD | Original project mesh |
+| TowerKing0 | Original Blender mesh | Green Circle TD | Original project mesh |
+| TowerKing1 | Original Blender mesh | Green Circle TD | Original project mesh |
+| TowerKing2 | Original Blender mesh | Green Circle TD | Original project mesh |
+| TowerKing3 | Original Blender mesh | Green Circle TD | Original project mesh |
 
 ## Tower and environment models
 
-Forty-four staged weapon towers are selected from
-Quaternius' [Steampunk Turret Pack](https://quaternius.com/packs/turretpack.html), released under CC0 1.0. Trees, rocks, brush and ground details are selected
-from Kenney's 330-model [Nature Kit](https://kenney.nl/assets/nature-kit), also released under CC0 1.0. Both source sets are downloaded and cached by
-`tools/bake_models.py`; only the baked runtime mesh is shipped.
+The staged weapon towers in the live command roster are original Blender
+assemblies authored for Green Circle TD. Remaining legacy auxiliary models
+are selected from Quaternius' [Steampunk Turret Pack](https://quaternius.com/packs/turretpack.html), released under CC0 1.0. The live trees, rocks, brush and ground details are
+original Blender constructions in `tools/original_meshes/`; their material
+separation and geometry are baked by `tools/bake_models.py` into the browser
+runtime mesh. Kenney Nature Kit remains the CC0 fallback/source reference.
 
 ## Interface artwork
 
 `title_backdrop.png` was created for this project with OpenAI's built-in image
 generation on 2026-09-04. It contains no third-party logo or game UI.
 
-`tower_icons.png` is an in-engine 24x4 contact sheet of the exact staged Quaternius
+`tower_icons.png` is an in-engine 24x4 contact sheet of the exact staged
 weapon towers used on the battlefield. It contains no separate concept art;
 the source and runtime assets are produced by the ignored roster render test
 and `tools/bake_icons.py`.

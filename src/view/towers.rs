@@ -9,18 +9,18 @@
 //!   - the **plinth** it stands on, cut to its attack type,
 //!   - the **level ring**: one notch of light per step up its family's path, so
 //!     investment reads from across the board without any text, and
-//!   - the **family dressing**: orbiting glaives, bolt fans, antennae, furnaces,
-//!     crystals, horns and crowns that say what the tower does, and
-//!   - the range ring and glow when it is selected.
+//!   - its own authored weapon construction, stone footings, timber, iron,
+//!     bronze fittings and sparse amber insets, and
+//!   - one restrained range ring when it is selected.
 //!
-//! Colour is the tower's attack type throughout, which is the one thing a
-//! player has to read at a glance: on an Immune wave, everything that is not
-//! Chaos red or Hero gold is doing five percent.
+//! Gameplay type remains available in the compact command card and threat
+//! readout. The battlefield no longer recolours an entire physical assembly by
+//! attack type: that made materially authored towers read like plastic toys.
 
 use super::PLOT_TOP;
 use super::models::{Pose, Skin};
 use super::{models, theme};
-use crate::game::Tower;
+use crate::game::{Tower, TOWER_RENDER_FOOTPRINT_SCALE, TOWER_RENDER_HEIGHT_SCALE};
 use crate::game::defs::*;
 use crate::gfx::draw::{DrawList, Material, Shape, mix, rgba};
 
@@ -41,12 +41,19 @@ fn downloaded_turret_yaw(aim_yaw: f32) -> f32 {
 pub fn draw(d: &mut DrawList, tw: &Tower, selected: bool, now: f32) {
     let def = tw.def();
     let base = def.color();
-    let grow = (((now - tw.built_at) * 4.0).min(1.0)).max(0.06);
+    // A build click must produce a complete, useful silhouette immediately.
+    // `now` is simulation time, so the former construction lerp froze a newly
+    // purchased tower at six percent scale whenever a player paused to place
+    // or inspect it (and made the effect nearly invisible at the requested
+    // 100x tempo).  The spawn burst and the short attack cooldown still give
+    // construction tactile feedback; model visibility must not depend on the
+    // simulation running.
+    let grow = 1.0;
     let skin = Skin::wearing(def.model, base, tw.flash * 0.5);
     let stage = tower_visual_stage(def);
 
-    plinth(d, tw, base);
-    level_ring(d, tw, base);
+    plinth(d, tw);
+    level_ring(d, tw);
 
     let pose = Pose {
         pos: tw.pos,
@@ -56,82 +63,80 @@ pub fn draw(d: &mut DrawList, tw: &Tower, selected: bool, now: f32) {
         // of this, and the widest of them - the ship, the turtle, the arcane
         // observatory - reach about two and a half times it, so a maxed tower
         // fills its pad and no more. It still visibly grows as it climbs.
-        r: 0.40 * (0.72 + 0.28 * tw.progress()) * grow,
+        r: 0.46 * (0.72 + 0.28 * tw.progress()) * grow,
         t: now * 2.0 + tw.pos[0] * 1.7 + tw.pos[1] * 0.9,
         // A tower does not walk, but its parts still breathe.
         walk: false,
         lights: true,
     };
     let model_scale = tw.visual_model_scale() * grow;
-    let tint = rgba(mix([1.0, 1.0, 1.0], family_accent(tw.family()), 0.07), 1.0);
-    if !models::draw_downloaded(
+    let model_envelope = [
+        model_scale * TOWER_RENDER_FOOTPRINT_SCALE,
+        model_scale * TOWER_RENDER_FOOTPRINT_SCALE,
+        model_scale * TOWER_RENDER_HEIGHT_SCALE,
+    ];
+    // Source vertex colours and material ids carry the construction. A white
+    // instance tint preserves limestone, oak, black iron and worn bronze
+    // rather than painting the entire assembled mesh with an attack colour.
+    let tint = rgba([1.0, 1.0, 1.0], 1.0);
+    if !models::draw_downloaded_animated_scaled(
         d,
         family_asset(tw.family(), stage),
         [tw.pos[0], tw.pos[1], DECK],
-        model_scale,
+        model_envelope,
         downloaded_turret_yaw(tw.angle),
         tint,
         Material::METAL,
         0.0,
+        tw.flash.clamp(0.0, 1.0),
     ) {
         models::draw(d, def.model, &pose, &skin);
     }
-    family_dressing(d, tw, stage, model_scale, now, grow);
-
-    // A restrained family-colour beacon keeps attack identity readable without
-    // washing the downloaded model in a single tint.
-    d.sphere_lit(
-        [tw.pos[0], tw.pos[1], DECK + model_scale * 0.88],
-        0.075 + tw.progress() * 0.035,
-        rgba(family_accent(tw.family()), 1.0),
-        0.18,
-    );
+    // The source meshes already provide eleven different readable silhouettes.
+    // Do not cover them with generic coloured orbitals and cones: the old
+    // dressing was the visual reason every command icon looked like the same
+    // bright toy on a differently coloured base. At high construction stages,
+    // one small amber sight is enough localized fantasy light.
+    if stage >= 2 {
+        d.sphere_lit(
+            [
+                tw.pos[0],
+                tw.pos[1],
+                DECK + model_scale * TOWER_RENDER_HEIGHT_SCALE * 0.96,
+            ],
+            0.040 + tw.progress() * 0.018,
+            rgba([0.95, 0.30, 0.045], 0.88),
+            0.10,
+        );
+    }
 
     // A tower in a frenzy is visibly working - the Troll Tower's own ability.
+    // Keep this close to the plinth: a full board may have several frantic
+    // towers, and broad additive pools erase the units fighting between them.
     if tw.ramp > 0.0 {
         d.glow(
             [tw.pos[0], tw.pos[1], DECK + 0.5],
-            1.5,
-            1.1,
-            rgba([1.0, 0.55, 0.25], 0.35),
-        );
-    }
-    // A Fire Tower's immolation is the one aura with a permanent mark on the
-    // ground, because it is the only one that is *damaging* everything inside
-    // it - a slow cloud and a damage aura are shown when the tower is selected.
-    let a = def.abil;
-    if a.burn_dps > 0.0 && a.burn_range > 0.0 {
-        d.ground_ring(
-            tw.pos,
-            a.burn_range,
-            0.05,
-            rgba([1.0, 0.48, 0.16], 0.12),
-            40,
+            1.10,
+            0.9,
+            rgba([1.0, 0.55, 0.25], 0.18),
         );
     }
 
+    // The board has one visual language for reach: select a tower and see its
+    // attack radius.  Aura, slow, and fire radii are intentionally not drawn
+    // as extra circles; stacked rings made a busy fight unreadable and did not
+    // change where the player can click or what the tower does.
     if selected {
         d.ground_ring(
             tw.pos,
             tw.range(),
-            0.038,
-            rgba(family_accent(tw.family()), 0.34),
-            72,
+            // Selection feedback has to remain visible on a dark field, but
+            // it cannot read as a cyan territory overlay while the player is
+            // trying to inspect the actual terrain and moving army.
+            0.006,
+            rgba(family_accent(tw.family()), 0.030),
+            64,
         );
-        d.glow([tw.pos[0], tw.pos[1], 0.55], 0.72, 2.4, rgba(base, 0.08));
-        // What its aura actually covers, in the colour of what it does.
-        if a.is_aura() {
-            d.ground_ring(
-                tw.pos,
-                a.aura_range,
-                0.07,
-                rgba([0.95, 0.86, 0.45], 0.5),
-                64,
-            );
-        }
-        if a.slow_amt > 0.0 && a.slow_range > 0.0 {
-            d.ground_ring(tw.pos, a.slow_range, 0.07, rgba([0.45, 0.80, 1.0], 0.5), 56);
-        }
     }
 }
 
@@ -143,23 +148,36 @@ pub fn draw(d: &mut DrawList, tw: &Tower, selected: bool, now: f32) {
 /// their own: a Chaos tower stands on thorns, a Siege tower on megaliths, a
 /// Magic tower on fluted columns. It is small, but it is what makes a board of
 /// mixed towers legible from directly overhead.
-fn plinth(d: &mut DrawList, tw: &Tower, base: [f32; 3]) {
+fn plinth(d: &mut DrawList, tw: &Tower) {
     let p = tw.pos;
-    let dark = mix(theme::STONE_DARK, base, 0.12);
+    let dark = theme::STONE_DARK;
+    // The former two smooth cylinders stayed from the primitive-only tower
+    // renderer after the authored models gained cut-stone foundations.  They
+    // read as pale hockey pucks beneath every otherwise constructed tower.
+    // Keep a shared, deliberately octagonal lower footing that agrees with
+    // the source mesh rather than competing with it.
     d.slab_mat(
         p,
-        [0.86, 0.86],
+        [0.96, 0.96],
         PLOT_TOP + 0.04,
-        0.16,
+        0.13,
         rgba(dark, 1.0),
         Material::STONE,
     );
-    d.cylinder(
-        [p[0], p[1], PLOT_TOP + 0.12],
-        0.76,
-        0.16,
-        0.0,
-        rgba(theme::STONE, 1.0),
+    d.prism(
+        [p[0], p[1], PLOT_TOP + 0.135],
+        0.82,
+        0.15,
+        std::f32::consts::FRAC_PI_4,
+        rgba([0.070, 0.080, 0.068], 1.0),
+        Material::STONE,
+    );
+    d.prism(
+        [p[0], p[1], PLOT_TOP + 0.225],
+        0.64,
+        0.075,
+        std::f32::consts::FRAC_PI_4,
+        rgba([0.105, 0.118, 0.098], 1.0),
         Material::STONE,
     );
 
@@ -173,7 +191,7 @@ fn plinth(d: &mut DrawList, tw: &Tower, base: [f32; 3]) {
                     0.11,
                     0.24,
                     0.0,
-                    rgba(mix([0.72, 0.70, 0.64], base, 0.30), 1.0),
+                    rgba([0.30, 0.285, 0.235], 1.0),
                     Material::STONE,
                 );
             }
@@ -187,7 +205,7 @@ fn plinth(d: &mut DrawList, tw: &Tower, base: [f32; 3]) {
                     0.30,
                     0.22,
                     a,
-                    rgba(mix(theme::STONE, base, 0.30), 1.0),
+                    rgba([0.29, 0.265, 0.215], 1.0),
                     Material::STONE,
                 );
             }
@@ -201,7 +219,7 @@ fn plinth(d: &mut DrawList, tw: &Tower, base: [f32; 3]) {
                     0.13,
                     0.22,
                     0.0,
-                    rgba(mix([0.10, 0.09, 0.14], base, 0.40), 1.0),
+                    rgba([0.075, 0.070, 0.080], 1.0),
                     Material::DARK_METAL,
                 );
             }
@@ -213,7 +231,7 @@ fn plinth(d: &mut DrawList, tw: &Tower, base: [f32; 3]) {
                 0.70,
                 0.18,
                 0.4,
-                rgba(mix([0.10, 0.08, 0.09], base, 0.12), 1.0),
+                rgba([0.095, 0.082, 0.072], 1.0),
                 Material::STONE,
             );
             for k in 0..4 {
@@ -223,7 +241,7 @@ fn plinth(d: &mut DrawList, tw: &Tower, base: [f32; 3]) {
                     0.11,
                     0.10,
                     0.0,
-                    rgba(boost3(base, 1.5), 1.0),
+                    rgba([0.34, 0.19, 0.055], 1.0),
                     Material::METAL,
                 );
             }
@@ -241,11 +259,11 @@ fn plinth(d: &mut DrawList, tw: &Tower, base: [f32; 3]) {
         }
     }
 
-    d.cylinder(
+    d.prism(
         [p[0], p[1], DECK - 0.02],
-        0.62,
-        0.10,
-        0.0,
+        0.58,
+        0.08,
+        std::f32::consts::FRAC_PI_4,
         rgba(dark, 1.0),
         Material::STONE,
     );
@@ -257,7 +275,7 @@ fn plinth(d: &mut DrawList, tw: &Tower, base: [f32; 3]) {
 /// would be unreadable at board zoom. Notches around the deck are not: an
 /// almost-complete ring says "nearly maxed" from anywhere on the screen, and a
 /// single mark says "ten gold seed".
-fn level_ring(d: &mut DrawList, tw: &Tower, base: [f32; 3]) {
+fn level_ring(d: &mut DrawList, tw: &Tower) {
     let total = tw.ladder_len().max(1);
     let done = tw.level().min(total);
     let p = tw.pos;
@@ -274,7 +292,10 @@ fn level_ring(d: &mut DrawList, tw: &Tower, base: [f32; 3]) {
             a,
             0.0,
             if on {
-                rgba(base, 1.0)
+                // Upgrade investment remains readable from the overhead view,
+                // but as forged bronze marks rather than a saturated faction
+                // halo around every tower.
+                rgba([0.33, 0.17, 0.045], 1.0)
             } else {
                 rgba(mix(theme::STONE_DARK, [0.0, 0.0, 0.0], 0.35), 1.0)
             },
@@ -537,14 +558,21 @@ pub fn draw_ghost(d: &mut DrawList, def_i: usize, p: [f32; 2], now: f32) {
         walk: false,
         lights: true,
     };
-    if !models::draw_downloaded(
+    if !models::draw_downloaded_animated_scaled(
         d,
         family_asset(def.family, 0),
         [p[0], p[1], DECK],
-        0.98,
+        // Match the opening source assembly's playable scale. A placement
+        // ghost is a real model preview, not a tiny icon stamped on grass.
+        [
+            1.12 * TOWER_RENDER_FOOTPRINT_SCALE,
+            1.12 * TOWER_RENDER_FOOTPRINT_SCALE,
+            1.12 * TOWER_RENDER_HEIGHT_SCALE,
+        ],
         downloaded_turret_yaw(now * 0.6),
         rgba(def.color(), 0.55),
         Material::STONE,
+        0.0,
         0.0,
     ) {
         models::draw(d, def.model, &pose, &skin);
@@ -597,6 +625,39 @@ mod tests {
         assert!(
             (instances[0].rot[0] - downloaded_turret_yaw(0.73)).abs() < 1e-6,
             "draw bypassed the imported turret axis correction"
+        );
+        assert!(
+            instances[0].scale[2] > instances[0].scale[0],
+            "the authored tower must retain a tall 3D construction envelope at overview scale"
+        );
+        let envelope_ratio = instances[0].scale[2] / instances[0].scale[0];
+        let expected_ratio = TOWER_RENDER_HEIGHT_SCALE / TOWER_RENDER_FOOTPRINT_SCALE;
+        assert!(
+            (envelope_ratio - expected_ratio).abs() < 1e-5,
+            "tower rendering and its gameplay muzzle profile have diverged"
+        );
+    }
+
+    #[test]
+    fn a_paused_new_build_is_a_complete_3d_tower_not_a_tiny_plinth() {
+        let mut game = Game::new();
+        game.gold = 10_000;
+        let def = family_start(Family::Single).expect("single tower root");
+        game.build_choice = Some((def, 1));
+        assert!(game.try_build(0));
+        // A freshly placed tower has `built_at == game.time`; this mirrors a
+        // player opening the pause menu immediately after a placement click.
+        let mut list = DrawList::default();
+        draw(&mut list, &game.towers[0], false, game.time);
+        let slot = model_slots()
+            .iter()
+            .find(|(name, _)| name == "TowerSeed0")
+            .map(|(_, slot)| *slot)
+            .expect("TowerSeed0 model");
+        let instance = &list.solid[model_bucket(slot)][0];
+        assert!(
+            instance.scale[0] > 1.0 && instance.scale[2] > 1.3,
+            "a paused fresh placement regressed to the old 6% construction model"
         );
     }
 }

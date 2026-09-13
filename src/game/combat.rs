@@ -10,7 +10,7 @@ use super::board::ROAD_HALF;
 use super::defs::*;
 use super::fx::ParticleStyle;
 use super::{
-    Beam, FloatText, Game, KNOCKBACK_CD, MAX_BEAMS, MAX_FLOAT_TEXTS, MAX_PROJECTILES, Proj,
+    ArmourType, Beam, Creep, FloatText, Game, KNOCKBACK_CD, MAX_BEAMS, MAX_FLOAT_TEXTS, MAX_PROJECTILES, Model, Proj,
     ProjKind, STUN_DR_MAX, STUN_DR_STEP, TargetMode, TextKind,
 };
 
@@ -35,10 +35,6 @@ const AURA_TICK: f32 = 0.25;
 
 pub fn step_towers(g: &mut Game, dt: f32) {
     let mut scratch = std::mem::take(&mut g.scratch);
-    // Tracking between shots is visual polish, not a combat rule. Preserve it
-    // on every economically plausible board; on a pathological fully packed
-    // arena it would spend thousands of spatial queries per frame merely
-    // turning barrels that are still reloading.
     let animate_tracking = g.towers.len() <= 512;
     for ti in 0..g.towers.len() {
         g.towers[ti].flash = (g.towers[ti].flash - dt * 5.0).max(0.0);
@@ -87,16 +83,26 @@ pub fn step_towers(g: &mut Game, dt: f32) {
         g.towers[ti].target_uid = tgt_uid;
         g.towers[ti].cooldown = 1.0 / g.towers[ti].rate().max(0.05);
         g.towers[ti].flash = 1.0;
-        fire(g, ti, ci);
+        fire(g, ti, ci, 1.0);
 
         // Multishot: the same attack at several targets at once, which is the
         // whole of the Multi Tower - ten of them at the top of its ladder.
+        // In Campaign mode, extra simultaneous fan shots scale to 40% (0.40x) base
+        // damage at firing, giving crowd weapons a shared volley budget.
+        // Legacy multishot remains strictly unscaled (1.0x).
         let extra = g.towers[ti].abil().multishot.saturating_sub(1) as usize;
         if extra > 0 {
+            let fan_scale = if g.is_campaign()
+                && matches!(g.towers[ti].family(), Family::Multi | Family::SuperMulti)
+            {
+                0.40
+            } else {
+                1.0
+            };
             let others = nearby_targets(g, ti, ci, extra, &mut scratch);
             for oi in others {
                 if oi < g.creeps.len() {
-                    fire(g, ti, oi);
+                    fire(g, ti, oi, fan_scale);
                 }
             }
         }
@@ -311,7 +317,7 @@ fn nearby_targets(
     out
 }
 
-fn fire(g: &mut Game, ti: usize, ci: usize) {
+fn fire(g: &mut Game, ti: usize, ci: usize, volley_scale: f32) {
     if ti >= g.towers.len() || ci >= g.creeps.len() || g.creeps[ci].hp <= 0.0 {
         return;
     }
@@ -341,7 +347,7 @@ fn fire(g: &mut Game, ti: usize, ci: usize) {
     ];
     let dir = barrel_dir;
 
-    let mut dmg = g.towers[ti].dmg();
+    let mut dmg = g.towers[ti].dmg() * volley_scale;
     let mut crit = false;
     if abil.crit_chance > 0.0 && g.rng.chance(abil.crit_chance) {
         dmg *= abil.crit_mult.max(1.0);
@@ -683,6 +689,24 @@ pub fn step_projectiles(g: &mut Game, dt: f32) {
     // impact from this fixed step is complete. That keeps spatial-hash and
     // multishot indices stable; removing during splash used to redirect later
     // hits onto whichever creep `swap_remove` moved into the dead one's slot.
+    //
+    // Legacy historically pays on the impact path (and its balance fixtures
+    // intentionally preserve that economy). Campaign bodies defer payment so
+    // a packet's reward ledger has one authoritative attribution point even
+    // when several impacts target the same body in a fixed step. Pay those
+    // deferred Campaign deaths before pruning them; `step_creeps` performs
+    // the equivalent cleanup for DOT deaths at the start of a simulation step.
+    if g.is_campaign() {
+        let fallen: Vec<_> = g
+            .creeps
+            .iter()
+            .filter(|c| c.hp <= 0.0)
+            .cloned()
+            .collect();
+        for c in &fallen {
+            g.on_creep_died(c, c.death_killer);
+        }
+    }
     g.creeps.retain(|c| c.hp > 0.0);
 }
 
@@ -964,6 +988,23 @@ fn bounce(
 
 // ---------------------------------------------------------------- damage
 
+/// Campaign bodies use newly-authored early health pools, whereas the source
+/// map's Poison rider is tuned for Legacy's much larger numbers. Keep the
+/// Legacy ability exact and budget only its Campaign damage-over-time.
+pub const CAMPAIGN_POISON_DPS_SCALE: f32 = 0.10;
+
+/// Effective Poison rider DPS for the active ruleset. This is deliberately a
+/// small public query so the ability card can describe the same arithmetic as
+/// combat: every Legacy tier's listed DPS is multiplied by 0.10 in Campaign,
+/// with its existing twelve-stack cap and slow duration unchanged.
+pub fn effective_poison_dps(g: &Game, legacy_dps: f32) -> f32 {
+    if g.is_campaign() {
+        legacy_dps * CAMPAIGN_POISON_DPS_SCALE
+    } else {
+        legacy_dps
+    }
+}
+
 /// Applies the on-hit riders - poison, roots - to one monster.
 pub fn on_hit_riders(g: &mut Game, ti: usize, ci: usize) {
     let Some(def) = g.towers.get(ti).map(|tower| tower.def) else {
@@ -988,18 +1029,19 @@ fn on_hit_riders_from_def(g: &mut Game, def: usize, ci: usize) {
         g.creeps[ci].suppress = g.creeps[ci].suppress.max(2.0);
     }
 
-    // The Poison Tower's sting: damage over time and a heavy slow, both of
-    // which the map states outright on the ability - 500 a second and 40% for
-    // twelve seconds, on up to 8000 and 80% for thirty at the top of the
-    // ladder. It stacks rather than refreshing, which is why the family scales
-    // on one big target.
-    if a.poison_dps > 0.0 {
+    // The Poison Tower's sting: damage over time and a heavy slow. The root
+    // tower is 100 DPS for seven seconds; 500 DPS / 40% slow / twelve seconds
+    // is a later Legacy tier, rising to 8000 DPS and 80% for thirty at the
+    // top of the ladder. It stacks rather than refreshing, which is why the
+    // family scales on one big target.
+    let poison_dps = effective_poison_dps(g, a.poison_dps);
+    if poison_dps > 0.0 {
         let c = &mut g.creeps[ci];
         // A low-tier sting must never truncate a stronger stack. Its own
         // twelve-hit cap may contribute only when that cap is above the
         // strength already present; the existing stack is always a floor.
-        let cap = c.poison.amt.max(a.poison_dps * 12.0);
-        c.poison.amt = (c.poison.amt + a.poison_dps).min(cap);
+        let cap = c.poison.amt.max(poison_dps * 12.0);
+        c.poison.amt = (c.poison.amt + poison_dps).min(cap);
         c.poison.t = c.poison.t.max(a.poison_dur);
     }
     if a.poison_slow > 0.0 {
@@ -1054,7 +1096,7 @@ pub fn damage_creep(g: &mut Game, ci: usize, base: f32, ti: usize, crit: bool) -
 }
 
 /// Resolve damage using the definition captured when a projectile fired.
-fn damage_creep_from_def(
+pub fn damage_creep_from_def(
     g: &mut Game,
     ci: usize,
     base: f32,
@@ -1065,16 +1107,158 @@ fn damage_creep_from_def(
     let Some(tower) = TOWERS.get(def) else {
         return false;
     };
+    if !g.is_campaign() || ci >= g.creeps.len() {
+        return damage_creep_snapshot(
+            g,
+            ci,
+            base,
+            ti,
+            tower.attack,
+            tower.abil.armour_pen,
+            tower.abil.kill_chance,
+            crit,
+        );
+    }
+
+    // Deliberate shield split: Active shield layer absorbs damage with shield multipliers.
+    // When a hit shatters the shield, only the shield portion is absorbed; the remaining
+    // overflow transitions to exposed health with the unshielded core role multiplier.
+    if g.creeps[ci].shield > 0.0 {
+        let shield_mult = campaign_shield_role_multiplier(tower.family);
+        let pen = tower.abil.armour_pen;
+        let armour = g.creeps[ci].armour - pen;
+        let armour_type = g.creeps[ci].armour_type;
+        let pot_shield_dmg = damage_taken(base * shield_mult, tower.attack, armour, armour_type);
+        let curr_shield = g.creeps[ci].shield;
+
+        if pot_shield_dmg <= curr_shield {
+            let c = &mut g.creeps[ci];
+            c.shield -= pot_shield_dmg;
+            c.flash = 1.0;
+            if ti < g.towers.len() {
+                g.towers[ti].damage += pot_shield_dmg as f64;
+            }
+            g.stats.damage += pot_shield_dmg as f64;
+            return false;
+        } else {
+            let absorbed = curr_shield;
+            let frac = (absorbed / pot_shield_dmg.max(0.001)).clamp(0.0, 1.0);
+            let rem_base = base * (1.0 - frac);
+            {
+                let c = &mut g.creeps[ci];
+                c.shield = 0.0;
+                c.flash = 1.0;
+            }
+            if ti < g.towers.len() {
+                g.towers[ti].damage += absorbed as f64;
+            }
+            g.stats.damage += absorbed as f64;
+
+            // Health damage on broken shield applies core multiplier without shield penalty:
+            let core_mult = campaign_core_role_multiplier(&g.creeps[ci], tower.family);
+            return damage_creep_snapshot(
+                g,
+                ci,
+                rem_base * core_mult,
+                ti,
+                tower.attack,
+                pen,
+                tower.abil.kill_chance,
+                crit,
+            );
+        }
+    }
+
+    let core_mult = campaign_core_role_multiplier(&g.creeps[ci], tower.family);
     damage_creep_snapshot(
         g,
         ci,
-        base,
+        base * core_mult,
         ti,
         tower.attack,
         tower.abil.armour_pen,
         tower.abil.kill_chance,
         crit,
     )
+}
+
+/// Shield-specific role multipliers: energy barriers disrupt pellet spreads (Multi)
+/// while yielding to arcane disruption (Chaos/Destruction/Corruption/Demon).
+pub fn campaign_shield_role_multiplier(family: Family) -> f32 {
+    match family {
+        Family::Multi => 0.65,
+        Family::SuperMulti => 0.78,
+        Family::Chaos
+        | Family::SuperChaos
+        | Family::Destruction
+        | Family::SuperDestruct
+        | Family::Corruption
+        | Family::Demon => 1.20,
+        Family::Single | Family::Siege | Family::Critical | Family::OneStrike => 1.10,
+        _ => 1.0,
+    }
+}
+
+/// Core exposed-health role multipliers:
+/// - Flying units: specialized Air (+25%) and Frost (+20%), general multi pellets (-15%).
+/// - Plated units (Medium/Heavy/Hero/resistant): heavy kinetic/chaos (+15%), Corruption (+10%), Multi (-40%).
+///   Note: Numeric armour on late swarms does NOT make them plated; they retain their swarm classification.
+/// - Swarm units (Gnoll model or Unarmoured non-boss): Multi (+15%), Siege/Destruction (+10%).
+pub fn campaign_core_role_multiplier(c: &Creep, family: Family) -> f32 {
+    if c.flying {
+        return match family {
+            Family::Air => 1.25,
+            Family::Frost => 1.20,
+            Family::Multi | Family::SuperMulti => 0.85,
+            _ => 1.0,
+        };
+    }
+
+    let plated = c.resistant
+        || matches!(
+            c.armour_type,
+            ArmourType::Medium | ArmourType::Heavy | ArmourType::Hero
+        );
+    if plated {
+        return match family {
+            Family::Multi => 0.60,
+            Family::SuperMulti => 0.75,
+            Family::Single
+            | Family::Siege
+            | Family::Critical
+            | Family::OneStrike
+            | Family::Chaos
+            | Family::SuperChaos
+            | Family::Destruction
+            | Family::SuperDestruct => 1.15,
+            Family::Corruption => 1.10,
+            _ => 1.0,
+        };
+    }
+
+    let crowd = (c.model == Model::Gnoll || c.armour_type == ArmourType::Unarmoured) && !c.is_boss();
+    if crowd {
+        return match family {
+            Family::Multi | Family::SuperMulti => 1.15,
+            Family::Siege | Family::Destruction | Family::SuperDestruct => 1.10,
+            _ => 1.0,
+        };
+    }
+
+    1.0
+}
+
+/// Overall role multiplier query for diagnostics and previews.
+pub fn campaign_role_multiplier(g: &Game, ci: usize, family: Family) -> f32 {
+    if !g.is_campaign() || ci >= g.creeps.len() {
+        return 1.0;
+    }
+    let c = &g.creeps[ci];
+    if c.shield > 0.0 {
+        campaign_shield_role_multiplier(family)
+    } else {
+        campaign_core_role_multiplier(c, family)
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1095,6 +1279,8 @@ fn damage_creep_snapshot(
         return true;
     }
 
+    let campaign = g.is_campaign();
+
     // The Corruption Tower strips armour off whatever it hits - fifteen points
     // at the first level, seventy-five at the last. On a wave carrying seven
     // hundred that is small; on the early waves it is most of their defence.
@@ -1105,7 +1291,11 @@ fn damage_creep_snapshot(
     // lands on does not care about armour or health. Never on a boss: a boss
     // deleted by a coin flip is not a boss.
     if ti < g.towers.len() {
-        if kill_chance > 0.0 && !g.creeps[ci].is_boss() && g.rng.chance(kill_chance) {
+        if kill_chance > 0.0
+            && !g.creeps[ci].is_boss()
+            && g.creeps[ci].shield <= 0.0
+            && g.rng.chance(kill_chance)
+        {
             let pos = g.creeps[ci].pos;
             let z = g.creeps[ci].height();
             let hp = g.creeps[ci].hp;
@@ -1120,20 +1310,41 @@ fn damage_creep_snapshot(
                 });
             }
             g.fx.burst(&mut g.rng, pos, 20, 2.4, [1.0, 0.95, 0.55, 1.0], 0.45, 0.22);
-            let c = g.creeps[ci].clone();
-            g.on_creep_died(&c, Some(ti));
-            g.creeps[ci].hp = 0.0;
+            let fallen = {
+                let c = &mut g.creeps[ci];
+                c.hp = 0.0;
+                c.death_killer = (ti < g.towers.len()).then_some(ti);
+                c.clone()
+            };
+            // Preserve the established 36-wave economy. Campaign cleanup is
+            // intentionally deferred to the end of the fixed combat step.
+            if !campaign {
+                g.on_creep_died(&fallen, Some(ti));
+            }
             return true;
         }
     }
 
     let dealt = damage_taken(base, attack, armour, armour_type);
-    let c = &mut g.creeps[ci];
-    c.hp -= dealt;
-    c.flash = 1.0;
-    let dead = c.hp <= 0.0;
-    let pos = c.pos;
-    let z = c.height();
+    let (dead, pos, z, fallen) = {
+        let c = &mut g.creeps[ci];
+        // Shield pips are an actual finite damage layer for Campaign shielded
+        // units and ward commanders. They absorb hits before health rather
+        // than being represented by a misleading icon or a second armour
+        // colour.
+        let shielded = dealt.min(c.shield.max(0.0));
+        c.shield = (c.shield - shielded).max(0.0);
+        let health_dealt = dealt - shielded;
+        c.hp -= health_dealt;
+        c.flash = 1.0;
+        let dead = c.hp <= 0.0;
+        let pos = c.pos;
+        let z = c.height();
+        if dead {
+            c.death_killer = (ti < g.towers.len()).then_some(ti);
+        }
+        (dead, pos, z, dead.then(|| c.clone()))
+    };
 
     if ti < g.towers.len() {
         g.towers[ti].damage += dealt as f64;
@@ -1158,8 +1369,14 @@ fn damage_creep_snapshot(
     }
 
     if dead {
-        let c = g.creeps[ci].clone();
-        g.on_creep_died(&c, Some(ti));
+        // Do not pay/remove here: tower and projectile loops may still hold
+        // stable indices. `step_creeps` performs the one authoritative cleanup
+        // on the next fixed step and uses this attribution exactly once.
+        if !campaign {
+            // The Legacy path pays at impact, just as it did before Campaign
+            // attribution was introduced. `step_projectiles` only prunes it.
+            g.on_creep_died(&fallen.expect("dead creeps are cloned for payout"), Some(ti));
+        }
     }
     dead
 }
@@ -1249,7 +1466,7 @@ mod visual_tests {
 
         let reach = g.towers[0].muzzle_reach();
         let height = g.towers[0].muzzle_height();
-        fire(&mut g, 0, 0);
+        fire(&mut g, 0, 0, 1.0);
         let shot = g.projs.last().expect("projectile");
         assert!((shot.pos[0] - origin[0]).abs() < 1e-5);
         assert!((shot.pos[1] - origin[1] - reach).abs() < 1e-5);
@@ -1276,7 +1493,7 @@ mod visual_tests {
         g.spawn_creep(&w, w.hp, 1.0, 3.0);
         g.creeps[0].pos = [origin[0] + authored_reach * 0.5, origin[1]];
 
-        fire(&mut g, 0, 0);
+        fire(&mut g, 0, 0, 1.0);
         let shot = g.projs.last().expect("projectile");
         assert!(shot.pos[0] >= origin[0]);
         assert!(shot.pos[0] < g.creeps[0].pos[0]);

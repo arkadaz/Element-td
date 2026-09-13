@@ -35,13 +35,20 @@ SIZE = 512
 # tile. Adding one means adding it here and using it there; nothing else.
 LAYERS = [
     ('grass', 'Grass004'),
-    ('dirt', 'Ground054'),
+    # The route needs the same compact, dark soil and moss aggregate used by
+    # the actual map studies—not the old warm orange generic ground tile.
+    # It remains a distinct physical earth layer with its own normal response;
+    # grass still grows into its irregular edge through real mesh cover.
+    ('dirt', 'LOCAL:mosswatch-ground-v1.png'),
     # The HUD's own materials. They live in the same blob as the ground because
     # they are the same thing - a normalised albedo tinted by a colour the game
     # already chose - and one blob is one loader, one failure mode and one set
     # of credits.
     ('wood', 'Planks037A'),
     ('stone', 'Rock051'),
+    # Original project asset generated for Mosswatch. `normal_layer` derives a
+    # deliberately restrained local normal from its high-frequency detail.
+    ('mosswatch', 'LOCAL:mosswatch-grass-albedo-v2.png'),
 ]
 
 MAGIC = 0x58455447  # "GTEX"
@@ -71,10 +78,13 @@ def colour_layer(asset):
     multiplies by twice the sample, which averages to exactly one and leaves the
     measured colour intact - the texture supplies variation and nothing else.
     """
-    z = zipfile.ZipFile(fetch(asset))
-    name = next(n for n in z.namelist()
-                if n.lower().endswith('_color.jpg'))
-    im = Image.open(io.BytesIO(z.read(name))).convert('RGB')
+    if asset.startswith('LOCAL:'):
+        im = Image.open(os.path.join(OUT, asset[6:])).convert('RGB')
+    else:
+        z = zipfile.ZipFile(fetch(asset))
+        name = next(n for n in z.namelist()
+                    if n.lower().endswith('_color.jpg'))
+        im = Image.open(io.BytesIO(z.read(name))).convert('RGB')
     im = im.resize((SIZE, SIZE), Image.LANCZOS)
 
     px = list(im.getdata())
@@ -108,12 +118,30 @@ def normal_layer(asset):
     `NormalGL` rather than `NormalDX` - the green channel points up in OpenGL
     convention, which is what the shader below assumes.
     """
-    z = zipfile.ZipFile(fetch(asset))
-    name = next((n for n in z.namelist() if n.lower().endswith('_normalgl.jpg')), None)
+    if asset.startswith('LOCAL:'):
+        # Generate restrained tangent-space relief from the authored albedo's
+        # aggregate/moss variation. It is intentionally low strength: this is
+        # material micro-relief, not a fake sculpt or directional shading.
+        source = Image.open(os.path.join(OUT, asset[6:])).convert('L').resize((SIZE, SIZE), Image.LANCZOS)
+        src = source.load()
+        im = Image.new('RGB', (SIZE, SIZE))
+        out = im.load()
+        for y in range(SIZE):
+            for x in range(SIZE):
+                dx = (src[(x + 1) % SIZE, y] - src[(x - 1) % SIZE, y]) / 255.0
+                dy = (src[x, (y + 1) % SIZE] - src[x, (y - 1) % SIZE]) / 255.0
+                # 0.28 keeps a packed-earth surface subtle at tactical scale.
+                nx, ny, nz = -dx * .28, -dy * .28, 1.0
+                length = max((nx * nx + ny * ny + nz * nz) ** .5, 1e-6)
+                out[x, y] = tuple(int(round(max(0, min(1, c / length * .5 + .5)) * 255)) for c in (nx, ny, nz))
+        name = '__local_normal__'
+    else:
+        z = zipfile.ZipFile(fetch(asset))
+        name = next((n for n in z.namelist() if n.lower().endswith('_normalgl.jpg')), None)
     if name is None:
         # No normal map in this pack: a flat one, which perturbs nothing.
         im = Image.new('RGB', (SIZE, SIZE), (128, 128, 255))
-    else:
+    elif name != '__local_normal__':
         im = Image.open(io.BytesIO(z.read(name))).convert('RGB')
         im = im.resize((SIZE, SIZE), Image.LANCZOS)
 
@@ -140,17 +168,38 @@ def main():
     os.makedirs(OUT, exist_ok=True)
     body = bytearray()
     names = []
-    # Colours first, then the matching normals in the same order, so a layer's
-    # normal is always at `layer + len(LAYERS)`. `solid.wgsl` relies on that.
-    for name, asset in LAYERS:
-        im = colour_layer(asset)
-        body += im.convert('RGBA').tobytes()
-        names.append((name, asset))
-        px = im.resize((1, 1), Image.LANCZOS).getpixel((0, 0))
-        print('  %-7s %-12s average rgb%s' % (name, asset, px))
-    for name, asset in LAYERS:
-        body += normal_layer(asset).convert('RGBA').tobytes()
-        print('  %-7s %-12s normal map' % (name, asset))
+    # A release build can be reproduced from cached ambientCG sources.  During
+    # offline development keep the already-baked CC0 layers byte-for-byte and
+    # splice in the original Mosswatch layer instead of silently dropping all
+    # texture detail because one source mirror is unavailable.
+    existing = os.path.join(OUT, 'textures.bin')
+    old = open(existing, 'rb').read() if os.path.exists(existing) else b''
+    old_size = struct.unpack_from('<I', old, 8)[0] if len(old) >= 16 else 0
+    old_layers = struct.unpack_from('<I', old, 12)[0] if len(old) >= 16 else 0
+    old_ok = (old[:8] == struct.pack('<II', MAGIC, 2) and old_size == SIZE
+              and old_layers == 8 and len(old) >= 16 + SIZE * SIZE * 4 * 8)
+    old_layer_bytes = SIZE * SIZE * 4
+    if old_ok:
+        old_body = old[16:16 + old_layer_bytes * 8]
+        # Old layout was [four colours][four normals].  New layout must remain
+        # [five colours][five normals] for the shader's layer offset contract.
+        body += old_body[:old_layer_bytes * 4]
+        moss = colour_layer('LOCAL:mosswatch-grass-albedo-v2.png')
+        body += moss.convert('RGBA').tobytes()
+        body += old_body[old_layer_bytes * 4:]
+        body += normal_layer('LOCAL:mosswatch-grass-albedo-v2.png').convert('RGBA').tobytes()
+        names = LAYERS
+    else:
+        # Colours first, then matching normals: this is the normal online bake.
+        for name, asset in LAYERS:
+            im = colour_layer(asset)
+            body += im.convert('RGBA').tobytes()
+            names.append((name, asset))
+            px = im.resize((1, 1), Image.LANCZOS).getpixel((0, 0))
+            print('  %-9s %-28s average rgb%s' % (name, asset, px))
+        for name, asset in LAYERS:
+            body += normal_layer(asset).convert('RGBA').tobytes()
+            print('  %-9s %-28s normal map' % (name, asset))
 
     head = struct.pack('<IIII', MAGIC, 2, SIZE, len(LAYERS) * 2)
     dst = os.path.join(OUT, 'textures.bin')
@@ -165,8 +214,10 @@ def main():
         f.write('`tools/bake_textures.py`.\n\n')
         f.write('| Layer | Material | Source |\n| --- | --- | --- |\n')
         for name, asset in names:
-            f.write('| %s | %s | https://ambientcg.com/view?id=%s |\n'
-                    % (name, asset, asset))
+            source = ('Original project asset, generated with OpenAI image generation on 2026-09-11'
+                      if asset.startswith('LOCAL:')
+                      else 'https://ambientcg.com/view?id=%s' % asset)
+            f.write('| %s | %s | %s |\n' % (name, asset, source))
 
 
 if __name__ == '__main__':

@@ -562,6 +562,14 @@ fn capture_the_model_sheet() {
     let dir = out_dir();
     let want = std::env::var("TD_MODELS").unwrap_or_default();
     let wanted: Vec<&str> = want.split(',').filter(|s| !s.is_empty()).collect();
+    // Asset authors need to inspect both contact poses. A model can look
+    // coherent at rest yet explode half-way through a mismatched bake, which
+    // only becomes a pale horde smear at gameplay scale. Keep the default
+    // moving frame, with an explicit diagnostic override for rest pose.
+    let pose_t = std::env::var("TD_MODEL_POSE")
+        .ok()
+        .and_then(|s| s.parse::<f32>().ok())
+        .unwrap_or(0.35);
 
     println!();
     let mut n = 0;
@@ -578,11 +586,20 @@ fn capture_the_model_sheet() {
             // small it is in play.
             r: 0.42,
             yaw: 0.7,
-            t: 0.35,
+            t: pose_t,
             walk: true,
             lights: true,
         };
         models::draw(&mut d, m, &pose, &Skin::wearing(m, [0.85, 0.72, 0.35], 0.0));
+        // The two campaign bodies deliberately use a taller tactical transform
+        // than older imported meshes.  Aim their inspection camera through the
+        // actual torso centre; the old fixed 0.62 lift cropped off their head,
+        // shield and horns and made a useful visual review impossible.
+        let lift = if matches!(m, crate::game::greentd_types::Model::Warrior | crate::game::greentd_types::Model::Brute) {
+            1.72
+        } else {
+            0.62
+        };
         let shot = crate::shot::capture_list(
             &d,
             [0.0, 0.0],
@@ -591,8 +608,8 @@ fn capture_the_model_sheet() {
             // camera a standing figure is a head and a pair of shoulders, which
             // is fine for playing and useless for judging leg length.
             24.0,
-            // Aimed at chest height rather than at the grass.
-            0.62,
+            // Aimed at the live body's chest rather than at the grass.
+            lift,
             560,
             660,
         );
@@ -635,6 +652,12 @@ fn capture_the_tower_roster() {
     use crate::view::towers;
 
     let dir = out_dir();
+    // Asset review needs a clean look at a representative tower, rather than
+    // inferring one assembly from four staged versions sharing a sheet.  This
+    // is a diagnostic selector only; leaving it unset still captures the full
+    // live roster used by the command cards.
+    let wanted = std::env::var("TD_TOWER_FAMILIES").unwrap_or_default();
+    let wanted: Vec<&str> = wanted.split(',').filter(|s| !s.is_empty()).collect();
     let families = [
         Family::Single,
         Family::Siege,
@@ -648,7 +671,11 @@ fn capture_the_tower_roster() {
         Family::Demon,
         Family::King,
     ];
+    let mut captured = 0usize;
     for family in families {
+        if !wanted.is_empty() && !wanted.iter().any(|name| *name == format!("{family:?}")) {
+            continue;
+        }
         let mut g = Game::new();
         g.start_run(17);
         g.gold = 1_000_000;
@@ -694,7 +721,9 @@ fn capture_the_tower_roster() {
         let path = dir.join(format!("tower_{family:?}.png"));
         crate::shot::write_png(&path, &image).expect("could not write the tower sheet");
         println!("  {family:?} -> {}", path.display());
+        captured += 1;
     }
+    assert!(captured > 0, "TD_TOWER_FAMILIES matched no live family");
 }
 
 /// Rebuild the command-card atlas from the renderer itself. Every family gets
@@ -717,6 +746,10 @@ fn bake_matching_tower_icon_atlas() {
         height,
         rgba: vec![0; (width * height * 4) as usize],
     };
+    // Keep all 96 target/readbacks on one device. `capture_list` is ideal for
+    // one diagnostic card, but creating a new native adapter for every atlas
+    // cell faulted some drivers before the sheet could be written.
+    let mut jobs: Vec<(u32, u32, DrawList, [f32; 2], f32, f32)> = Vec::new();
 
     for family in Family::ALL {
         let mut g = Game::new();
@@ -745,17 +778,39 @@ fn bake_matching_tower_icon_atlas() {
             tower.built_at = 0.0;
             let mut draw = DrawList::default();
             towers::draw(&mut draw, &tower, false, 10.0);
-            // Match the close roster camera but render one square at a time.
-            // That keeps each tower centred and stops adjacent silhouettes
-            // leaking across atlas cells.
-            let icon = crate::shot::capture_list(&draw, centre, 2.9, 42.0, 0.72, CELL, CELL);
-            let dst_col = family.icon_slot() as u32;
-            for y in 0..CELL {
+            // These authored cannon/obelisk families are genuinely taller than
+            // the Seed/Multi silhouette. Their close card crop cut the barrel
+            // crown on Siege and Chaos/Destruction as well as Air. Keep normal
+            // families at the proven close frame, while all tall variants use
+            // the same conservative full-body camera with a small top margin.
+            let (span, lift) = if matches!(
+                family,
+                // These five were individually inspected at all four atlas
+                // rows and already have complete silhouettes at the close
+                // framing. Every other family uses the conservative full-body
+                // camera so an advanced barrel, aura mast, or bounce crown can
+                // never cross a command-card cell edge.
+                Family::Single | Family::Multi | Family::King | Family::SuperMulti | Family::Troll
+            ) {
+                (2.9, 0.72)
+            } else {
+                (3.8, 1.1)
+            };
+            jobs.push((family.icon_slot() as u32, stage as u32, draw, centre, span, lift));
+        }
+    }
+    let requests: Vec<_> = jobs
+        .iter()
+        .map(|(_, _, draw, centre, span, lift)| (draw, *centre, *span, 42.0, *lift, CELL, CELL))
+        .collect();
+    let icons = crate::shot::capture_lists(&requests);
+    assert_eq!(icons.len(), jobs.len(), "all command-card cells captured");
+    for ((dst_col, stage, _, _, _, _), icon) in jobs.iter().zip(icons.iter()) {
+        for y in 0..CELL {
                 let src = (y * CELL * 4) as usize;
-                let dst = ((((stage as u32 * CELL + y) * width) + dst_col * CELL) * 4) as usize;
+                let dst = ((((*stage * CELL + y) * width) + *dst_col * CELL) * 4) as usize;
                 atlas.rgba[dst..dst + (CELL * 4) as usize]
                     .copy_from_slice(&icon.rgba[src..src + (CELL * 4) as usize]);
-            }
         }
     }
 

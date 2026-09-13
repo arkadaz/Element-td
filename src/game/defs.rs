@@ -71,6 +71,41 @@ pub fn ladder_len(f: Family) -> u32 {
     TOWERS.iter().filter(|t| t.family == f).count() as u32
 }
 
+/// The longest concrete upgrade route reachable from this exact tower entry,
+/// counting the entry itself. The starter seed is a junction rather than a
+/// one-rank dead end: its deepest attached route has sixteen real ranks.
+/// Keeping that visible in the live UI matters more than pretending the seed's
+/// own one-entry family is the whole progression system.
+pub fn deepest_upgrade_path_len(i: usize) -> u32 {
+    fn descend(i: usize, remaining: usize) -> u32 {
+        let Some(tower) = TOWERS.get(i) else { return 0 };
+        if remaining == 0 {
+            // Generated data is expected to be acyclic. This bound prevents a
+            // malformed future graph from making hover/UI rendering recurse
+            // forever while still displaying a conservative one-rank value.
+            return 1;
+        }
+        1 + tower
+            .upgrades
+            .iter()
+            .map(|&next| descend(next as usize, remaining - 1))
+            .max()
+            .unwrap_or(0)
+    }
+    descend(i, TOWERS.len())
+}
+
+/// The rank total players should see for a purchasable/selected tower. Normal
+/// families use their authored family ladder; the starter reports its real
+/// deepest reachable path instead of the misleading `L1/1` it used to show.
+pub fn display_ladder_len(i: usize) -> u32 {
+    match TOWERS.get(i) {
+        Some(tower) if tower.family == Family::Single => deepest_upgrade_path_len(i),
+        Some(tower) => ladder_len(tower.family),
+        None => 1,
+    }
+}
+
 /// Map any statistical rung onto the same four visual milestones used by the
 /// battlefield renderer and the icon atlas.
 pub fn tower_visual_stage(def: &TowerLevel) -> usize {
@@ -137,9 +172,22 @@ fn walk(speed: f32) -> f32 {
     speed / 128.0
 }
 
-/// The whole wave spawns over this many seconds, whatever its count - the map
-/// divides 45 by the number of creeps to get the gap between them.
-pub const WAVE_SPAWN_WINDOW: f32 = 45.0;
+/// The whole wave pours onto the road in this many seconds, whatever its
+/// count. The source table has 66–161 units in ordinary waves; spreading those
+/// over forty-five seconds made a big wave look like a thin trickle. Fifteen
+/// seconds keeps the authored roster and rewards intact, but makes it feel
+/// like an actual horde.
+pub const WAVE_SPAWN_WINDOW: f32 = 14.0;
+
+/// The target time between the start of two ordinary waves. It leaves a short,
+/// readable rebuild beat after a horde has fully deployed without returning to
+/// long empty roads.
+pub const WAVE_CADENCE: f32 = 42.0;
+
+/// Minimum time after the tail of a horde appears before the next one can
+/// start. This is a recovery window, not a new build phase: survivors keep
+/// circling and the player can still Rush.
+pub const WAVE_RECOVERY: f32 = 5.0;
 
 pub const CAMPAIGN_WAVES: u32 = 36;
 /// Kept under the old name so the HUD and tests read naturally.
@@ -167,7 +215,13 @@ pub fn wave_at(i: u32) -> WaveDef {
         speed: walk(row.speed),
         flying: row.flying,
         spawn_gap: WAVE_SPAWN_WINDOW / count as f32,
-        lead_in: row.gap,
+        // Preserve a meaningful breath between hordes while replacing the
+        // source map's slow 45–50 second pacing with the standalone's action
+        // cadence. The first source row is the only twenty-second exception.
+        lead_in: row
+            .gap
+            .min(WAVE_CADENCE)
+            .max(WAVE_SPAWN_WINDOW + WAVE_RECOVERY),
     }
 }
 

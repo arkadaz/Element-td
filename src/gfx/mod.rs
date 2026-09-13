@@ -418,10 +418,13 @@ pub struct Renderer {
 }
 
 /// Packed: see `mesh::GpuVertex`, whose field order this must match.
-const MESH_ATTRS: [wgpu::VertexAttribute; 5] = wgpu::vertex_attr_array![
+const MESH_ATTRS: [wgpu::VertexAttribute; 6] = wgpu::vertex_attr_array![
     0 => Snorm16x4, 1 => Snorm8x4, 8 => Unorm8x4,
     // The second pose, as an offset. Zero on everything that does not walk.
-    9 => Snorm16x4, 10 => Snorm8x4
+    9 => Snorm16x4, 10 => Snorm8x4,
+    // Authored UV.xy and an authored-UV flag in z. This stays in the same
+    // compact stream as the material id in vertex colour alpha.
+    12 => Unorm16x4
 ];
 
 /// Solid instances sit alongside the mesh, so they start at location 2.
@@ -772,13 +775,15 @@ impl Renderer {
 
         let (ground_tex, ground_view, ground_size, ground_layers, ground_mips) =
             Self::ground_texture(device);
-        // Repeat, because the terrain is addressed by world position and a tile
-        // twenty tiles out is at texture coordinate twenty.
+        // Terrain is addressed by world position, but the source photographs
+        // are not stamped as seamless wallpaper. Mirrored repetition makes
+        // each edge reflect into its neighbour instead of exposing a dark
+        // square seam across the fixed board.
         let ground_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("ground sampler"),
-            address_mode_u: wgpu::AddressMode::Repeat,
-            address_mode_v: wgpu::AddressMode::Repeat,
-            address_mode_w: wgpu::AddressMode::Repeat,
+            address_mode_u: wgpu::AddressMode::MirrorRepeat,
+            address_mode_v: wgpu::AddressMode::MirrorRepeat,
+            address_mode_w: wgpu::AddressMode::MirrorRepeat,
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
             mipmap_filter: wgpu::MipmapFilterMode::Linear,
@@ -1762,5 +1767,21 @@ impl Renderer {
             self.targets.as_ref().map(|t| t.h).unwrap_or(0),
             self.pipes.samples,
         )
+    }
+}
+
+#[cfg(test)]
+mod texture_contract_tests {
+    use super::GROUND_BLOB;
+
+    #[test]
+    fn mosswatch_texture_array_matches_the_shader_layer_offset() {
+        assert!(GROUND_BLOB.len() >= 16);
+        let at = |o: usize| u32::from_le_bytes(GROUND_BLOB[o..o + 4].try_into().unwrap());
+        assert_eq!(at(0), 0x5845_5447);
+        assert_eq!(at(4), 2);
+        assert_eq!(at(8), 512);
+        assert_eq!(at(12), 10, "five albedo layers plus five normal layers");
+        assert!(include_str!("shaders/solid.wgsl").contains("const GROUND_LAYERS: i32 = 5;"));
     }
 }

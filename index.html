@@ -13,11 +13,46 @@
   <link rel="icon" href="favicon.svg" type="image/svg+xml" />
 
   <style>
-    html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #05060a; }
+    html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; overscroll-behavior: none; background: #101713; }
     body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
     canvas#gamecanvas {
-      position: absolute; inset: 0; width: 100%; height: 100%;
+      position: fixed; inset: 0; width: 100vw; height: 100dvh;
       display: block; outline: none; touch-action: none;
+    }
+    /* This is deliberately HTML rather than a canvas hit region: browsers only
+       grant fullscreen from a real user gesture. It never changes the canvas
+       size itself; winit receives the ensuing resize and rebuilds targets. */
+    #fullscreen-toggle {
+      position: fixed;
+      z-index: 20;
+      right: max(12px, env(safe-area-inset-right));
+      bottom: max(12px, env(safe-area-inset-bottom));
+      min-width: 44px;
+      min-height: 44px;
+      padding: 8px 12px;
+      border: 1px solid #b28e36;
+      border-radius: 7px;
+      color: #f3e4b0;
+      background: rgba(10, 18, 16, .92);
+      font: 600 12px/1 system-ui, sans-serif;
+      letter-spacing: .04em;
+      touch-action: manipulation;
+    }
+    #fullscreen-toggle:focus-visible { outline: 3px solid #7ec8ef; outline-offset: 2px; }
+    /* The command card owns the lower-right edge while playing. Keep the
+       browser-only fullscreen control in the scene margin instead of covering
+       purchasable tower slots. */
+    html[data-green-td-screen="playing"] #fullscreen-toggle {
+      top: max(52px, env(safe-area-inset-top));
+      bottom: auto;
+    }
+    /* On a narrow touch viewport placement owns the upper scene edge for its
+       short Cancel hint. Fullscreen remains available from the visible Menu
+       overflow, but must not sit on top of that player instruction. */
+    @media (max-width: 620px) {
+      html[data-green-td-screen="playing"][data-green-td-armed="true"] #fullscreen-toggle {
+        display: none;
+      }
     }
     /* Boot splash - removed by the app once the first frame is painted. */
     #boot {
@@ -50,10 +85,34 @@
     }
     window.addEventListener('error', event => showBootFailure(event.message));
     window.addEventListener('unhandledrejection', event => showBootFailure(event.reason));
+    window.addEventListener('DOMContentLoaded', () => {
+      const button = document.getElementById('fullscreen-toggle');
+      const sync = () => {
+        const supported = !!document.documentElement.requestFullscreen;
+        button.hidden = !supported;
+        button.textContent = document.fullscreenElement ? 'Exit full screen' : 'Full screen';
+        button.setAttribute('aria-label', button.textContent);
+      };
+      button.addEventListener('click', async event => {
+        event.preventDefault();
+        event.stopPropagation();
+        try {
+          if (document.fullscreenElement) await document.exitFullscreen();
+          else await document.documentElement.requestFullscreen();
+        } catch (_) {
+          // Normal viewport filling remains the supported fallback when the
+          // browser declines fullscreen (for example embedded webviews).
+          sync();
+        }
+      });
+      document.addEventListener('fullscreenchange', sync);
+      sync();
+    });
   </script>
 </head>
 <body>
   <canvas id="gamecanvas"></canvas>
+  <button id="fullscreen-toggle" type="button" aria-label="Full screen">Full screen</button>
   <div id="boot">
     <h1>Green Circle TD</h1>
     <div class="bar"><i></i></div>
